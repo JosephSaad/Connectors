@@ -1,0 +1,19 @@
+# Build output
+bin/
+obj/
+
+# Runtime artifacts
+logs/
+data/
+*.log
+
+# Local environment / secrets
+.env.local
+.env.local.user
+env/.env.local
+env/.env.local.user
+
+# IDE
+.vs/
+.idea/
+*.user

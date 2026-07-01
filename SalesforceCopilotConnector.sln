@@ -1,0 +1,36 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{F382AB5E-5DA8-43AA-BD42-E20C2AE70D8B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SalesforceCopilotConnector", "src\SalesforceCopilotConnector\SalesforceCopilotConnector.csproj", "{F128B1F7-C45B-4431-A684-CD9C32FAD2B3}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{B7709B74-6351-4CF9-A338-C333F93DA94D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SalesforceCopilotConnector.Tests", "tests\SalesforceCopilotConnector.Tests\SalesforceCopilotConnector.Tests.csproj", "{D524F1AF-DE8C-4B7D-B7E0-322CEEA7C339}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{F128B1F7-C45B-4431-A684-CD9C32FAD2B3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F128B1F7-C45B-4431-A684-CD9C32FAD2B3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F128B1F7-C45B-4431-A684-CD9C32FAD2B3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F128B1F7-C45B-4431-A684-CD9C32FAD2B3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D524F1AF-DE8C-4B7D-B7E0-322CEEA7C339}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D524F1AF-DE8C-4B7D-B7E0-322CEEA7C339}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D524F1AF-DE8C-4B7D-B7E0-322CEEA7C339}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D524F1AF-DE8C-4B7D-B7E0-322CEEA7C339}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{F128B1F7-C45B-4431-A684-CD9C32FAD2B3} = {F382AB5E-5DA8-43AA-BD42-E20C2AE70D8B}
+		{D524F1AF-DE8C-4B7D-B7E0-322CEEA7C339} = {B7709B74-6351-4CF9-A338-C333F93DA94D}
+	EndGlobalSection
+EndGlobal

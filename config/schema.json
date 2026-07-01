@@ -1,0 +1,389 @@
+{
+  "_comment": "v5 schema: SOQL field mapping. Keys = SF field names (drive SELECT). Values = Graph property name OR _sf_<name> placeholder if the field is consumed by a computed property (Address JSON, ContactDetails JSON, unified Status/Source/Number/IsClosed/ClosedDate). _sf_* fields are queried but never set as Graph properties; item_transformer.py reads them from raw_item to build OOB-style computed properties.",
+  "objectList": [
+    {
+      "objectName": "Account",
+      "owdField": "DefaultAccountAccess",
+      "selectedFields": {
+        "Name": "Name",
+        "Description": "_sf_Description",
+        "Type": "Type",
+        "Industry": "Industry",
+        "AnnualRevenue": "AnnualRevenue",
+        "NumberOfEmployees": "NumberOfEmployees",
+        "Rating": "Rating",
+        "Website": "Website",
+        "Ownership": "Ownership",
+        "TickerSymbol": "TickerSymbol",
+        "Sic": "SicCode",
+        "Site": "Site",
+        "LastActivityDate": "LastActivityDate",
+        "AccountNumber": "_sf_AccountNumber",
+        "AccountSource": "_sf_AccountSource",
+        "ParentId": "_sf_ParentId",
+        "Parent.Name": "_sf_ParentName",
+        "Phone": "_sf_Phone",
+        "Fax": "_sf_Fax",
+        "BillingAddress": "_sf_BillingAddress",
+        "ShippingAddress": "_sf_ShippingAddress"
+      },
+      "SfColumnTypes": {
+        "AnnualRevenue": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "NumberOfEmployees": "System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Lead",
+      "owdField": "DefaultLeadAccess",
+      "selectedFields": {
+        "Name": "Name",
+        "Description": "_sf_Description",
+        "Company": "Company",
+        "Industry": "Industry",
+        "AnnualRevenue": "AnnualRevenue",
+        "NumberOfEmployees": "NumberOfEmployees",
+        "Rating": "Rating",
+        "Website": "Website",
+        "Email": "Email",
+        "Title": "JobTitle",
+        "Status": "Status",
+        "LeadSource": "_sf_LeadSource",
+        "IsConverted": "_sf_IsConverted",
+        "ConvertedDate": "ConvertedDate",
+        "ConvertedOpportunityId": "ConvertedOpportunityId",
+        "ConvertedOpportunity.Name": "ConvertedOpportunityName",
+        "ConvertedAccount.Name": "AccountName",
+        "ConvertedAccountId": "AccountId",
+        "ConvertedContactId": "ContactId",
+        "LastActivityDate": "LastActivityDate",
+        "Phone": "_sf_Phone",
+        "MobilePhone": "_sf_MobilePhone",
+        "Fax": "_sf_Fax",
+        "Address": "_sf_LeadAddress"
+      },
+      "SfColumnTypes": {
+        "IsConverted": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "AnnualRevenue": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "NumberOfEmployees": "System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "ConvertedDate": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Contact",
+      "owdField": "DefaultContactAccess",
+      "selectedFields": {
+        "Name": "Name",
+        "Description": "_sf_Description",
+        "Account.Id": "AccountId",
+        "Account.Name": "AccountName",
+        "Email": "Email",
+        "Title": "JobTitle",
+        "Department": "Department",
+        "Birthdate": "Birthdate",
+        "AssistantName": "AssistantName",
+        "ReportsTo.Name": "ReportsTo",
+        "ReportsToId": "ReportsToId",
+        "LastActivityDate": "LastActivityDate",
+        "Phone": "_sf_Phone",
+        "MobilePhone": "_sf_MobilePhone",
+        "HomePhone": "_sf_HomePhone",
+        "OtherPhone": "_sf_OtherPhone",
+        "AssistantPhone": "_sf_AssistantPhone",
+        "Fax": "_sf_Fax",
+        "MailingAddress": "_sf_MailingAddress",
+        "OtherAddress": "_sf_OtherAddress"
+      },
+      "SfColumnTypes": {
+        "Birthdate": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "parentObjectName": "Account",
+      "objectNameAsChild": "Contacts",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Opportunity",
+      "owdField": "DefaultOpportunityAccess",
+      "selectedFields": {
+        "Name": "Name",
+        "Description": "_sf_Description",
+        "Account.Id": "AccountId",
+        "Account.Name": "AccountName",
+        "ContactId": "ContactId",
+        "Contact.Name": "ContactName",
+        "Type": "Type",
+        "Amount": "Amount",
+        "Probability": "Probability",
+        "ExpectedRevenue": "ExpectedRevenue",
+        "StageName": "_sf_StageName",
+        "CloseDate": "_sf_CloseDate",
+        "IsClosed": "_sf_IsClosed",
+        "IsWon": "IsWon",
+        "LeadSource": "_sf_LeadSource",
+        "Fiscal": "Fiscal",
+        "FiscalYear": "FiscalYear",
+        "FiscalQuarter": "FiscalQuarter",
+        "ForecastCategory": "ForecastCategory",
+        "NextStep": "NextStep",
+        "LastActivityDate": "LastActivityDate"
+      },
+      "SfColumnTypes": {
+        "Amount": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "CloseDate": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "Probability": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "ExpectedRevenue": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "FiscalYear": "System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "FiscalQuarter": "System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "IsClosed": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "IsWon": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Case",
+      "owdField": "DefaultCaseAccess",
+      "selectedFields": {
+        "Subject": "Subject",
+        "Description": "_sf_Description",
+        "AccountId": "AccountId",
+        "Account.Name": "AccountName",
+        "ContactId": "ContactId",
+        "Contact.Name": "ContactName",
+        "ContactEmail": "Email",
+        "CaseNumber": "_sf_CaseNumber",
+        "ClosedDate": "_sf_ClosedDate",
+        "IsClosed": "_sf_IsClosed",
+        "Priority": "Priority",
+        "Reason": "Reason",
+        "Status": "Status",
+        "Type": "Type",
+        "Origin": "_sf_Origin",
+        "IsEscalated": "IsEscalated",
+        "SuppliedEmail": "SuppliedEmail",
+        "InternalComments": "_sf_InternalComments",
+        "ParentId": "_sf_ParentId",
+        "Parent.CaseNumber": "_sf_ParentCaseNumber",
+        "Contact.Phone": "_sf_ContactPhone",
+        "Contact.MobilePhone": "_sf_ContactMobile",
+        "PotentialLiability__c": "PotentialLiability",
+        "Product__c": "CaseProduct",
+        "SLAViolation__c": "SLAViolation"
+      },
+      "SfColumnTypes": {
+        "ClosedDate": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "CreatedDate": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "IsClosed": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "IsEscalated": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "PotentialLiability__c": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "SLAViolation__c": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Campaign",
+      "owdField": "DefaultCampaignAccess",
+      "selectedFields": {
+        "Name": "Name",
+        "Description": "_sf_Description",
+        "Type": "Type",
+        "Status": "CampaignStatus",
+        "StartDate": "CampaignStartDate",
+        "ExpectedRevenue": "ExpectedRevenue",
+        "BudgetedCost": "BudgetedCost",
+        "NumberOfOpportunities": "NumberOfOpportunities",
+        "NumberOfWonOpportunities": "NumberOfWonOpportunities"
+      },
+      "SfColumnTypes": {
+        "StartDate": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "EndDate": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "IsActive": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "ExpectedRevenue": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "BudgetedCost": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "ActualCost": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "NumberOfLeads": "System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "NumberOfContacts": "System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "NumberOfOpportunities": "System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "NumberOfWonOpportunities": "System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Task",
+      "selectedFields": {
+        "Subject": "Subject",
+        "Description": "_sf_Description",
+        "Status": "Status",
+        "Priority": "Priority",
+        "ActivityDate": "DueDate",
+        "WhatId": "RelatedToId",
+        "WhoId": "RelatedPersonId"
+      },
+      "SfColumnTypes": {
+        "ActivityDate": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Event",
+      "selectedFields": {
+        "Subject": "Subject",
+        "Description": "_sf_Description",
+        "WhatId": "RelatedToId",
+        "WhoId": "RelatedPersonId",
+        "IsAllDayEvent": "IsAllDayEvent"
+      },
+      "SfColumnTypes": {
+        "StartDateTime": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "EndDateTime": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "IsAllDayEvent": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "CampaignMember",
+      "selectedFields": {
+        "LeadId": "LeadId",
+        "Status": "MemberStatus"
+      },
+      "SfColumnTypes": {
+        "HasResponded": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "FeedItem",
+      "selectedFields": {
+        "Body": "_sf_Description",
+        "Type": "Type",
+        "ParentId": "RelatedToId"
+      },
+      "SfColumnTypes": {},
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Product2",
+      "selectedFields": {
+        "Name": "Name",
+        "Description": "_sf_Description"
+      },
+      "SfColumnTypes": {
+        "IsActive": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "OpportunityLineItem",
+      "selectedFields": {
+        "Quantity": "Quantity",
+        "TotalPrice": "TotalPrice",
+        "OpportunityId": "OpportunityId",
+        "Product2Id": "Product2Id"
+      },
+      "SfColumnTypes": {
+        "Quantity": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "UnitPrice": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "TotalPrice": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "ListPrice": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "CaseComment",
+      "selectedFields": {
+        "CommentBody": "_sf_Description",
+        "ParentId": "RelatedToId",
+        "IsPublished": "IsPublished"
+      },
+      "SfColumnTypes": {
+        "IsPublished": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Order",
+      "selectedFields": {
+        "Status": "Status",
+        "AccountId": "AccountId",
+        "EffectiveDate": "EffectiveDate",
+        "OrderNumber": "_sf_OrderNumber"
+      },
+      "SfColumnTypes": {
+        "EffectiveDate": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "TotalAmount": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "OrderItem",
+      "selectedFields": {
+        "Quantity": "Quantity",
+        "TotalPrice": "TotalPrice",
+        "OrderId": "OrderId",
+        "Product2Id": "Product2Id"
+      },
+      "SfColumnTypes": {
+        "Quantity": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "UnitPrice": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "TotalPrice": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Quote",
+      "selectedFields": {
+        "Status": "Status",
+        "OpportunityId": "OpportunityId",
+        "ExpirationDate": "ExpirationDate",
+        "QuoteNumber": "_sf_QuoteNumber"
+      },
+      "SfColumnTypes": {
+        "Discount": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "ExpirationDate": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "QuoteLineItem",
+      "selectedFields": {
+        "Quantity": "Quantity",
+        "QuoteId": "QuoteId",
+        "Product2Id": "Product2Id"
+      },
+      "SfColumnTypes": {
+        "Quantity": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+        "UnitPrice": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "CollaborationGroup",
+      "selectedFields": {
+        "Name": "Name",
+        "Description": "_sf_Description"
+      },
+      "SfColumnTypes": {
+        "MemberCount": "System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+      },
+      "filterCondition": "",
+      "iconUrl": ""
+    }
+  ]
+}
