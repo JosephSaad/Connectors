@@ -281,6 +281,46 @@ public class CheckpointResumeTests : IDisposable
     }
 
     [Fact]
+    public async Task ServiceStopPreservesCheckpoint()
+    {
+        // New in the C# port: a Windows-service stop (Infrastructure.ServiceStop)
+        // must behave exactly like Ctrl+X — finish the chunk, keep the checkpoint.
+        var cfg = CheckpointSupport.WithDebugObjectType(TestFixtures.TestConfig(), "Account");
+        var connectorId = cfg.Connector.Id;
+
+        var records = MakeRecords("Account", 5);
+        InstallHooks(records);
+        Ingest.GetObjectCountsHook = (_, _) => Task.FromResult(new Dictionary<string, int>());
+
+        var client = new CheckpointSupport.FakeGraphClient
+        {
+            OnBatch = _ =>
+            {
+                // The SCM stop arrives while the Graph push is in flight.
+                Infrastructure.ServiceStop.Request();
+                return new List<JsonObject> { CheckpointSupport.Resp("0", 200) };
+            },
+        };
+
+        try
+        {
+            var stats = await Ingest.IngestContentAsync(cfg, client, since: null, dashboard: null);
+
+            // Account was processed (5 records)
+            Assert.Equal(5, stats.TotalFetched);
+
+            // Checkpoint must still exist (NOT cleared)
+            var cp = SyncState.ReadCheckpoint(connectorId);
+            Assert.NotNull(cp);
+            Assert.Equal(1, cp!["completed"]!["Account"]!.GetValue<int>());
+        }
+        finally
+        {
+            Infrastructure.ServiceStop.Reset();
+        }
+    }
+
+    [Fact]
     public async Task CtrlxPreservesCheckpoint()
     {
         // When Ctrl+X is pressed, the checkpoint must NOT be cleared.

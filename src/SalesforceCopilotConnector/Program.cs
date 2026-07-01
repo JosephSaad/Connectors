@@ -45,13 +45,27 @@
 //     run.py identity-dry-run --save --verbose
 
 using System.Text;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using SalesforceCopilotConnector.Commands;
+using SalesforceCopilotConnector.Infrastructure;
 
 namespace SalesforceCopilotConnector;
 
 public static class Program
 {
     public static async Task<int> Main(string[] args)
+    {
+        // Started by the Windows Service Control Manager → run the requested
+        // command under the SCM-aware host (see Infrastructure/ServiceHost.cs).
+        // Always false when launched from a console or on non-Windows platforms.
+        if (WindowsServiceHelpers.IsWindowsService())
+            return await ServiceHost.RunAsync(args, ExecuteAsync);
+
+        return await ExecuteAsync(args);
+    }
+
+    /// <summary>Parse and run one CLI command; returns the process exit code.</summary>
+    internal static async Task<int> ExecuteAsync(string[] args)
     {
         try
         {

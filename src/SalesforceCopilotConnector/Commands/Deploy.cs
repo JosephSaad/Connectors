@@ -286,7 +286,19 @@ public static class Deploy
         while (true)
         {
             progressLogger.Info($"⏳ Next incremental crawl in {incrHours} hour(s)...");
-            await Task.Delay(TimeSpan.FromSeconds(incrInterval));
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(incrInterval), ServiceStop.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // Service stop while idle between crawls — exit cleanly.
+            }
+            if (ServiceStop.Requested)
+            {
+                progressLogger.Info("🛑 Service stop requested — leaving continuous mode.");
+                return true;
+            }
 
             CommandRegistry.ResetLogging();
 

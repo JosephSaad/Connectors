@@ -1056,8 +1056,8 @@ public static class Ingest
                         $"SALESFORCE RECORD — {objectType}/{debugItemId}\n{records[0].ToJsonString(IndentedJson)}");
                 }
 
-                // ── Graceful stop ─────────────────────────────────────────────
-                if (dashboard != null && dashboard.StopRequested)
+                // ── Graceful stop (dashboard Ctrl+X or service stop) ──────────
+                if ((dashboard != null && dashboard.StopRequested) || ServiceStop.Requested)
                 {
                     if (pendingGraphFuture != null)
                     {
@@ -1537,7 +1537,7 @@ public static class Ingest
                 $"deleted={stats.DeletedCount} + skipped={stats.SkippedCount})");
         }
 
-        var wasStopped = dashboard != null && dashboard.StopRequested;
+        var wasStopped = (dashboard != null && dashboard.StopRequested) || ServiceStop.Requested;
         if (!wasStopped)
             SyncState.ClearCheckpoint(connectorId);
         if (stats.FailedCount > 0 && File.Exists(dlPath))

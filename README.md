@@ -50,6 +50,39 @@ dotnet run --project src/SalesforceCopilotConnector -- identity-dry-run --save -
 (Help text intentionally still reads `run.py` — the CLI parser tests assert
 byte-identical output with the Python original.)
 
+## Running as a Windows service
+
+The connector is SCM-aware: when the process is started by the Windows Service
+Control Manager it automatically runs under a hosted-service lifetime (no extra
+flags — the service's binary path just carries the normal CLI arguments).
+Stopping the service is graceful and equivalent to the dashboard's Ctrl+X: the
+in-flight chunk finishes, the pending Graph batch is flushed, and the checkpoint
+is saved, so the next start resumes where it left off. Crash recovery is the
+same story — state is checkpointed on disk.
+
+Deploy:
+
+```powershell
+# 1. Publish
+dotnet publish src/SalesforceCopilotConnector -c Release -r win-x64 -o C:\SFConnector
+
+# 2. Lay out runtime files next to the exe
+Copy-Item -Recurse config C:\SFConnector\config
+Copy-Item -Recurse env    C:\SFConnector\env      # .env.local + .env.local.user
+
+# 3. Install + start (elevated PowerShell)
+.\scripts\install-windows-service.ps1 -InstallDir C:\SFConnector
+Start-Service SalesforceCopilotConnector
+```
+
+The script registers the service (Automatic start, restart-on-crash) with
+`full-deployment --continuous --full-crawl-hours 24 --incremental-hours 4` by
+default — pass `-Arguments` to change the command/schedule, `-ServiceName` to
+rename, `-Uninstall` to remove. Relative paths (`config/`, `env/`, `logs/`,
+`data/`) resolve against `SFCONNECTOR_HOME`, which the script points at the
+install directory. Logs stay in `SFCONNECTOR_HOME\logs\` — service mode
+suppresses nothing; it writes the same log files as console mode.
+
 ## Tests
 
 ```bash
