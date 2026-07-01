@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="SalesforceCopilotConnector.Tests" />
+    <InternalsVisibleTo Include="StressHarness" />
   </ItemGroup>
 
   <ItemGroup>

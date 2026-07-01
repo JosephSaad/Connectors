@@ -39,6 +39,11 @@ public static class SyncState
 
     // Protects read-modify-write of checkpoint files from concurrent workers
     private static readonly object CheckpointLock = new();
+    // Serializes dead-letter appends. Up to GraphConcurrentBatches × workers
+    // tasks append to the same failed_records_<connector>.jsonl; unsynchronized
+    // StreamWriter appends interleave partial lines (CPython's open(path, "a")
+    // got O_APPEND atomicity per flush; .NET does not).
+    private static readonly object DeadLetterLock = new();
 
     // ── Delta sync timestamp ─────────────────────────────────────────────────
 
@@ -228,26 +233,29 @@ public static class SyncState
             {
                 Directory.CreateDirectory(parent);
             }
-            using var fh = new StreamWriter(filePath, append: true, Utf8NoBom);
-            foreach (var (itemId, itemError) in failures)
+            lock (DeadLetterLock)
             {
-                var record = new JsonObject
+                using var fh = new StreamWriter(filePath, append: true, Utf8NoBom);
+                foreach (var (itemId, itemError) in failures)
                 {
-                    ["item_id"] = itemId,
-                    ["object_type"] = objectType,
-                    ["error"] = itemError,
-                    ["timestamp"] = timestamp,
-                };
-                if (requestBodies.TryGetValue(itemId, out var requestBody))
-                {
-                    record["request_body"] = requestBody?.DeepClone();
+                    var record = new JsonObject
+                    {
+                        ["item_id"] = itemId,
+                        ["object_type"] = objectType,
+                        ["error"] = itemError,
+                        ["timestamp"] = timestamp,
+                    };
+                    if (requestBodies.TryGetValue(itemId, out var requestBody))
+                    {
+                        record["request_body"] = requestBody?.DeepClone();
+                    }
+                    if (responseBodies.TryGetValue(itemId, out var responseBody))
+                    {
+                        record["response_body"] = responseBody?.DeepClone();
+                    }
+                    var line = PyJson.Dumps(record, indent: null);
+                    fh.Write(line + "\n");
                 }
-                if (responseBodies.TryGetValue(itemId, out var responseBody))
-                {
-                    record["response_body"] = responseBody?.DeepClone();
-                }
-                var line = PyJson.Dumps(record, indent: null);
-                fh.Write(line + "\n");
             }
         }
         catch (Exception exc) when (exc is IOException or UnauthorizedAccessException)
