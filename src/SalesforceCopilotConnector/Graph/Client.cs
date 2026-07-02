@@ -316,6 +316,8 @@ public class GraphClient
                 if (RetryableStatusCodes.Contains(statusCode) && attempt < _maxRetries)
                 {
                     double wait;
+                    // Jitter (GRAPH_RETRY_JITTER=true, off by default) applies only to
+                    // COMPUTED backoff — a server-provided Retry-After is honoured exactly.
                     var retryAfter = response.Headers.TryGetValues("Retry-After", out var retryAfterValues)
                         ? retryAfterValues.FirstOrDefault()
                         : null;
@@ -323,12 +325,23 @@ public class GraphClient
                     {
                         if (!double.TryParse(retryAfter, NumberStyles.Float, CultureInfo.InvariantCulture, out wait))
                         {
-                            wait = _retryBackoffBase * Math.Pow(2, attempt);
+                            wait = RetryDelay.Jitter(_retryBackoffBase * Math.Pow(2, attempt));
                         }
                     }
                     else
                     {
-                        wait = _retryBackoffBase * Math.Pow(2, attempt);
+                        wait = RetryDelay.Jitter(_retryBackoffBase * Math.Pow(2, attempt));
+                    }
+                    // Hard cap (mirrors the $batch retry ladder): never wait more
+                    // than 60s regardless of Retry-After or configured backoff.
+                    const int maxRetryWait = 60;
+                    if (wait > maxRetryWait)
+                    {
+                        Logger.Warning(string.Format(
+                            CultureInfo.InvariantCulture,
+                            "Retry-After of {0:F0}s exceeds cap; clamping to {1}s",
+                            wait, maxRetryWait));
+                        wait = maxRetryWait;
                     }
                     attempt++;
                     Logger.Warning(

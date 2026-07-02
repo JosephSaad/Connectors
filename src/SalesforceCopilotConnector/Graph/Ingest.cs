@@ -145,6 +145,10 @@ public static class Ingest
         (instanceUrl, schema, tenantId) => new SalesforceItemTransformer(instanceUrl, schema, tenantId: tenantId);
     internal static Func<AppConfig, DateTime?, Task<Dictionary<string, int>>> GetObjectCountsHook =
         ApiClient.GetObjectCountsAsync;
+    // HA seam (docs/SQL_CONTRACT.md): when non-null, the per-object worker loop
+    // pulls object types from the returned work source (coordinator claims)
+    // instead of the static schema list. Null (default) → behavior unchanged.
+    internal static Func<AppConfig, List<string>, Task<IObjectWorkSource>>? ObjectWorkSourceFactory;
 
     // Track sample items for detailed logging
     private static readonly HashSet<string> SampleItemsLoggedByType = new();
@@ -672,7 +676,9 @@ public static class Ingest
             {
                 if (attempt > 0)
                 {
-                    var wait = backoffBase * Math.Pow(2, attempt - 1);
+                    // Jitter (GRAPH_RETRY_JITTER=true, off by default) applies only to the
+                    // COMPUTED backoff — the server's Retry-After below is honoured exactly.
+                    var wait = RetryDelay.Jitter(backoffBase * Math.Pow(2, attempt - 1));
                     string? retryAfter = null;
                     // Use Retry-After from first 429 response if available
                     foreach (var r in responses)
@@ -1430,6 +1436,20 @@ public static class Ingest
 
         var totalIngested = 0;
 
+        // ── HA seam: claim-based work source (null → static schema list) ────────
+        var workSource = ObjectWorkSourceFactory != null
+            ? await ObjectWorkSourceFactory(config, activeTypes)
+            : null;
+
+        if (workSource != null)
+        {
+            totalIngested = await RunClaimedObjectWorkersAsync(
+                workSource, effectiveWorkers, config, client, transformer,
+                legacyResolver, newAclResolver, newAclMapper, groupAclBuilder,
+                stats, concurrency, since, checkpoint, sinceIso, dlPath,
+                dashboard, statsLock);
+        }
+        else
         using (var pool = new SemaphoreSlim(effectiveWorkers, effectiveWorkers))
         {
             var futures = new Dictionary<Task<int>, string>();
@@ -1538,12 +1558,130 @@ public static class Ingest
         }
 
         var wasStopped = (dashboard != null && dashboard.StopRequested) || ServiceStop.Requested;
-        if (!wasStopped)
+        // In claim-based (HA) mode the checkpoint is shared by all nodes — only
+        // the node that closes the crawl clears it (the commands do this after
+        // CloseCrawlIfComplete). Default mode clears it here exactly as before.
+        if (!wasStopped && workSource == null)
             SyncState.ClearCheckpoint(connectorId);
         if (stats.FailedCount > 0 && File.Exists(dlPath))
             Logger.Info($"Failed items written to dead-letter file: {dlPath}");
 
         return stats;
+    }
+
+    /// <summary>
+    /// HA mode worker loop: each worker claims one object type at a time from the
+    /// <see cref="IObjectWorkSource"/>, heartbeats while working it, and completes
+    /// the claim when the object finishes (status ``failed`` on exception). The
+    /// per-object ingestion itself is the exact same
+    /// <see cref="IngestSingleObjectTypeAsync"/> path as single-node mode.
+    /// </summary>
+    private static async Task<int> RunClaimedObjectWorkersAsync(
+        IObjectWorkSource workSource,
+        int workerCount,
+        AppConfig config,
+        GraphClient client,
+        SalesforceItemTransformer transformer,
+        AclResolver? legacyResolver,
+        NewAclResolver? newAclResolver,
+        PrincipalMapper? newAclMapper,
+        GroupAclBuilder? groupAclBuilder,
+        IngestionStats stats,
+        AdaptiveConcurrency concurrency,
+        DateTime? since,
+        JsonObject? checkpoint,
+        string? sinceIso,
+        string? dlPath,
+        IngestionDashboard? dashboard,
+        object statsLock)
+    {
+        var totalIngested = 0;
+        var totalLock = new object();
+
+        async Task WorkerLoopAsync()
+        {
+            while (!ServiceStop.Requested && !(dashboard?.StopRequested ?? false))
+            {
+                var objType = await workSource.ClaimNextAsync();
+                if (objType == null)
+                    break;
+
+                using var heartbeat = workSource.BeginHeartbeat(objType);
+                var failed = false;
+                var count = 0;
+                try
+                {
+                    count = await IngestSingleObjectTypeAsync(
+                        objType,
+                        config,
+                        client,
+                        transformer,
+                        legacyResolver,
+                        newAclResolver,
+                        newAclMapper,
+                        groupAclBuilder,
+                        stats,
+                        concurrency,
+                        since,
+                        checkpoint,
+                        sinceIso,
+                        dlPath,
+                        dashboard,
+                        statsLock);
+                }
+                catch (_SkipObjectError exc)
+                {
+                    Logger.Warning($"[{objType}] skipped — {exc.Message}");
+                }
+                catch (Exception exc)
+                {
+                    failed = true;
+                    Logger.Error($"[{objType}] worker failed with an exception", exc);
+                    lock (statsLock)
+                    {
+                        var objFetched = stats.ObjectTypeCounts.GetValueOrDefault(objType, 0);
+                        if (objFetched > 0)
+                        {
+                            stats.FailedCount += objFetched;
+                            Logger.Error(
+                                $"[{objType}] Worker crash — {objFetched} fetched record(s) for this object type " +
+                                "may not have been ingested");
+                        }
+                    }
+                    if (!string.IsNullOrEmpty(dlPath))
+                    {
+                        SyncState.AppendFailedRecords(
+                            dlPath,
+                            new List<(string, string)>
+                            {
+                                ("WORKER_CRASH", $"[Worker] {objType} worker thread failed: {exc.Message}"),
+                            },
+                            objType);
+                    }
+                }
+
+                if (!failed && ((dashboard != null && dashboard.StopRequested) || ServiceStop.Requested))
+                {
+                    // Graceful stop mid-object: leave the claim held so another node
+                    // reclaims it after heartbeat expiry and resumes from the checkpoint.
+                    break;
+                }
+
+                lock (totalLock)
+                {
+                    totalIngested += count;
+                }
+                if (!failed)
+                    Logger.Info($"[{objType}] completed — {count} items");
+                await workSource.CompleteAsync(objType, !failed);
+            }
+        }
+
+        var workers = new List<Task>();
+        for (var w = 0; w < Math.Max(1, workerCount); w++)
+            workers.Add(Task.Run(WorkerLoopAsync));
+        await Task.WhenAll(workers);
+        return totalIngested;
     }
 
     /// <summary>Format a datetime the way Python's datetime.isoformat() renders it.</summary>

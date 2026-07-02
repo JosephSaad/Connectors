@@ -85,6 +85,8 @@ public class SettingsTests
         "ACL_MAX_PARENT_DEPTH",
         "GRAPH_API_VERSION",
         "USE_ENTITY_DEFINITION_OWD",
+        "GRAPH_CONCURRENT_BATCHES",
+        "GRAPH_BATCH_WORKERS",
     };
 
     /// <summary>
@@ -179,5 +181,42 @@ public class SettingsTests
 
         var config = Settings.LoadConfig();
         Assert.True(config.UseEntityDefinitionOwd);
+    }
+
+    [Fact]
+    public void LoadConfigGraphBatchWorkersAliasesConcurrentBatches()
+    {
+        // GRAPH_BATCH_WORKERS (the documented operator knob) feeds
+        // GraphConcurrentBatches when GRAPH_CONCURRENT_BATCHES is not set.
+        var tmpPath = Directory.CreateTempSubdirectory("settings_tests_").FullName;
+        var localEnv = Path.Combine(tmpPath, ".env.local");
+        File.WriteAllText(
+            localEnv,
+            string.Join("\n", BaseEnvFileLines.Append("GRAPH_BATCH_WORKERS=5")) + "\n");
+
+        using var scope = new ConfigEnvScope();
+        scope.RedirectLocalEnvFiles(tmpPath);
+
+        var config = Settings.LoadConfig();
+        Assert.Equal(5, config.Tuning.GraphConcurrentBatches);
+    }
+
+    [Fact]
+    public void LoadConfigGraphConcurrentBatchesWinsOverAlias()
+    {
+        // Explicit GRAPH_CONCURRENT_BATCHES takes precedence; unset both → default 8.
+        var tmpPath = Directory.CreateTempSubdirectory("settings_tests_").FullName;
+        var localEnv = Path.Combine(tmpPath, ".env.local");
+        File.WriteAllText(
+            localEnv,
+            string.Join("\n", BaseEnvFileLines
+                .Append("GRAPH_CONCURRENT_BATCHES=6")
+                .Append("GRAPH_BATCH_WORKERS=5")) + "\n");
+
+        using var scope = new ConfigEnvScope();
+        scope.RedirectLocalEnvFiles(tmpPath);
+
+        var config = Settings.LoadConfig();
+        Assert.Equal(6, config.Tuning.GraphConcurrentBatches);
     }
 }

@@ -33,7 +33,7 @@ public static class IdentityDryRun
         var logger = Logging.GetLogger("identity_dry_run");
         var progress = Logging.GetLogger("progress");
         var startTime = CommandRegistry.MonotonicSeconds();
-        IdentityStore? store = null;
+        IIdentityStore? store = null;
 
         try
         {

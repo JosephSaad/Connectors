@@ -37,6 +37,40 @@ public static class SyncState
     /// <summary>State directory (Python: ``LOGS_DIR``). Settable so tests can redirect state files.</summary>
     public static string LogsDir { get; set; } = Path.Combine(Directory.GetCurrentDirectory(), "logs");
 
+    // ── SQL Server provider routing (docs/SQL_CONTRACT.md) ───────────────────
+    // When USE_SQL_SERVER=true and SQL_CONNECTION_STRING is set, every public
+    // method below routes to SqlStateStore (stored procedures); otherwise the
+    // original file implementation runs unchanged. The env check is cached but
+    // resettable so tests can flip providers.
+
+    private static bool? _useSqlServer;
+
+    /// <summary>True when the SQL Server state backend is active.</summary>
+    internal static bool UseSqlServer
+    {
+        get
+        {
+            _useSqlServer ??=
+                string.Equals(
+                    Environment.GetEnvironmentVariable("USE_SQL_SERVER"),
+                    "true",
+                    StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SQL_CONNECTION_STRING"));
+            return _useSqlServer.Value;
+        }
+    }
+
+    /// <summary>Test seam: re-read USE_SQL_SERVER / SQL_CONNECTION_STRING on next use.</summary>
+    internal static void ResetProviderCache() => _useSqlServer = null;
+
+    /// <summary>Recover the connector id from a ``failed_records_&lt;id&gt;.jsonl`` path.</summary>
+    private static string ConnectorIdFromDeadLetterPath(string filePath)
+    {
+        var name = Path.GetFileNameWithoutExtension(filePath);
+        const string prefix = "failed_records_";
+        return name.StartsWith(prefix, StringComparison.Ordinal) ? name[prefix.Length..] : name;
+    }
+
     // Protects read-modify-write of checkpoint files from concurrent workers
     private static readonly object CheckpointLock = new();
     // Serializes dead-letter appends. Up to GraphConcurrentBatches × workers
@@ -52,6 +86,10 @@ public static class SyncState
     /// <summary>Return the last successful sync timestamp for <paramref name="connectorId"/>, or <c>null</c>.</summary>
     public static DateTime? ReadLastSync(string connectorId)
     {
+        if (UseSqlServer)
+        {
+            return SqlStateStore.ReadLastSync(connectorId);
+        }
         try
         {
             var data = JsonNode.Parse(File.ReadAllText(SyncStateFile, Utf8NoBom))!.AsObject();
@@ -76,6 +114,12 @@ public static class SyncState
     /// <summary>Persist <paramref name="timestamp"/> as the last successful sync time for <paramref name="connectorId"/>.</summary>
     public static void WriteLastSync(string connectorId, DateTime timestamp)
     {
+        if (UseSqlServer)
+        {
+            SqlStateStore.WriteLastSync(connectorId, timestamp);
+            Logger.Info($"Saved last sync timestamp: {IsoFormat(timestamp)}");
+            return;
+        }
         var data = new JsonObject();
         try
         {
@@ -108,6 +152,10 @@ public static class SyncState
     /// </summary>
     public static JsonObject? ReadCheckpoint(string connectorId)
     {
+        if (UseSqlServer)
+        {
+            return SqlStateStore.ReadCheckpoint(connectorId);
+        }
         var path = CheckpointPath(connectorId);
         try
         {
@@ -137,6 +185,11 @@ public static class SyncState
         string objectType,
         int chunkIndex)
     {
+        if (UseSqlServer)
+        {
+            SqlStateStore.WriteCheckpoint(connectorId, sinceIso, objectType, chunkIndex);
+            return;
+        }
         var path = CheckpointPath(connectorId);
         lock (CheckpointLock)
         {
@@ -179,6 +232,11 @@ public static class SyncState
     /// <summary>Remove the checkpoint file for <paramref name="connectorId"/>.</summary>
     public static void ClearCheckpoint(string connectorId)
     {
+        if (UseSqlServer)
+        {
+            SqlStateStore.ClearCheckpoint(connectorId);
+            return;
+        }
         var path = CheckpointPath(connectorId);
         try
         {
@@ -221,6 +279,16 @@ public static class SyncState
     {
         if (failures.Count == 0)
         {
+            return;
+        }
+        if (UseSqlServer)
+        {
+            SqlStateStore.AppendDeadLetter(
+                ConnectorIdFromDeadLetterPath(filePath),
+                failures,
+                objectType,
+                requestBodies,
+                responseBodies);
             return;
         }
         requestBodies ??= new Dictionary<string, JsonNode?>();
@@ -296,6 +364,10 @@ public static class SyncState
     /// <summary>Read all entries from the dead-letter file for <paramref name="connectorId"/>.</summary>
     public static List<JsonObject> ReadFailedRecords(string connectorId)
     {
+        if (UseSqlServer)
+        {
+            return SqlStateStore.ReadDeadLetter(connectorId);
+        }
         var path = FailedRecordsPath(connectorId);
         var entries = new List<JsonObject>();
         try
@@ -319,6 +391,11 @@ public static class SyncState
     /// <summary>Remove the dead-letter file for <paramref name="connectorId"/>.</summary>
     public static void ClearFailedRecords(string connectorId)
     {
+        if (UseSqlServer)
+        {
+            SqlStateStore.ClearDeadLetter(connectorId);
+            return;
+        }
         var path = FailedRecordsPath(connectorId);
         try
         {

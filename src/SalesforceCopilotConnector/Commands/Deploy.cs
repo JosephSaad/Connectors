@@ -56,8 +56,11 @@ public static class Deploy
     ///
     /// <paramref name="since"/>: if set, only fetch SF records modified after this time
     /// (incremental). Null means full crawl.
+    /// <paramref name="haCycleDueUtc"/>: HA mode only — the time this scheduled cycle
+    /// became due; used by OpenOrJoinCrawl to dedupe cycles across nodes.
     /// </summary>
-    internal static async Task<bool> RunFullDeploymentAsync(ParsedArgs args, DateTime? since = null)
+    internal static async Task<bool> RunFullDeploymentAsync(
+        ParsedArgs args, DateTime? since = null, DateTime? haCycleDueUtc = null)
     {
         var syncType = since != null ? "incremental" : "full";
 
@@ -82,7 +85,9 @@ public static class Deploy
             config = LoadConfigHook();
 
             // Full or incremental based on 'since' parameter
-            if (since == null)
+            // (in HA mode only the node that CREATES the crawl clears the shared
+            // checkpoint — see the OpenOrJoinCrawl block below)
+            if (since == null && !HaCoordinator.IsHaMode)
                 ClearCheckpointHook(config.Connector.Id);
 
             progress.Info($"Starting {syncType} deployment for connector '{config.Connector.Id}'...");
@@ -143,6 +148,45 @@ public static class Deploy
             logger.Info("✓ Connection is ready for ingestion");
             progress.Info("  Connection ready");
 
+            // ── HA mode: open or join the coordinated crawl for this cycle ────
+            Guid? haCrawlId = null;
+            if (HaCoordinator.IsHaMode)
+            {
+                var haCrawl = await HaCoordinator.OpenOrJoinCrawlAsync(
+                    config.Connector.Id,
+                    crawlKind: syncType,
+                    sinceIso: since != null ? CommandRegistry.PyIsoFormat(since.Value) : null,
+                    objectTypes: ApiClient.ObjectConfigs.Select(c => c.ObjectType).ToList(),
+                    cycleDueUtc: haCycleDueUtc);
+                if (haCrawl == null)
+                {
+                    progress.Info("  [HA] Cycle already completed by another node — skipping this run.");
+                    logger.Info("[HA] Skipping cycle — last sync in SQL is fresher than this node's due time.");
+                    return true;
+                }
+                haCrawlId = haCrawl.CrawlId;
+                if (haCrawl.Created)
+                {
+                    logger.Info($"[HA] Opened crawl {haCrawl.CrawlId} (kind={syncType}, node={HaCoordinator.NodeId})");
+                    // The crawl creator resets the shared checkpoint for a full crawl.
+                    if (since == null)
+                        ClearCheckpointHook(config.Connector.Id);
+                }
+                else
+                {
+                    logger.Info($"[HA] Joined crawl {haCrawl.CrawlId} (node={HaCoordinator.NodeId})");
+                    // Adopt the crawl's incremental boundary so checkpoints line up across nodes.
+                    if (haCrawl.HasSinceIso)
+                    {
+                        since = string.IsNullOrEmpty(haCrawl.SinceIso)
+                            ? null
+                            : SyncState.ParseIsoFormat(haCrawl.SinceIso!);
+                    }
+                }
+                progress.Info(
+                    $"  [HA] {(haCrawl.Created ? "Opened" : "Joined")} crawl {haCrawl.CrawlId} as node '{HaCoordinator.NodeId}'");
+            }
+
             logger.Info("\n" + new string('=', 70));
             logger.Info("STEP 6: Ingest Items with ACLs");
             logger.Info(new string('=', 70));
@@ -181,6 +225,7 @@ public static class Deploy
                 dashboard.Start();
             }
 
+            var syncStart = DateTime.UtcNow;
             try
             {
                 // Identity Crawl: only on full sync, not incremental
@@ -194,12 +239,21 @@ public static class Deploy
                         $"deleted={identityStats.GroupsDeleted} unchanged={identityStats.GroupsUnchanged}");
                 }
 
-                var syncStart = DateTime.UtcNow;  // noqa: F841 — used by record_content_crawl via session
+                syncStart = DateTime.UtcNow;  // noqa: F841 — used by record_content_crawl via session
                 _ = syncStart;
+                if (haCrawlId != null)
+                {
+                    // Workers pull object types from coordinator claims for this crawl.
+                    var crawlId = haCrawlId.Value;
+                    Ingest.ObjectWorkSourceFactory =
+                        (_, _) => Task.FromResult(HaCoordinator.CreateWorkSource(crawlId));
+                }
                 stats = await IngestContentHook(config, client, since, dashboard);
             }
             finally
             {
+                if (haCrawlId != null)
+                    Ingest.ObjectWorkSourceFactory = null;
                 if (dashboard != null)
                 {
                     dashboard.Stop();
@@ -209,14 +263,37 @@ public static class Deploy
 
             logger.Info($"Ingestion completed ({syncType})");
 
-            // Record content crawl stats in SQLite
-            try
+            // HA mode: only the node whose CloseCrawlIfComplete call performed the
+            // close records the crawl + sync timestamp; every other node skips it.
+            var haClosedCrawl = true;
+            if (haCrawlId != null)
             {
-                RecordContentCrawlHook(config, stats, syncType);
+                haClosedCrawl = await HaCoordinator.CloseCrawlIfCompleteAsync(haCrawlId.Value);
+                if (haClosedCrawl)
+                {
+                    logger.Info($"[HA] Crawl {haCrawlId} complete — this node closes it and records sync state.");
+                    SyncState.ClearCheckpoint(config.Connector.Id);
+                    SyncState.WriteLastSync(config.Connector.Id, syncStart);
+                }
+                else
+                {
+                    logger.Info(
+                        $"[HA] Crawl {haCrawlId} still in progress on other node(s) — " +
+                        "sync state will be recorded by the closing node.");
+                }
             }
-            catch (Exception recErr)
+
+            // Record content crawl stats in SQLite
+            if (haClosedCrawl)
             {
-                logger.Warning($"Could not record content crawl stats: {recErr.Message}");
+                try
+                {
+                    RecordContentCrawlHook(config, stats, syncType);
+                }
+                catch (Exception recErr)
+                {
+                    logger.Warning($"Could not record content crawl stats: {recErr.Message}");
+                }
             }
 
             var elapsed = CommandRegistry.MonotonicSeconds() - startTime;
@@ -247,6 +324,15 @@ public static class Deploy
     /// </summary>
     public static async Task<bool?> CmdFullDeploymentAsync(ParsedArgs args)
     {
+        // HA mode requires the SQL Server backend (shared state + coordination).
+        if (HaCoordinator.IsHaMode && !SyncState.UseSqlServer)
+        {
+            Logging.GetLogger("progress").Error(
+                "❌ HA_MODE=true requires USE_SQL_SERVER=true and SQL_CONNECTION_STRING " +
+                "(point it at the AG listener). Aborting.");
+            return false;
+        }
+
         DateTime? since = null;
         if (args.GetBool("incremental"))
         {
@@ -302,11 +388,15 @@ public static class Deploy
 
             CommandRegistry.ResetLogging();
 
+            // HA: the moment this node's cycle became due — OpenOrJoinCrawl uses it
+            // to skip cycles another node already completed.
+            var cycleDue = DateTime.UtcNow;
+
             var elapsedSinceFull = CommandRegistry.MonotonicSeconds() - lastFullTime;
             if (elapsedSinceFull >= fullInterval)
             {
                 progressLogger.Info("🔄 Starting scheduled FULL crawl...");
-                await RunFullDeploymentAsync(args, since: null);
+                await RunFullDeploymentAsync(args, since: null, haCycleDueUtc: cycleDue);
                 lastFullTime = CommandRegistry.MonotonicSeconds();
             }
             else
@@ -321,7 +411,7 @@ public static class Deploy
                 catch
                 {
                 }
-                await RunFullDeploymentAsync(args, since: since);
+                await RunFullDeploymentAsync(args, since: since, haCycleDueUtc: cycleDue);
             }
         }
     }

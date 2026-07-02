@@ -316,7 +316,13 @@ public static class Settings
             AclMaxParentDepth = RequireIntEnv("ACL_MAX_PARENT_DEPTH"),
             IngestChunkSize = IntEnv("INGEST_CHUNK_SIZE", "2000"),  // 2000 matches SF page size = 1 page per ingest cycle
             IngestGraphBatchSize = Math.Min(IntEnv("INGEST_GRAPH_BATCH_SIZE", "20"), 20),
-            GraphConcurrentBatches = Math.Max(1, IntEnv("GRAPH_CONCURRENT_BATCHES", "8")),
+            // GRAPH_BATCH_WORKERS is the knob documented in env/README.md, docs/HA.md and
+            // docs/CAPACITY.md; GRAPH_CONCURRENT_BATCHES is the name the (Python) code has
+            // always read. Accept both: explicit GRAPH_CONCURRENT_BATCHES wins, then
+            // GRAPH_BATCH_WORKERS, then the default (8) — unchanged when neither is set.
+            GraphConcurrentBatches = Math.Max(1, IntEnv(
+                "GRAPH_CONCURRENT_BATCHES",
+                Environment.GetEnvironmentVariable("GRAPH_BATCH_WORKERS") ?? "8")),
             ParallelObjectWorkers = Math.Max(1, IntEnv("PARALLEL_OBJECT_WORKERS", "3")),
         };
 

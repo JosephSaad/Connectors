@@ -47,8 +47,11 @@ public static class IngestCommand
     ///
     /// <paramref name="since"/>: if set, only fetch SF records modified after this time
     /// (incremental). Null means full crawl.
+    /// <paramref name="haCycleDueUtc"/>: HA mode only — the time this scheduled cycle
+    /// became due; used by OpenOrJoinCrawl to dedupe cycles across nodes.
     /// </summary>
-    private static async Task<bool> RunIngestAsync(ParsedArgs args, DateTime? since = null)
+    private static async Task<bool> RunIngestAsync(
+        ParsedArgs args, DateTime? since = null, DateTime? haCycleDueUtc = null)
     {
         var syncType = since != null ? "incremental" : "full";
 
@@ -72,7 +75,9 @@ public static class IngestCommand
             config = LoadConfigHook();
 
             // Full or incremental based on 'since' parameter
-            if (since == null)
+            // (in HA mode only the node that CREATES the crawl clears the shared
+            // state — see the OpenOrJoinCrawl block below)
+            if (since == null && !HaCoordinator.IsHaMode)
             {
                 SyncState.ClearFailedRecords(config.Connector.Id);
                 SyncState.ClearCheckpoint(config.Connector.Id);
@@ -106,6 +111,48 @@ public static class IngestCommand
             }
             logger.Info($"✓ Connection is ready: {config.Connector.Id}");
             progress.Info($"  Connection '{config.Connector.Id}' verified (existing)");
+
+            // ── HA mode: open or join the coordinated crawl for this cycle ────
+            Guid? haCrawlId = null;
+            if (HaCoordinator.IsHaMode)
+            {
+                var haCrawl = await HaCoordinator.OpenOrJoinCrawlAsync(
+                    config.Connector.Id,
+                    crawlKind: syncType,
+                    sinceIso: since != null ? CommandRegistry.PyIsoFormat(since.Value) : null,
+                    objectTypes: ApiClient.ObjectConfigs.Select(c => c.ObjectType).ToList(),
+                    cycleDueUtc: haCycleDueUtc);
+                if (haCrawl == null)
+                {
+                    progress.Info("  [HA] Cycle already completed by another node — skipping this run.");
+                    logger.Info("[HA] Skipping cycle — last sync in SQL is fresher than this node's due time.");
+                    return true;
+                }
+                haCrawlId = haCrawl.CrawlId;
+                if (haCrawl.Created)
+                {
+                    logger.Info($"[HA] Opened crawl {haCrawl.CrawlId} (kind={syncType}, node={HaCoordinator.NodeId})");
+                    // The crawl creator resets the shared state for a full crawl.
+                    if (since == null)
+                    {
+                        SyncState.ClearFailedRecords(config.Connector.Id);
+                        SyncState.ClearCheckpoint(config.Connector.Id);
+                    }
+                }
+                else
+                {
+                    logger.Info($"[HA] Joined crawl {haCrawl.CrawlId} (node={HaCoordinator.NodeId})");
+                    // Adopt the crawl's incremental boundary so checkpoints line up across nodes.
+                    if (haCrawl.HasSinceIso)
+                    {
+                        since = string.IsNullOrEmpty(haCrawl.SinceIso)
+                            ? null
+                            : SyncState.ParseIsoFormat(haCrawl.SinceIso!);
+                    }
+                }
+                progress.Info(
+                    $"  [HA] {(haCrawl.Created ? "Opened" : "Joined")} crawl {haCrawl.CrawlId} as node '{HaCoordinator.NodeId}'");
+            }
 
             logger.Info("\n" + new string('=', 70));
             logger.Info("STEP 3: Ingest Items with ACLs");
@@ -145,6 +192,7 @@ public static class IngestCommand
                 dashboard.Start();
             }
 
+            var syncStart = DateTime.UtcNow;
             try
             {
                 // Identity Crawl: only on full sync, not incremental
@@ -157,10 +205,20 @@ public static class IngestCommand
                         $"deleted={identityStats.GroupsDeleted} unchanged={identityStats.GroupsUnchanged}");
                 }
 
+                syncStart = DateTime.UtcNow;
+                if (haCrawlId != null)
+                {
+                    // Workers pull object types from coordinator claims for this crawl.
+                    var crawlId = haCrawlId.Value;
+                    Ingest.ObjectWorkSourceFactory =
+                        (_, _) => Task.FromResult(HaCoordinator.CreateWorkSource(crawlId));
+                }
                 stats = await IngestContentHook(config, client, since, dashboard);
             }
             finally
             {
+                if (haCrawlId != null)
+                    Ingest.ObjectWorkSourceFactory = null;
                 if (dashboard != null)
                 {
                     dashboard.Stop();
@@ -170,14 +228,37 @@ public static class IngestCommand
 
             logger.Info($"Ingestion completed ({syncType})");
 
-            // Record content crawl stats in SQLite
-            try
+            // HA mode: only the node whose CloseCrawlIfComplete call performed the
+            // close records the crawl + sync timestamp; every other node skips it.
+            var haClosedCrawl = true;
+            if (haCrawlId != null)
             {
-                Identity.RecordContentCrawl(config, stats, syncType: syncType);
+                haClosedCrawl = await HaCoordinator.CloseCrawlIfCompleteAsync(haCrawlId.Value);
+                if (haClosedCrawl)
+                {
+                    logger.Info($"[HA] Crawl {haCrawlId} complete — this node closes it and records sync state.");
+                    SyncState.ClearCheckpoint(config.Connector.Id);
+                    SyncState.WriteLastSync(config.Connector.Id, syncStart);
+                }
+                else
+                {
+                    logger.Info(
+                        $"[HA] Crawl {haCrawlId} still in progress on other node(s) — " +
+                        "sync state will be recorded by the closing node.");
+                }
             }
-            catch (Exception recErr)
+
+            // Record content crawl stats in SQLite
+            if (haClosedCrawl)
             {
-                logger.Warning($"Could not record content crawl stats: {recErr.Message}");
+                try
+                {
+                    Identity.RecordContentCrawl(config, stats, syncType: syncType);
+                }
+                catch (Exception recErr)
+                {
+                    logger.Warning($"Could not record content crawl stats: {recErr.Message}");
+                }
             }
 
             var elapsed = CommandRegistry.MonotonicSeconds() - startTime;
@@ -207,6 +288,15 @@ public static class IngestCommand
     /// </summary>
     public static async Task<bool?> CmdIngestAsync(ParsedArgs args)
     {
+        // HA mode requires the SQL Server backend (shared state + coordination).
+        if (HaCoordinator.IsHaMode && !SyncState.UseSqlServer)
+        {
+            Logging.GetLogger("progress").Error(
+                "❌ HA_MODE=true requires USE_SQL_SERVER=true and SQL_CONNECTION_STRING " +
+                "(point it at the AG listener). Aborting.");
+            return false;
+        }
+
         DateTime? since = null;
         if (args.GetBool("incremental"))
         {
@@ -262,11 +352,15 @@ public static class IngestCommand
 
             CommandRegistry.ResetLogging();
 
+            // HA: the moment this node's cycle became due — OpenOrJoinCrawl uses it
+            // to skip cycles another node already completed.
+            var cycleDue = DateTime.UtcNow;
+
             var elapsedSinceFull = CommandRegistry.MonotonicSeconds() - lastFullTime;
             if (elapsedSinceFull >= fullInterval)
             {
                 progressLogger.Info("🔄 Starting scheduled FULL crawl...");
-                await RunIngestAsync(args, since: null);
+                await RunIngestAsync(args, since: null, haCycleDueUtc: cycleDue);
                 lastFullTime = CommandRegistry.MonotonicSeconds();
             }
             else
@@ -281,7 +375,7 @@ public static class IngestCommand
                 catch
                 {
                 }
-                await RunIngestAsync(args, since: since);
+                await RunIngestAsync(args, since: since, haCycleDueUtc: cycleDue);
             }
         }
     }

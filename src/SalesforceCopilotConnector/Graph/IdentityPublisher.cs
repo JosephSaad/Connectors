@@ -71,14 +71,14 @@ public class IdentityPublisher
 
     private readonly GraphClient _client;
     private readonly string _connectionId;
-    private readonly IdentityStore _store;
+    private readonly IIdentityStore _store;
     private readonly string _basePath;
     private readonly PrincipalMapper? _principalMapper;
 
     public IdentityPublisher(
         GraphClient graphClient,
         string connectionId,
-        IdentityStore? store = null,
+        IIdentityStore? store = null,
         PrincipalMapper? principalMapper = null)
     {
         _client = graphClient;

@@ -21,7 +21,7 @@ SQLite identity store) so it can pick up where the Python version left off.
 | `src/SalesforceCopilotConnector/Config/` | `config/sync_state.py` — checkpoints & dead-letter files |
 | `src/SalesforceCopilotConnector/Commands/` + `Program.cs` | `commands/` + `run.py` — CLI (argparse replica) |
 | `src/SalesforceCopilotConnector/Dashboard.cs` | `dashboard.py` (rich → Spectre.Console) |
-| `tests/SalesforceCopilotConnector.Tests/` | `tests/` — full pytest suite as xUnit (450 tests) |
+| `tests/SalesforceCopilotConnector.Tests/` | `tests/` — full pytest suite as xUnit (526 tests) |
 | `config/` | schema.json, graph-schema.json, template.json (same files) |
 
 ## Requirements
@@ -29,6 +29,17 @@ SQLite identity store) so it can pick up where the Python version left off.
 - .NET 8 SDK
 - The same environment variables as the Python version (see `env/README.md`);
   `.env.local` / `env/.env.local` files are loaded the same way.
+
+Optional operational knobs (both off by default — behaviour is unchanged when unset):
+
+- `LOG_RETENTION_DAYS=N` — prune `logs/{prefix}_{timestamp}/` run directories
+  (and, in SQL Server mode, dead-letter/session/crawl history via
+  `usp_PruneHistory`) older than N days at the start of every command and each
+  `--continuous` cycle. Root state files (`sync_state.json`, checkpoints,
+  dead-letter JSONL) are never touched.
+- `GRAPH_RETRY_JITTER=true` — ±20% jitter on computed Graph retry backoff
+  (server `Retry-After` is honoured exactly). Recommended on every node in HA
+  mode — see `docs/RETRY.md`.
 
 ## Usage
 
@@ -83,13 +94,40 @@ rename, `-Uninstall` to remove. Relative paths (`config/`, `env/`, `logs/`,
 install directory. Logs stay in `SFCONNECTOR_HOME\logs\` — service mode
 suppresses nothing; it writes the same log files as console mode.
 
+## SQL Server backend & high availability
+
+By default all state is file/SQLite based (byte-compatible with the Python
+original). For production/HA, the state backend is switchable to Microsoft SQL
+Server — identity store, checkpoints, sync timestamps and the dead-letter queue
+all move to a shared database:
+
+```
+USE_SQL_SERVER=true
+SQL_CONNECTION_STRING=Server=<AG-listener>;Database=SalesforceConnector;...
+HA_MODE=true            # optional: multi-node active-active
+```
+
+Provision once with `scripts/sql/create-database.sql` (tables, views, stored
+procedures) and `scripts/sql/create-login.sql` (least-privilege app login).
+
+With `HA_MODE=true`, two or more nodes run the same `--continuous` command
+against the same database (point the connection string at an Always On AG
+listener). Nodes coordinate through SQL: one opens each scheduled crawl, the
+rest join, and all of them claim Salesforce object types as atomic work items
+with heartbeats — a dead node's claims expire and survivors resume from that
+object's checkpoint. Exactly one node closes the crawl and writes the sync
+timestamp. Details, failure modes and a deployment checklist: `docs/HA.md`;
+schema/proc contract: `docs/SQL_CONTRACT.md`; retry/throttling behavior:
+`docs/RETRY.md`; sustainable throughput vs Graph API limits: `docs/CAPACITY.md`.
+
 ## Tests
 
 ```bash
 dotnet test
 ```
 
-450 tests, a 1:1 port of the Python suite. Test collections run serially
+526 tests — a 1:1 port of the Python suite plus C#-side additions (SQL/HA,
+log pruning, retry jitter). Test collections run serially
 (`xunit.runner.json`) because several tests swap process-global seams
 (ingest hooks, sync-state paths, HTTP session, env vars), mirroring the
 Python suite's monkeypatching.

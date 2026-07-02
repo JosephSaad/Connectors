@@ -55,6 +55,7 @@ Refer to `python run.py guide` for the full list of required environment variabl
 | `GRAPH_API_VERSION` | — | `beta` | Graph API version (`v1.0` or `beta`) |
 | `GRAPH_MAX_RETRIES` | — | `4` | Max retries on Graph API failures |
 | `GRAPH_RETRY_BACKOFF_BASE` | — | `2` | Exponential backoff base (seconds) |
+| `GRAPH_RETRY_JITTER` | — | `false` | `true` → ±20% jitter on computed retry backoff (server `Retry-After` still honoured exactly). Recommended in HA — see `docs/RETRY.md`. |
 
 ### Connection & Schema Provisioning
 | Variable | Required | Default | Description |
@@ -68,7 +69,12 @@ Refer to `python run.py guide` for the full list of required environment variabl
 |----------|----------|---------|-------------|
 | `INGEST_CHUNK_SIZE` | — | `2000` | Salesforce records per ACL+Graph $batch cycle. Align to 2000 (one SF page). Safe up to ~5000. |
 | `INGEST_GRAPH_BATCH_SIZE` | — | `20` | Requests per Graph `$batch` POST. Hard-capped at 20 by the API. |
-| `GRAPH_BATCH_WORKERS` | — | `4` | Concurrent Graph `$batch` workers. Higher = more throughput but may cause 429s — start at 2. |
+| `GRAPH_BATCH_WORKERS` | — | `8` | Concurrent Graph `$batch` workers (alias of `GRAPH_CONCURRENT_BATCHES`, which wins if both are set). Higher = more throughput but may cause 429s — start at 2. |
+
+### Operations
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `LOG_RETENTION_DAYS` | — | `0` | `> 0` → prune `logs/{prefix}_{timestamp}/` run dirs (and, with `USE_SQL_SERVER=true`, SQL history via `usp_PruneHistory`) older than N days at each command/cycle start. `0` = keep forever. |
 
 ### ACL Engine
 | Variable | Required | Default | Description |

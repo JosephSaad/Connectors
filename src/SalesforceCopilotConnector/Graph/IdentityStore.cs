@@ -148,7 +148,7 @@ public class SyncSessionStats
 /// dbPath       : Path to the SQLite database file.
 /// connectionId : The Graph external connection ID this store tracks.
 /// </summary>
-public class IdentityStore : IDisposable
+public class IdentityStore : IIdentityStore
 {
     private static readonly IAppLogger Logger = Logging.GetLogger("salesforce_connector.identity_store");
 
@@ -744,16 +744,32 @@ CREATE TABLE IF NOT EXISTS field_cache (
     // ── Factory ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Create an <see cref="IdentityStore"/> for the given connection.
+    /// Create an <see cref="IIdentityStore"/> for the given connection.
+    ///
+    /// When env ``USE_SQL_SERVER=true`` returns a <see cref="SqlServerIdentityStore"/>
+    /// backed by ``SQL_CONNECTION_STRING`` (see docs/SQL_CONTRACT.md); otherwise
+    /// the SQLite-backed <see cref="IdentityStore"/>.
     ///
     /// Parameters
     /// ----------
     /// connectionId : The Graph external connection ID.
-    /// dataDir      : Directory to store the DB file.  Defaults to
-    ///                <c>{repo_root}/data/</c>.
+    /// dataDir      : Directory to store the SQLite DB file.  Defaults to
+    ///                <c>{repo_root}/data/</c>.  Ignored in SQL Server mode.
     /// </summary>
-    public static IdentityStore CreateStore(string connectionId, string? dataDir = null)
+    public static IIdentityStore CreateStore(string connectionId, string? dataDir = null)
     {
+        var useSqlServer = (Environment.GetEnvironmentVariable("USE_SQL_SERVER") ?? "false").ToLowerInvariant();
+        if (useSqlServer is "true" or "1" or "yes")
+        {
+            var connectionString = Environment.GetEnvironmentVariable("SQL_CONNECTION_STRING");
+            if (string.IsNullOrEmpty(connectionString))
+            {
+                throw new ArgumentException(
+                    "USE_SQL_SERVER=true requires SQL_CONNECTION_STRING to be set "
+                    + "(point it at the Always On Availability Group listener for HA).");
+            }
+            return new SqlServerIdentityStore(connectionString: connectionString, connectionId: connectionId);
+        }
         dataDir ??= Path.Combine(Settings.RepoRoot, "data");
         var dbPath = Path.Combine(dataDir, $"{connectionId}_identity.db");
         return new IdentityStore(dbPath: dbPath, connectionId: connectionId);

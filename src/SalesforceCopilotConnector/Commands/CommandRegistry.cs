@@ -119,6 +119,12 @@ public static class CommandRegistry
         ConsoleHandlers.Add((consoleHandler, consoleLevel));
         ConsoleHandlers.Add((progressConsole, LogLevels.Info));
 
+        // Retention pruning (LOG_RETENTION_DAYS, docs/SQL_CONTRACT.md): every
+        // command — and every --continuous cycle, which re-enters SetupLogging —
+        // prunes aged run dirs once at start. Runs after the handlers are wired
+        // so its one-line summary lands in this run's log file. No-op by default.
+        LogPruner.Prune();
+
         return (logFile, summaryFile);
     }
 
