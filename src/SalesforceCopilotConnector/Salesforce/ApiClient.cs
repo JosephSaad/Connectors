@@ -229,6 +229,8 @@ public static class ApiClient
         var activeConfigs = ObjectConfigs;
         if (!string.IsNullOrEmpty(config.DebugObjectType))
             activeConfigs = ObjectConfigs.Where(c => c.ObjectType == config.DebugObjectType).ToArray();
+        if (config.ShardObjectTypes != null)
+            activeConfigs = activeConfigs.Where(c => config.ShardObjectTypes.Contains(c.ObjectType)).ToArray();
 
         var counts = new Dictionary<string, int>();
         foreach (var objCfg in activeConfigs)
@@ -316,6 +318,8 @@ public static class ApiClient
         var activeConfigs = !string.IsNullOrEmpty(debugObjectType)
             ? ObjectConfigs.Where(cfg => cfg.ObjectType == debugObjectType).ToList()
             : ObjectConfigs.ToList();
+        if (config.ShardObjectTypes != null)
+            activeConfigs = activeConfigs.Where(cfg => config.ShardObjectTypes.Contains(cfg.ObjectType)).ToList();
 
         if (!string.IsNullOrEmpty(debugObjectType) && activeConfigs.Count == 0)
         {

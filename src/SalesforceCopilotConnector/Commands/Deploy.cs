@@ -60,7 +60,8 @@ public static class Deploy
     /// became due; used by OpenOrJoinCrawl to dedupe cycles across nodes.
     /// </summary>
     internal static async Task<bool> RunFullDeploymentAsync(
-        ParsedArgs args, DateTime? since = null, DateTime? haCycleDueUtc = null)
+        ParsedArgs args, DateTime? since = null, DateTime? haCycleDueUtc = null,
+        AppConfig? configOverride = null)
     {
         var syncType = since != null ? "incremental" : "full";
 
@@ -82,7 +83,7 @@ public static class Deploy
             logger.Info("FULL DEPLOYMENT: Connection → Schema → Ingestion with ACLs");
             logger.Info(new string('=', 70));
 
-            config = LoadConfigHook();
+            config = configOverride ?? LoadConfigHook();
 
             // Full or incremental based on 'since' parameter
             // (in HA mode only the node that CREATES the crawl clears the shared
@@ -156,7 +157,9 @@ public static class Deploy
                     config.Connector.Id,
                     crawlKind: syncType,
                     sinceIso: since != null ? CommandRegistry.PyIsoFormat(since.Value) : null,
-                    objectTypes: ApiClient.ObjectConfigs.Select(c => c.ObjectType).ToList(),
+                    objectTypes: ApiClient.ObjectConfigs.Select(c => c.ObjectType)
+                        .Where(t => config.ShardObjectTypes == null || config.ShardObjectTypes.Contains(t))
+                        .ToList(),
                     cycleDueUtc: haCycleDueUtc);
                 if (haCrawl == null)
                 {
@@ -228,12 +231,19 @@ public static class Deploy
             var syncStart = DateTime.UtcNow;
             try
             {
-                // Identity Crawl: only on full sync, not incremental
-                // Groups don't change frequently, no need to re-crawl every incremental cycle
-                if (syncType == "full" && config.UseGroupAcl)
+                // Identity Crawl: always on full sync; on incremental only when
+                // IDENTITY_SYNC_ON_INCREMENTAL=true (large orgs whose groups drift
+                // between full crawls). Default (unset) = today's full-only behavior.
+                if (config.UseGroupAcl && (syncType == "full" || EnvFlags.IdentitySyncOnIncremental))
                 {
-                    progress.Info("  Running identity sync (group-based ACL)...");
-                    var identityStats = await RunIdentitySyncHook(config, client);
+                    var incremental = syncType != "full";
+                    progress.Info(
+                        incremental
+                            ? "  Running incremental identity sync (group-based ACL)..."
+                            : "  Running identity sync (group-based ACL)...");
+                    var identityStats = incremental
+                        ? await Identity.RunIdentitySyncAsync(config, client, incremental: true)
+                        : await RunIdentitySyncHook(config, client);
                     logger.Info(
                         $"Identity sync: created={identityStats.GroupsCreated} updated={identityStats.GroupsUpdated} " +
                         $"deleted={identityStats.GroupsDeleted} unchanged={identityStats.GroupsUnchanged}");
@@ -262,6 +272,12 @@ public static class Deploy
             }
 
             logger.Info($"Ingestion completed ({syncType})");
+
+            // Observability: fold this crawl's outcome into the /metrics registry and
+            // alert if the dead-letter queue crossed its threshold (both no-ops when
+            // the corresponding env vars are unset).
+            CommandRegistry.RecordCrawlMetrics(stats);
+            Alerting.MaybeAlertDeadLetter(config.Connector.Id, stats.FailedCount);
 
             // HA mode: only the node whose CloseCrawlIfComplete call performed the
             // close records the crawl + sync timestamp; every other node skips it.
@@ -308,8 +324,56 @@ public static class Deploy
                 config?.Connector?.Id ?? "unknown",
                 elapsed, "FULL DEPLOYMENT (CRASHED)");
             Logging.GetLogger("deployment").Error($"❌ Fatal error during deployment: {e.Message}", e);
+            await Alerting.RaiseAsync("crawl_failed", $"Full deployment ({syncType}) failed: {e.Message}",
+                new { connector = config?.Connector?.Id, error = e.GetType().Name });
             return false;
         }
+    }
+
+    /// <summary>
+    /// Run one deployment cycle. With <c>GRAPH_CONNECTION_SHARDS</c> set, iterate each shard
+    /// as its own Graph connection (covering its slice of the schema) and AND the per-shard
+    /// results; otherwise a single full deployment. Sharding is the throughput lever
+    /// (docs/SHARDING.md): N shards ≈ N × the per-connection Graph ceiling. Disabled ⇒
+    /// byte-identical to the single-connection path.
+    /// </summary>
+    private static async Task<bool> RunDeploymentCycleAsync(
+        ParsedArgs args, DateTime? since, DateTime? haCycleDueUtc = null)
+    {
+        if (!ShardingConfig.IsEnabled)
+            return await RunFullDeploymentAsync(args, since: since, haCycleDueUtc: haCycleDueUtc);
+
+        var progress = Logging.GetLogger("progress");
+        AppConfig baseConfig;
+        try
+        {
+            baseConfig = LoadConfigHook();
+        }
+        catch (Exception e)
+        {
+            Logging.GetLogger("deployment").Error($"❌ Could not load config for sharding: {e.Message}", e);
+            return false;
+        }
+
+        if (!ShardingConfig.TryLoad(baseConfig, out var shards, out var error))
+        {
+            Logging.GetLogger("deployment").Error($"❌ Invalid GRAPH_CONNECTION_SHARDS: {error}");
+            return false;
+        }
+
+        progress.Info($"🔀 Connection sharding enabled — {shards.Count} shard(s) across separate Graph connections.");
+        var allOk = true;
+        foreach (var shard in shards)
+        {
+            if (ServiceStop.Requested)
+                break;
+            progress.Info($"── Shard '{shard.ConnectionId}': {string.Join(", ", shard.ObjectTypes)} ──");
+            var shardConfig = ShardingConfig.ForShard(baseConfig, shard);
+            var ok = await RunFullDeploymentAsync(
+                args, since: since, haCycleDueUtc: haCycleDueUtc, configOverride: shardConfig);
+            allOk = allOk && ok;
+        }
+        return allOk;
     }
 
     /// <summary>
@@ -324,6 +388,10 @@ public static class Deploy
     /// </summary>
     public static async Task<bool?> CmdFullDeploymentAsync(ParsedArgs args)
     {
+        // Observability: serve /health, /ready, /metrics for the lifetime of the command
+        // when HEALTH_PORT is set (no-op otherwise). Covers single and continuous runs.
+        using var health = CommandRegistry.MaybeStartHealthEndpoint();
+
         // HA mode requires the SQL Server backend (shared state + coordination).
         if (HaCoordinator.IsHaMode && !SyncState.UseSqlServer)
         {
@@ -349,7 +417,7 @@ public static class Deploy
             else
                 Logging.GetLogger("progress").Info("--incremental: no previous crawl found, running full crawl");
         }
-        var success = await RunFullDeploymentAsync(args, since: since);
+        var success = await RunDeploymentCycleAsync(args, since);
 
         var continuous = args.GetBool("continuous");
         if (!continuous)
@@ -396,7 +464,7 @@ public static class Deploy
             if (elapsedSinceFull >= fullInterval)
             {
                 progressLogger.Info("🔄 Starting scheduled FULL crawl...");
-                await RunFullDeploymentAsync(args, since: null, haCycleDueUtc: cycleDue);
+                await RunDeploymentCycleAsync(args, null, cycleDue);
                 lastFullTime = CommandRegistry.MonotonicSeconds();
             }
             else
@@ -411,7 +479,7 @@ public static class Deploy
                 catch
                 {
                 }
-                await RunFullDeploymentAsync(args, since: since, haCycleDueUtc: cycleDue);
+                await RunDeploymentCycleAsync(args, since, cycleDue);
             }
         }
     }

@@ -136,6 +136,47 @@ public static class CommandRegistry
     }
 
     /// <summary>Write summary to file and print to console.</summary>
+    /// <summary>
+    /// Fold a completed crawl's <see cref="IngestionStats"/> into the observability
+    /// <see cref="Metrics"/> registry (surfaced on the <c>/metrics</c> endpoint). Counters
+    /// are additive, so this accumulates correctly across shards and continuous cycles.
+    /// A no-op in effect when no one scrapes the endpoint (env <c>HEALTH_PORT</c> unset).
+    /// </summary>
+    /// <summary>
+    /// Start the observability HTTP endpoint (/health, /ready, /metrics) when
+    /// <c>HEALTH_PORT</c> is set, and register the connector id for alert payloads.
+    /// Returns an <see cref="IDisposable"/> the caller keeps for the command's lifetime,
+    /// or <c>null</c> when the endpoint is disabled. Config-load failures are swallowed —
+    /// the real command surfaces them. Never invoked in tests (HEALTH_PORT unset).
+    /// </summary>
+    public static IDisposable? MaybeStartHealthEndpoint()
+    {
+        var port = Environment.GetEnvironmentVariable("HEALTH_PORT");
+        if (string.IsNullOrEmpty(port) || port.Trim() == "0")
+            return null;
+        try
+        {
+            var config = Settings.LoadConfig();
+            Alerting.ConnectorId = config.Connector.Id;
+            return HealthEndpoint.StartIfConfigured(config);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public static void RecordCrawlMetrics(IngestionStats stats)
+    {
+        Metrics.IncItemsIngested(stats.SuccessCount);
+        Metrics.IncItemsFailed(stats.FailedCount);
+        Metrics.IncItemsDeleted(stats.DeletedCount);
+        Metrics.IncItemsSkipped(stats.SkippedCount);
+        Metrics.IncCrawlsCompleted();
+        Metrics.MarkCrawlCompletedNow();
+        Metrics.SetDeadLetterDepth(stats.FailedCount);
+    }
+
     public static void WriteSummary(
         string summaryFile,
         string logFile,
@@ -450,6 +491,14 @@ public static class CommandRegistry
             help: "Delete the dead-letter file after all retries succeed.");
         pRetry.AddArgument("--verbose", isFlag: true, help: "Print all INFO+ logs to console.");
         pRetry.SetDefaults(RetryFailed.CmdRetryFailedAsync);
+
+        // validate-config (C#-side addition — preflight; not in the Python original)
+        var pValidate = parser.AddParser(
+            "validate-config",
+            "Validate env, config files, schema shape, and connectivity (preflight)");
+        pValidate.AddArgument("--strict", isFlag: true, help: "Treat connectivity/schema warnings as failures.");
+        pValidate.AddArgument("--verbose", isFlag: true, help: "Print all INFO+ logs to console.");
+        pValidate.SetDefaults(async a => await ValidateConfig.RunAsync(a));
 
         return parser;
     }

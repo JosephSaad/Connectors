@@ -79,6 +79,7 @@ internal sealed class AdaptiveConcurrency
 
     public void OnThrottle()
     {
+        Metrics.IncThrottle429();
         lock (_lock)
         {
             var prev = _current;
@@ -1416,6 +1417,10 @@ public static class Ingest
             activeTypes = new List<string> { config.DebugObjectType! };
         else
             activeTypes = ApiClient.ObjectConfigs.Select(c => c.ObjectType).ToList();
+
+        // Connection sharding: restrict this connection to its slice of the schema.
+        if (config.ShardObjectTypes != null)
+            activeTypes = activeTypes.Where(config.ShardObjectTypes.Contains).ToList();
 
         // Pre-populate dashboard with known object types and record counts
         if (dashboard != null)

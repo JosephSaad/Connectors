@@ -21,7 +21,7 @@ SQLite identity store) so it can pick up where the Python version left off.
 | `src/SalesforceCopilotConnector/Config/` | `config/sync_state.py` — checkpoints & dead-letter files |
 | `src/SalesforceCopilotConnector/Commands/` + `Program.cs` | `commands/` + `run.py` — CLI (argparse replica) |
 | `src/SalesforceCopilotConnector/Dashboard.cs` | `dashboard.py` (rich → Spectre.Console) |
-| `tests/SalesforceCopilotConnector.Tests/` | `tests/` — full pytest suite as xUnit (526 tests) |
+| `tests/SalesforceCopilotConnector.Tests/` | `tests/` — full pytest suite as xUnit + C# additions (665 tests) |
 | `config/` | schema.json, graph-schema.json, template.json (same files) |
 
 ## Requirements
@@ -30,16 +30,25 @@ SQLite identity store) so it can pick up where the Python version left off.
 - The same environment variables as the Python version (see `env/README.md`);
   `.env.local` / `env/.env.local` files are loaded the same way.
 
-Optional operational knobs (both off by default — behaviour is unchanged when unset):
+Optional operational knobs (all off by default — behaviour is unchanged when unset).
+Full reference: `env/.env.local.example`.
 
-- `LOG_RETENTION_DAYS=N` — prune `logs/{prefix}_{timestamp}/` run directories
-  (and, in SQL Server mode, dead-letter/session/crawl history via
-  `usp_PruneHistory`) older than N days at the start of every command and each
-  `--continuous` cycle. Root state files (`sync_state.json`, checkpoints,
-  dead-letter JSONL) are never touched.
-- `GRAPH_RETRY_JITTER=true` — ±20% jitter on computed Graph retry backoff
-  (server `Retry-After` is honoured exactly). Recommended on every node in HA
-  mode — see `docs/RETRY.md`.
+| Env var | Effect | Docs |
+|---|---|---|
+| `LOG_RETENTION_DAYS=N` | Prune `logs/{prefix}_{timestamp}/` run dirs (and SQL history via `usp_PruneHistory`) older than N days; root state files never touched. | |
+| `GRAPH_RETRY_JITTER=true` | ±20% jitter on computed Graph retry backoff (`Retry-After` still honoured exactly). Recommended in HA. | `docs/RETRY.md` |
+| `USE_SQL_SERVER=true` + `SQL_CONNECTION_STRING` | Move state (identity store, checkpoints, sync ts, dead-letter) to SQL Server. | `docs/SQL_CONTRACT.md` |
+| `SQL_USE_MANAGED_IDENTITY=true` / `SQL_MAX_RETRIES=5` | Entra auth for SQL; transient-fault retry (AG failover). | `docs/RETRY.md` |
+| `HA_MODE=true` | Active-active multi-node crawling (requires SQL backend). | `docs/HA.md` |
+| `USE_KEY_VAULT=true` + `KEY_VAULT_URI` | Resolve `SECRET_*` from Azure Key Vault instead of env. | |
+| `HEALTH_PORT=N` | Serve `/health`, `/ready`, `/metrics` (Prometheus). | `docs/OBSERVABILITY.md` |
+| `LOG_FORMAT=json` | Structured one-object-per-line logs. | `docs/OBSERVABILITY.md` |
+| `ALERT_WEBHOOK_URL` + `ALERT_DEADLETTER_THRESHOLD` | POST an alert on crawl failure / dead-letter growth. | `docs/OBSERVABILITY.md` |
+| `IDENTITY_SYNC_ON_INCREMENTAL=true` | Run the (incremental) identity crawl on incremental cycles too. | |
+| `GRAPH_CONNECTION_SHARDS={...}` | Shard objects across N Graph connections — the throughput lever. | `docs/SHARDING.md` |
+
+New preflight command: `validate-config [--strict]` checks env, config files, schema
+shape, and (best-effort) Salesforce/Graph connectivity before a long crawl.
 
 ## Usage
 
@@ -56,6 +65,7 @@ dotnet run --project src/SalesforceCopilotConnector -- ingest-item --id 001dN000
 dotnet run --project src/SalesforceCopilotConnector -- ingest-object --type Case
 dotnet run --project src/SalesforceCopilotConnector -- retry-failed --clear-on-success
 dotnet run --project src/SalesforceCopilotConnector -- identity-dry-run --save --verbose
+dotnet run --project src/SalesforceCopilotConnector -- validate-config --strict
 ```
 
 (Help text intentionally still reads `run.py` — the CLI parser tests assert
@@ -126,7 +136,7 @@ schema/proc contract: `docs/SQL_CONTRACT.md`; retry/throttling behavior:
 dotnet test
 ```
 
-526 tests — a 1:1 port of the Python suite plus C#-side additions (SQL/HA,
+665 tests — a 1:1 port of the Python suite plus C#-side additions (SQL/HA,
 log pruning, retry jitter). Test collections run serially
 (`xunit.runner.json`) because several tests swap process-global seams
 (ingest hooks, sync-state paths, HTTP session, env vars), mirroring the

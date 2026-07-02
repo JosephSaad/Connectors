@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using DotNetEnv;
+using SalesforceCopilotConnector.Infrastructure;
 
 namespace SalesforceCopilotConnector.Salesforce;
 
@@ -61,6 +62,13 @@ public sealed class AppConfig
     public bool UseEntityDefinitionOwd { get; init; }
     public string? DebugObjectType { get; init; }
     public string? DebugItemId { get; init; }
+
+    /// <summary>
+    /// Connection-sharding restriction (<c>GRAPH_CONNECTION_SHARDS</c>). When non-null,
+    /// ingestion is limited to these object types (a shard runs as its own Graph connection
+    /// covering its slice of the schema). <c>null</c> ⇒ single-connection default, all objects.
+    /// </summary>
+    public IReadOnlyList<string>? ShardObjectTypes { get; init; }
 }
 
 public static class Settings
@@ -180,6 +188,21 @@ public static class Settings
         }
     }
 
+    /// <summary>
+    /// Copy a <c>SECRET_*</c> value into *target* if *target* is unset and the secret resolves.
+    /// The *source* secret is read through <see cref="SecretProvider.GetSecret(string)"/>, so it
+    /// comes from Key Vault when <c>USE_KEY_VAULT</c> is enabled and from the environment variable
+    /// otherwise — behaviour with <c>USE_KEY_VAULT</c> unset is identical to <see cref="AliasEnv"/>.
+    /// </summary>
+    private static void AliasEnvFromSecret(string target, string source)
+    {
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(target)))
+            return;
+        var value = SecretProvider.GetSecret(source);
+        if (!string.IsNullOrEmpty(value))
+            Environment.SetEnvironmentVariable(target, value);
+    }
+
     /// <summary>Load ``.env.local`` files and set up environment variable aliases.</summary>
     public static void LoadLocalEnvironment()
     {
@@ -190,9 +213,9 @@ public static class Settings
         }
 
         AliasEnv("AZURE_CLIENT_ID", "AAD_APP_CLIENT_ID");
-        AliasEnv("AZURE_CLIENT_SECRET", "SECRET_AAD_APP_CLIENT_SECRET");
+        AliasEnvFromSecret("AZURE_CLIENT_SECRET", "SECRET_AAD_APP_CLIENT_SECRET");
         AliasEnv("AZURE_TENANT_ID", "AAD_APP_TENANT_ID");
-        AliasEnv("SALESFORCE_CLIENT_SECRET", "SECRET_SALESFORCE_CLIENT_SECRET");
+        AliasEnvFromSecret("SALESFORCE_CLIENT_SECRET", "SECRET_SALESFORCE_CLIENT_SECRET");
 
         if ((Environment.GetEnvironmentVariable("TEAMSFX_ENV") ?? "").ToLowerInvariant() == "local" &&
             Environment.GetEnvironmentVariable("AZURE_FUNCTIONS_ENVIRONMENT") is null)

@@ -51,7 +51,8 @@ public static class IngestCommand
     /// became due; used by OpenOrJoinCrawl to dedupe cycles across nodes.
     /// </summary>
     private static async Task<bool> RunIngestAsync(
-        ParsedArgs args, DateTime? since = null, DateTime? haCycleDueUtc = null)
+        ParsedArgs args, DateTime? since = null, DateTime? haCycleDueUtc = null,
+        AppConfig? configOverride = null)
     {
         var syncType = since != null ? "incremental" : "full";
 
@@ -72,7 +73,7 @@ public static class IngestCommand
             logger.Info("INGESTION ONLY: Ingest Items with ACLs");
             logger.Info(new string('=', 70));
 
-            config = LoadConfigHook();
+            config = configOverride ?? LoadConfigHook();
 
             // Full or incremental based on 'since' parameter
             // (in HA mode only the node that CREATES the crawl clears the shared
@@ -120,7 +121,9 @@ public static class IngestCommand
                     config.Connector.Id,
                     crawlKind: syncType,
                     sinceIso: since != null ? CommandRegistry.PyIsoFormat(since.Value) : null,
-                    objectTypes: ApiClient.ObjectConfigs.Select(c => c.ObjectType).ToList(),
+                    objectTypes: ApiClient.ObjectConfigs.Select(c => c.ObjectType)
+                        .Where(t => config.ShardObjectTypes == null || config.ShardObjectTypes.Contains(t))
+                        .ToList(),
                     cycleDueUtc: haCycleDueUtc);
                 if (haCrawl == null)
                 {
@@ -195,11 +198,16 @@ public static class IngestCommand
             var syncStart = DateTime.UtcNow;
             try
             {
-                // Identity Crawl: only on full sync, not incremental
-                if (syncType == "full" && config.UseGroupAcl)
+                // Identity Crawl: always on full; on incremental only when
+                // IDENTITY_SYNC_ON_INCREMENTAL=true. Default (unset) = full-only, as before.
+                if (config.UseGroupAcl && (syncType == "full" || EnvFlags.IdentitySyncOnIncremental))
                 {
-                    progress.Info("  Running identity sync (group-based ACL)...");
-                    var identityStats = await Identity.RunIdentitySyncAsync(config, client);
+                    var incremental = syncType != "full";
+                    progress.Info(
+                        incremental
+                            ? "  Running incremental identity sync (group-based ACL)..."
+                            : "  Running identity sync (group-based ACL)...");
+                    var identityStats = await Identity.RunIdentitySyncAsync(config, client, incremental: incremental);
                     logger.Info(
                         $"Identity sync: created={identityStats.GroupsCreated} updated={identityStats.GroupsUpdated} " +
                         $"deleted={identityStats.GroupsDeleted} unchanged={identityStats.GroupsUnchanged}");
@@ -227,6 +235,11 @@ public static class IngestCommand
             }
 
             logger.Info($"Ingestion completed ({syncType})");
+
+            // Observability: fold outcome into /metrics and alert on dead-letter threshold
+            // (no-ops when HEALTH_PORT / ALERT_* env vars are unset).
+            CommandRegistry.RecordCrawlMetrics(stats);
+            Alerting.MaybeAlertDeadLetter(config.Connector.Id, stats.FailedCount);
 
             // HA mode: only the node whose CloseCrawlIfComplete call performed the
             // close records the crawl + sync timestamp; every other node skips it.
@@ -273,8 +286,54 @@ public static class IngestCommand
                 config?.Connector?.Id ?? "unknown",
                 elapsed, "INGESTION (CRASHED)");
             Logging.GetLogger("ingestion_only").Error($"❌ Fatal error during ingestion: {e.Message}", e);
+            await Alerting.RaiseAsync("crawl_failed", $"Ingestion ({syncType}) failed: {e.Message}",
+                new { connector = config?.Connector?.Id, error = e.GetType().Name });
             return false;
         }
+    }
+
+    /// <summary>
+    /// Run one ingest cycle: sharded (one Graph connection per shard) when
+    /// <c>GRAPH_CONNECTION_SHARDS</c> is set, else a single ingest. Disabled ⇒ byte-identical
+    /// to the single-connection path. See docs/SHARDING.md.
+    /// </summary>
+    private static async Task<bool> RunIngestCycleAsync(
+        ParsedArgs args, DateTime? since, DateTime? haCycleDueUtc = null)
+    {
+        if (!ShardingConfig.IsEnabled)
+            return await RunIngestAsync(args, since: since, haCycleDueUtc: haCycleDueUtc);
+
+        var progress = Logging.GetLogger("progress");
+        AppConfig baseConfig;
+        try
+        {
+            baseConfig = LoadConfigHook();
+        }
+        catch (Exception e)
+        {
+            Logging.GetLogger("ingestion_only").Error($"❌ Could not load config for sharding: {e.Message}", e);
+            return false;
+        }
+
+        if (!ShardingConfig.TryLoad(baseConfig, out var shards, out var error))
+        {
+            Logging.GetLogger("ingestion_only").Error($"❌ Invalid GRAPH_CONNECTION_SHARDS: {error}");
+            return false;
+        }
+
+        progress.Info($"🔀 Connection sharding enabled — {shards.Count} shard(s) across separate Graph connections.");
+        var allOk = true;
+        foreach (var shard in shards)
+        {
+            if (ServiceStop.Requested)
+                break;
+            progress.Info($"── Shard '{shard.ConnectionId}': {string.Join(", ", shard.ObjectTypes)} ──");
+            var shardConfig = ShardingConfig.ForShard(baseConfig, shard);
+            var ok = await RunIngestAsync(
+                args, since: since, haCycleDueUtc: haCycleDueUtc, configOverride: shardConfig);
+            allOk = allOk && ok;
+        }
+        return allOk;
     }
 
     /// <summary>
@@ -288,6 +347,9 @@ public static class IngestCommand
     /// </summary>
     public static async Task<bool?> CmdIngestAsync(ParsedArgs args)
     {
+        // Observability endpoint for the lifetime of the command (no-op unless HEALTH_PORT set).
+        using var health = CommandRegistry.MaybeStartHealthEndpoint();
+
         // HA mode requires the SQL Server backend (shared state + coordination).
         if (HaCoordinator.IsHaMode && !SyncState.UseSqlServer)
         {
@@ -313,7 +375,7 @@ public static class IngestCommand
             else
                 Logging.GetLogger("progress").Info("--incremental: no previous crawl found, running full crawl");
         }
-        var success = await RunIngestAsync(args, since: since);
+        var success = await RunIngestCycleAsync(args, since);
 
         var continuous = args.GetBool("continuous");
         if (!continuous)
@@ -360,7 +422,7 @@ public static class IngestCommand
             if (elapsedSinceFull >= fullInterval)
             {
                 progressLogger.Info("🔄 Starting scheduled FULL crawl...");
-                await RunIngestAsync(args, since: null, haCycleDueUtc: cycleDue);
+                await RunIngestCycleAsync(args, null, cycleDue);
                 lastFullTime = CommandRegistry.MonotonicSeconds();
             }
             else
@@ -375,7 +437,7 @@ public static class IngestCommand
                 catch
                 {
                 }
-                await RunIngestAsync(args, since: since, haCycleDueUtc: cycleDue);
+                await RunIngestCycleAsync(args, since, cycleDue);
             }
         }
     }

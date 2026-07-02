@@ -32,6 +32,7 @@
 // automatically.  This module **never** explicitly removes users or groups.
 
 using SalesforceCopilotConnector.Infrastructure;
+using SalesforceCopilotConnector.Salesforce;
 
 namespace SalesforceCopilotConnector.AclEngine;
 
@@ -192,6 +193,102 @@ public class IdentitySyncHandler
     public IdentityCrawlResult RunIncrementalCrawl()
     {
         return RunFullCrawl();
+    }
+
+    /// <summary>
+    /// Execute a watermark-driven incremental identity crawl (#12).
+    ///
+    /// Only objects whose identity-relevant data changed since
+    /// <paramref name="since"/> (see
+    /// <see cref="IdentityQueryClient.HasIdentityChangesSinceAsync"/>) are
+    /// re-gathered; the returned result contains the fully-populated
+    /// membership for exactly those objects.  Objects with no change are
+    /// omitted entirely — the caller (<c>Graph.Identity</c>) scopes the diff
+    /// to the changed objects so untouched groups are left in place rather
+    /// than deleted.
+    ///
+    /// The result shape is identical to <see cref="RunFullCrawlAsync"/> so the
+    /// existing publisher (<c>IdentityStore.ComputeDiff</c> +
+    /// <c>IdentityPublisher</c>) consumes it unchanged.  When no object has
+    /// changed, <see cref="IdentityCrawlResult.GatheredGroups"/> is empty and
+    /// the publish is a no-op.
+    /// </summary>
+    public async Task<IdentityCrawlResult> RunIncrementalCrawlAsync(DateTime since)
+    {
+        var result = new IdentityCrawlResult();
+
+        // Phase 1: List — enumerate all top-level groups (cheap: OWD + config).
+        Logger.Info($"[IdentitySync] Incremental: enumerating top-level groups (since {Utils.ToIsoZ(since)})");
+        var enumerator = new IdentityCrawlEnumerator(
+            _queryClient,
+            _objectNames,
+            _parentMap,
+            _owdOverrides);
+        var allTopLevel = await enumerator.EnumerateAsync();
+
+        // Phase 2: Change detection — keep only objects with identity changes.
+        var changedTopLevel = new List<TopLevelGroupInfo>();
+        foreach (var topGroup in allTopLevel)
+        {
+            if (await _queryClient.HasIdentityChangesSinceAsync(topGroup.ObjectName, since))
+                changedTopLevel.Add(topGroup);
+        }
+        result.TopLevelGroups = changedTopLevel;
+
+        Logger.Info(
+            $"[IdentitySync] Incremental: {changedTopLevel.Count}/{allTopLevel.Count} object(s) changed since watermark: " +
+            $"[{string.Join(", ", changedTopLevel.Select(t => $"'{t.ObjectName}'"))}]");
+
+        if (changedTopLevel.Count == 0)
+        {
+            Logger.Info("[IdentitySync] Incremental: no identity changes — nothing to publish");
+            return result;
+        }
+
+        // Phase 3: Gather — populate each CHANGED group (identical to full crawl).
+        var gatherer = new IdentityGatherer(_queryClient);
+        foreach (var topGroup in changedTopLevel)
+        {
+            Logger.Info(
+                $"[IdentitySync] Gathering {topGroup.GroupId} (OWD={topGroup.Owd.Value()})");
+            var membership = await gatherer.BuildTopLevelGroupAsync(
+                topGroup.ObjectName,
+                topGroup.Owd);
+            result.GatheredGroups.Add(membership);
+            result.TotalUsersEmitted += membership.Users.Count;
+            result.TotalGroupsEmitted += 1;
+
+            foreach (var childRef in membership.ChildGroups)
+            {
+                if (childRef.NeedsGather)
+                {
+                    var childMembership = await gatherer.GatherChildGroupAsync(
+                        topGroup.ObjectName,
+                        childRef);
+                    result.GatheredGroups.Add(childMembership);
+                    result.TotalUsersEmitted += childMembership.Users.Count;
+                    result.TotalGroupsEmitted += 1;
+                }
+            }
+        }
+
+        Logger.Info(
+            $"[IdentitySync] Incremental crawl complete: {result.TotalGroupsEmitted} groups, {result.TotalUsersEmitted} user memberships");
+        return result;
+    }
+
+    /// <summary>
+    /// Sanitised object-name prefix for an object's external group IDs, e.g.
+    /// <c>"Work_Order__c"</c> → <c>"WorkOrderc"</c>.  Every group emitted for an
+    /// object begins with this prefix, so it identifies which object a stored
+    /// group belongs to.  Derived from the shared <c>TopLevel</c> format so it
+    /// stays in lock-step with the group-ID sanitisation rules.
+    /// </summary>
+    public static string SanitizedObjectPrefix(string objectName)
+    {
+        const string suffix = "TopLevel";
+        var topLevel = SfGroupIdFormats.TopLevel.Format(objectName);
+        return topLevel.EndsWith(suffix) ? topLevel[..^suffix.Length] : topLevel;
     }
 }
 

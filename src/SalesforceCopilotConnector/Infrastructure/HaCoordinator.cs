@@ -102,12 +102,11 @@ public static class HaCoordinator
             : fallback;
     }
 
-    private static async Task<SqlConnection> OpenConnectionAsync()
-    {
-        var connection = new SqlConnection(SqlStateStore.ConnectionString);
-        await connection.OpenAsync(ServiceStop.Token);
-        return connection;
-    }
+    // Every proc call runs through SqlExecutor.ExecuteAsync: it opens a hardened
+    // connection (Encrypt forced on, MI auth when configured) and retries the
+    // whole unit on a transient fault (AG failover / throttling / deadlock /
+    // timeout), honoring ServiceStop.Token so a graceful stop is not delayed by
+    // a backoff wait. The stored procs still provide cross-node atomicity.
 
     private static SqlCommand Proc(SqlConnection connection, string name)
     {
@@ -151,31 +150,33 @@ public static class HaCoordinator
         }
 
         var typesJson = new JsonArray(objectTypes.Select(t => (JsonNode)t).ToArray()).ToJsonString();
-        await using var connection = await OpenConnectionAsync();
-        await using var command = Proc(connection, "dbo.usp_OpenOrJoinCrawl");
-        command.Parameters.AddWithValue("@ConnectorId", connectorId);
-        command.Parameters.AddWithValue("@CrawlKind", crawlKind);
-        command.Parameters.AddWithValue("@SinceIso", (object?)sinceIso ?? DBNull.Value);
-        command.Parameters.AddWithValue("@NodeId", nodeId ?? NodeId);
-        command.Parameters.AddWithValue("@ObjectTypesJson", typesJson);
-        await using var reader = await command.ExecuteReaderAsync(ServiceStop.Token);
-        if (!await reader.ReadAsync(ServiceStop.Token))
+        return await SqlExecutor.ExecuteAsync(SqlStateStore.ConnectionString, async connection =>
         {
-            throw new InvalidOperationException("usp_OpenOrJoinCrawl returned no rows");
-        }
-        var crawlId = reader.GetGuid(reader.GetOrdinal("CrawlId"));
-        var created = Convert.ToBoolean(reader[reader.GetOrdinal("Created")]);
-        string? crawlSinceIso = null;
-        var hasSinceIso = TryGetString(reader, "SinceIso", out crawlSinceIso);
-        TryGetString(reader, "CrawlKind", out var returnedKind);
-        return new HaCrawlHandle
-        {
-            CrawlId = crawlId,
-            Created = created,
-            SinceIso = crawlSinceIso,
-            HasSinceIso = hasSinceIso,
-            CrawlKind = returnedKind,
-        };
+            await using var command = Proc(connection, "dbo.usp_OpenOrJoinCrawl");
+            command.Parameters.AddWithValue("@ConnectorId", connectorId);
+            command.Parameters.AddWithValue("@CrawlKind", crawlKind);
+            command.Parameters.AddWithValue("@SinceIso", (object?)sinceIso ?? DBNull.Value);
+            command.Parameters.AddWithValue("@NodeId", nodeId ?? NodeId);
+            command.Parameters.AddWithValue("@ObjectTypesJson", typesJson);
+            await using var reader = await command.ExecuteReaderAsync(ServiceStop.Token);
+            if (!await reader.ReadAsync(ServiceStop.Token))
+            {
+                throw new InvalidOperationException("usp_OpenOrJoinCrawl returned no rows");
+            }
+            var crawlId = reader.GetGuid(reader.GetOrdinal("CrawlId"));
+            var created = Convert.ToBoolean(reader[reader.GetOrdinal("Created")]);
+            string? crawlSinceIso = null;
+            var hasSinceIso = TryGetString(reader, "SinceIso", out crawlSinceIso);
+            TryGetString(reader, "CrawlKind", out var returnedKind);
+            return (HaCrawlHandle?)new HaCrawlHandle
+            {
+                CrawlId = crawlId,
+                Created = created,
+                SinceIso = crawlSinceIso,
+                HasSinceIso = hasSinceIso,
+                CrawlKind = returnedKind,
+            };
+        }, ServiceStop.Token);
     }
 
     private static bool TryGetString(SqlDataReader reader, string column, out string? value)
@@ -200,37 +201,43 @@ public static class HaCoordinator
     /// </summary>
     public static async Task<string?> ClaimNextObjectAsync(Guid crawlId, string? nodeId = null)
     {
-        await using var connection = await OpenConnectionAsync();
-        await using var command = Proc(connection, "dbo.usp_ClaimNextObject");
-        command.Parameters.AddWithValue("@CrawlId", crawlId);
-        command.Parameters.AddWithValue("@NodeId", nodeId ?? NodeId);
-        command.Parameters.AddWithValue("@ClaimTimeoutSeconds", ClaimTimeoutSeconds);
-        var result = await command.ExecuteScalarAsync(ServiceStop.Token);
-        return result is string objectType && objectType.Length > 0 ? objectType : null;
+        return await SqlExecutor.ExecuteAsync(SqlStateStore.ConnectionString, async connection =>
+        {
+            await using var command = Proc(connection, "dbo.usp_ClaimNextObject");
+            command.Parameters.AddWithValue("@CrawlId", crawlId);
+            command.Parameters.AddWithValue("@NodeId", nodeId ?? NodeId);
+            command.Parameters.AddWithValue("@ClaimTimeoutSeconds", ClaimTimeoutSeconds);
+            var result = await command.ExecuteScalarAsync(ServiceStop.Token);
+            return result is string objectType && objectType.Length > 0 ? objectType : null;
+        }, ServiceStop.Token);
     }
 
     /// <summary>Refresh the claim's HeartbeatUtc.</summary>
     public static async Task HeartbeatClaimAsync(Guid crawlId, string objectType, string? nodeId = null)
     {
-        await using var connection = await OpenConnectionAsync();
-        await using var command = Proc(connection, "dbo.usp_HeartbeatClaim");
-        command.Parameters.AddWithValue("@CrawlId", crawlId);
-        command.Parameters.AddWithValue("@ObjectType", objectType);
-        command.Parameters.AddWithValue("@NodeId", nodeId ?? NodeId);
-        await command.ExecuteNonQueryAsync(ServiceStop.Token);
+        await SqlExecutor.ExecuteAsync(SqlStateStore.ConnectionString, async connection =>
+        {
+            await using var command = Proc(connection, "dbo.usp_HeartbeatClaim");
+            command.Parameters.AddWithValue("@CrawlId", crawlId);
+            command.Parameters.AddWithValue("@ObjectType", objectType);
+            command.Parameters.AddWithValue("@NodeId", nodeId ?? NodeId);
+            await command.ExecuteNonQueryAsync(ServiceStop.Token);
+        }, ServiceStop.Token);
     }
 
     /// <summary>Complete the claim with status ``done`` or ``failed``.</summary>
     public static async Task CompleteClaimAsync(
         Guid crawlId, string objectType, string status, string? nodeId = null)
     {
-        await using var connection = await OpenConnectionAsync();
-        await using var command = Proc(connection, "dbo.usp_CompleteClaim");
-        command.Parameters.AddWithValue("@CrawlId", crawlId);
-        command.Parameters.AddWithValue("@ObjectType", objectType);
-        command.Parameters.AddWithValue("@NodeId", nodeId ?? NodeId);
-        command.Parameters.AddWithValue("@Status", status);
-        await command.ExecuteNonQueryAsync(ServiceStop.Token);
+        await SqlExecutor.ExecuteAsync(SqlStateStore.ConnectionString, async connection =>
+        {
+            await using var command = Proc(connection, "dbo.usp_CompleteClaim");
+            command.Parameters.AddWithValue("@CrawlId", crawlId);
+            command.Parameters.AddWithValue("@ObjectType", objectType);
+            command.Parameters.AddWithValue("@NodeId", nodeId ?? NodeId);
+            command.Parameters.AddWithValue("@Status", status);
+            await command.ExecuteNonQueryAsync(ServiceStop.Token);
+        }, ServiceStop.Token);
     }
 
     /// <summary>
@@ -240,11 +247,13 @@ public static class HaCoordinator
     /// </summary>
     public static async Task<bool> CloseCrawlIfCompleteAsync(Guid crawlId)
     {
-        await using var connection = await OpenConnectionAsync();
-        await using var command = Proc(connection, "dbo.usp_CloseCrawlIfComplete");
-        command.Parameters.AddWithValue("@CrawlId", crawlId);
-        var result = await command.ExecuteScalarAsync(ServiceStop.Token);
-        return result is not (null or DBNull) && Convert.ToInt32(result) == 1;
+        return await SqlExecutor.ExecuteAsync(SqlStateStore.ConnectionString, async connection =>
+        {
+            await using var command = Proc(connection, "dbo.usp_CloseCrawlIfComplete");
+            command.Parameters.AddWithValue("@CrawlId", crawlId);
+            var result = await command.ExecuteScalarAsync(ServiceStop.Token);
+            return result is not (null or DBNull) && Convert.ToInt32(result) == 1;
+        }, ServiceStop.Token);
     }
 
     // ── Heartbeat background task ────────────────────────────────────────────

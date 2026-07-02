@@ -1,8 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Buffers;
 using System.Globalization;
 using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 
 namespace SalesforceCopilotConnector.Infrastructure;
 
@@ -80,11 +83,56 @@ public abstract class LogHandler
         var message = record.Message;
         if (record.Exception != null)
             message = message + "\n" + record.Exception;
+        // MessageOnly handlers (e.g. the progress console) always emit the bare
+        // message in BOTH text and json modes — the structured switch never
+        // rewrites progress-console output.
         if (MessageOnly)
             return message;
+        // Structured logs (#10): LOG_FORMAT=json → one JSON object per record.
+        // Default (text) is byte-identical to the historical formatter.
+        if (Logging.JsonFormat)
+            return FormatJson(record);
         var asctime = record.Timestamp.ToString("yyyy-MM-dd HH:mm:ss,fff", CultureInfo.InvariantCulture);
         return $"{asctime} - {record.Name} - {LogLevels.Name(record.Level)} - {message}";
     }
+
+    /// <summary>
+    /// Render <paramref name="record"/> as a single-line JSON object
+    /// (<c>LOG_FORMAT=json</c>). Keys: <c>timestamp</c> (same
+    /// <c>yyyy-MM-dd HH:mm:ss,fff</c> string the text format uses), <c>level</c>,
+    /// <c>logger</c>, <c>message</c>; when an exception is attached, an
+    /// <c>exception</c> object carries its <c>type</c> and <c>message</c>.
+    /// </summary>
+    private static string FormatJson(LogRecord record)
+    {
+        var asctime = record.Timestamp.ToString("yyyy-MM-dd HH:mm:ss,fff", CultureInfo.InvariantCulture);
+        var buffer = new ArrayBufferWriter<byte>(256);
+        using (var writer = new Utf8JsonWriter(buffer, JsonWriterOptions))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("timestamp", asctime);
+            writer.WriteString("level", LogLevels.Name(record.Level));
+            writer.WriteString("logger", record.Name);
+            writer.WriteString("message", record.Message);
+            if (record.Exception != null)
+            {
+                writer.WriteStartObject("exception");
+                writer.WriteString("type", record.Exception.GetType().FullName);
+                writer.WriteString("message", record.Exception.Message);
+                writer.WriteEndObject();
+            }
+            writer.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
+    }
+
+    private static readonly JsonWriterOptions JsonWriterOptions = new()
+    {
+        // Match the rest of the project's escaping posture without HTML-escaping
+        // characters like < > & that legitimately appear in log messages.
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        Indented = false,
+    };
 
     protected abstract void Emit(LogRecord record);
 
@@ -306,6 +354,37 @@ public static class Logging
 
     /// <summary>The root logger (Python <c>logging.getLogger()</c>). Default level WARNING.</summary>
     public static LoggerObject Root { get; } = new LoggerObject("") { Level = LogLevels.Warning };
+
+    private static bool? _jsonFormat;
+
+    /// <summary>
+    /// When true, full-format handlers (everything except <c>MessageOnly</c>
+    /// progress-console output) render each record as one JSON object instead of
+    /// the <c>"%(asctime)s - %(name)s - %(levelname)s - %(message)s"</c> text line.
+    ///
+    /// Defaults lazily from <c>LOG_FORMAT=json</c> (case-insensitive) the first
+    /// time it is read, so the production logging setup in
+    /// <c>CommandRegistry.SetupLogging</c> — which wires handlers directly rather
+    /// than through <see cref="Configure"/> — still honours the env var. Explicit
+    /// assignment (e.g. from tests) overrides the env; set to <c>null</c> to
+    /// restore lazy env resolution. Default resolution keeps output byte-identical
+    /// to the historical text format.
+    /// </summary>
+    public static bool JsonFormat
+    {
+        get => _jsonFormat ??= ReadJsonFormatFromEnv();
+        set => _jsonFormat = value;
+    }
+
+    /// <summary>Test seam: re-read <c>LOG_FORMAT</c> on the next <see cref="JsonFormat"/> access.</summary>
+    internal static void ResetJsonFormatCache() => _jsonFormat = null;
+
+    /// <summary>Read <c>LOG_FORMAT</c> from the environment (case-insensitive <c>json</c>).</summary>
+    private static bool ReadJsonFormatFromEnv() =>
+        string.Equals(
+            Environment.GetEnvironmentVariable("LOG_FORMAT"),
+            "json",
+            StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Return the logger named <paramref name="name"/> (Python <c>__name__</c> equivalent).</summary>
     public static IAppLogger GetLogger(string name) => GetLoggerObject(name);

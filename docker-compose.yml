@@ -1,0 +1,132 @@
+# =============================================================================
+# Salesforce Copilot Connector — LOCAL / DEV topology
+# =============================================================================
+# Brings up a SQL Server 2022 instance and the connector wired to use it as the
+# shared state backend (identity store, checkpoints, sync timestamps, dead-letter
+# queue). This is a convenience topology for local development and testing ONLY:
+#   * The SA password below is a throwaway dev credential — do NOT use in prod.
+#   * Real deployments point SQL_CONNECTION_STRING at a hardened SQL Server /
+#     Always On AG listener, not a container. See docs/HA.md and docs/SQL_CONTRACT.md.
+#
+# Prerequisites (not created by this file):
+#   * env/.env.local  — your Salesforce + Entra credentials (see env/README.md).
+#     This is loaded via env_file below and is required for the connector to run.
+#   * The database schema is provisioned automatically by the `mssql-init`
+#     service, which runs scripts/sql/create-database.sql once SQL Server is up.
+#
+# Usage:
+#   docker compose up --build          # start SQL + connector (continuous crawl)
+#   docker compose logs -f connector   # follow the connector
+#   docker compose down                # stop; add -v to also drop the DB volume
+# =============================================================================
+
+services:
+  # ---- SQL Server state backend --------------------------------------------
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      # Dev-only SA password (meets SQL Server complexity rules). Override via a
+      # shell env var if you like: MSSQL_SA_PASSWORD is read from the environment.
+      MSSQL_SA_PASSWORD: "Your_strong!Passw0rd"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      # sqlcmd ships inside the 2022 image at this path; a trivial SELECT proves
+      # the engine is accepting connections before dependents start.
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ---- One-shot schema provisioning ----------------------------------------
+  # Runs create-database.sql against the healthy SQL Server, then exits. Keeps the
+  # connector image free of SQL client tooling and makes the DB reproducible.
+  mssql-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      mssql:
+        condition: service_healthy
+    environment:
+      MSSQL_SA_PASSWORD: "Your_strong!Passw0rd"
+    volumes:
+      - ./scripts/sql:/scripts:ro
+    entrypoint:
+      [
+        "/opt/mssql-tools18/bin/sqlcmd",
+        "-S", "mssql",
+        "-U", "sa",
+        "-P", "Your_strong!Passw0rd",
+        "-C",
+        "-b",
+        "-i", "/scripts/create-database.sql",
+      ]
+    restart: "no"
+
+  # ---- Connector (primary node) --------------------------------------------
+  connector:
+    build: .
+    depends_on:
+      mssql:
+        condition: service_healthy
+      mssql-init:
+        condition: service_completed_successfully
+    # Salesforce + Entra credentials come from your local env file.
+    env_file:
+      - ./env/.env.local
+    environment:
+      SFCONNECTOR_HOME: /app
+      # Switch the state backend from file/SQLite to shared SQL Server.
+      USE_SQL_SERVER: "true"
+      SQL_CONNECTION_STRING: "Server=mssql,1433;Database=SalesforceConnector;User Id=sa;Password=Your_strong!Passw0rd;TrustServerCertificate=true;Encrypt=true"
+    command: ["full-deployment", "--continuous"]
+    volumes:
+      - ./config:/app/config
+      - ./env:/app/env
+      - ./logs:/app/logs
+      - ./data:/app/data
+    restart: unless-stopped
+
+  # ---- Connector (second node — HA active-active) --------------------------
+  # Uncomment to run a two-node active-active cluster against the SAME database.
+  # Both nodes run the same --continuous command; they coordinate through SQL
+  # (one opens each crawl, the rest join and claim object types with heartbeats).
+  # In a real deployment SQL_CONNECTION_STRING would point at an Always On AG
+  # listener rather than a single container. See docs/HA.md.
+  #
+  # connector2:
+  #   build: .
+  #   depends_on:
+  #     mssql:
+  #       condition: service_healthy
+  #     mssql-init:
+  #       condition: service_completed_successfully
+  #   env_file:
+  #     - ./env/.env.local
+  #   environment:
+  #     SFCONNECTOR_HOME: /app
+  #     USE_SQL_SERVER: "true"
+  #     HA_MODE: "true"          # enable multi-node coordination on this node
+  #     SQL_CONNECTION_STRING: "Server=mssql,1433;Database=SalesforceConnector;User Id=sa;Password=Your_strong!Passw0rd;TrustServerCertificate=true;Encrypt=true"
+  #   command: ["full-deployment", "--continuous"]
+  #   volumes:
+  #     - ./config:/app/config
+  #     - ./env:/app/env
+  #     - ./logs:/app/logs
+  #     - ./data:/app/data
+  #   restart: unless-stopped
+  #
+  # NOTE: to make `connector` a coordinating node too, add `HA_MODE: "true"` to
+  # its environment block above. With HA_MODE unset it still runs correctly as a
+  # single node against the shared DB.
+
+volumes:
+  mssql-data:

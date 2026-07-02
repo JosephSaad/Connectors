@@ -45,12 +45,10 @@ internal static class SqlStateStore
         ?? throw new InvalidOperationException(
             "SQL_CONNECTION_STRING must be set when USE_SQL_SERVER=true");
 
-    private static SqlConnection OpenConnection()
-    {
-        var connection = new SqlConnection(ConnectionString);
-        connection.Open();
-        return connection;
-    }
+    // Every operation runs through SqlExecutor.Execute: it opens a hardened
+    // connection (Encrypt forced on, MI auth when configured) and retries the
+    // whole unit on a transient fault (AG failover / throttling / deadlock /
+    // timeout). Cross-process atomicity is still provided by the stored procs.
 
     private static SqlCommand Proc(SqlConnection connection, string name)
     {
@@ -65,24 +63,28 @@ internal static class SqlStateStore
     /// <summary>SQL equivalent of the sync_state.json lookup.</summary>
     public static DateTime? ReadLastSync(string connectorId)
     {
-        using var connection = OpenConnection();
-        using var command = Proc(connection, "dbo.usp_ReadLastSync");
-        command.Parameters.AddWithValue("@ConnectorId", connectorId);
-        var result = command.ExecuteScalar();
-        return result is DateTime lastSync
-            ? DateTime.SpecifyKind(lastSync, DateTimeKind.Utc)
-            : null;
+        return SqlExecutor.Execute<DateTime?>(ConnectionString, connection =>
+        {
+            using var command = Proc(connection, "dbo.usp_ReadLastSync");
+            command.Parameters.AddWithValue("@ConnectorId", connectorId);
+            var result = command.ExecuteScalar();
+            return result is DateTime lastSync
+                ? DateTime.SpecifyKind(lastSync, DateTimeKind.Utc)
+                : null;
+        });
     }
 
     /// <summary>SQL equivalent of the sync_state.json upsert.</summary>
     public static void WriteLastSync(string connectorId, DateTime timestamp)
     {
         var utc = timestamp.Kind == DateTimeKind.Local ? timestamp.ToUniversalTime() : timestamp;
-        using var connection = OpenConnection();
-        using var command = Proc(connection, "dbo.usp_WriteLastSync");
-        command.Parameters.AddWithValue("@ConnectorId", connectorId);
-        command.Parameters.Add(new SqlParameter("@LastSyncUtc", SqlDbType.DateTime2) { Value = utc });
-        command.ExecuteNonQuery();
+        SqlExecutor.Execute(ConnectionString, connection =>
+        {
+            using var command = Proc(connection, "dbo.usp_WriteLastSync");
+            command.Parameters.AddWithValue("@ConnectorId", connectorId);
+            command.Parameters.Add(new SqlParameter("@LastSyncUtc", SqlDbType.DateTime2) { Value = utc });
+            command.ExecuteNonQuery();
+        });
     }
 
     // ── Checkpointing ────────────────────────────────────────────────────────
@@ -94,33 +96,35 @@ internal static class SqlStateStore
     /// </summary>
     public static JsonObject? ReadCheckpoint(string connectorId)
     {
-        using var connection = OpenConnection();
-        using var command = Proc(connection, "dbo.usp_ReadCheckpoints");
-        command.Parameters.AddWithValue("@ConnectorId", connectorId);
-        using var reader = command.ExecuteReader();
-        string? since = null;
-        var haveSince = false;
-        var completed = new JsonObject();
-        var anyRows = false;
-        while (reader.Read())
+        return SqlExecutor.Execute<JsonObject?>(ConnectionString, connection =>
         {
-            anyRows = true;
-            var objectType = Convert.ToString(reader["ObjectType"])!;
-            completed[objectType] = Convert.ToInt32(reader["ChunkIndex"]);
-            if (!haveSince)
+            using var command = Proc(connection, "dbo.usp_ReadCheckpoints");
+            command.Parameters.AddWithValue("@ConnectorId", connectorId);
+            using var reader = command.ExecuteReader();
+            string? since = null;
+            var haveSince = false;
+            var completed = new JsonObject();
+            var anyRows = false;
+            while (reader.Read())
             {
-                var sinceValue = reader["SinceIso"];
-                since = sinceValue is DBNull or null ? null : Convert.ToString(sinceValue);
-                haveSince = true;
+                anyRows = true;
+                var objectType = Convert.ToString(reader["ObjectType"])!;
+                completed[objectType] = Convert.ToInt32(reader["ChunkIndex"]);
+                if (!haveSince)
+                {
+                    var sinceValue = reader["SinceIso"];
+                    since = sinceValue is DBNull or null ? null : Convert.ToString(sinceValue);
+                    haveSince = true;
+                }
             }
-        }
-        if (!anyRows)
-            return null;
-        return new JsonObject
-        {
-            ["since"] = since,
-            ["completed"] = completed,
-        };
+            if (!anyRows)
+                return null;
+            return new JsonObject
+            {
+                ["since"] = since,
+                ["completed"] = completed,
+            };
+        });
     }
 
     /// <summary>
@@ -147,23 +151,27 @@ internal static class SqlStateStore
                     ClearCheckpoint(connectorId);
                 }
             }
-            using var connection = OpenConnection();
-            using var command = Proc(connection, "dbo.usp_WriteCheckpoint");
-            command.Parameters.AddWithValue("@ConnectorId", connectorId);
-            command.Parameters.AddWithValue("@ObjectType", objectType);
-            command.Parameters.AddWithValue("@ChunkIndex", Math.Max(current, chunkIndex));
-            command.Parameters.AddWithValue("@SinceIso", (object?)sinceIso ?? DBNull.Value);
-            command.ExecuteNonQuery();
+            SqlExecutor.Execute(ConnectionString, connection =>
+            {
+                using var command = Proc(connection, "dbo.usp_WriteCheckpoint");
+                command.Parameters.AddWithValue("@ConnectorId", connectorId);
+                command.Parameters.AddWithValue("@ObjectType", objectType);
+                command.Parameters.AddWithValue("@ChunkIndex", Math.Max(current, chunkIndex));
+                command.Parameters.AddWithValue("@SinceIso", (object?)sinceIso ?? DBNull.Value);
+                command.ExecuteNonQuery();
+            });
         }
     }
 
     /// <summary>Remove all checkpoint rows for <paramref name="connectorId"/>.</summary>
     public static void ClearCheckpoint(string connectorId)
     {
-        using var connection = OpenConnection();
-        using var command = Proc(connection, "dbo.usp_ClearCheckpoints");
-        command.Parameters.AddWithValue("@ConnectorId", connectorId);
-        command.ExecuteNonQuery();
+        SqlExecutor.Execute(ConnectionString, connection =>
+        {
+            using var command = Proc(connection, "dbo.usp_ClearCheckpoints");
+            command.Parameters.AddWithValue("@ConnectorId", connectorId);
+            command.ExecuteNonQuery();
+        });
     }
 
     // ── Dead-letter queue ────────────────────────────────────────────────────
@@ -206,11 +214,13 @@ internal static class SqlStateStore
         }
         try
         {
-            using var connection = OpenConnection();
-            using var command = Proc(connection, "dbo.usp_AppendDeadLetter");
-            command.Parameters.AddWithValue("@ConnectorId", connectorId);
-            command.Parameters.AddWithValue("@RecordsJson", PyJson.Dumps(records));
-            command.ExecuteNonQuery();
+            SqlExecutor.Execute(ConnectionString, connection =>
+            {
+                using var command = Proc(connection, "dbo.usp_AppendDeadLetter");
+                command.Parameters.AddWithValue("@ConnectorId", connectorId);
+                command.Parameters.AddWithValue("@RecordsJson", PyJson.Dumps(records));
+                command.ExecuteNonQuery();
+            });
         }
         catch (Exception exc) when (exc is SqlException or InvalidOperationException)
         {
@@ -231,32 +241,34 @@ internal static class SqlStateStore
     /// </summary>
     public static List<(long Id, JsonObject Record)> ReadDeadLetterRows(string connectorId)
     {
-        var rows = new List<(long, JsonObject)>();
-        using var connection = OpenConnection();
-        using var command = Proc(connection, "dbo.usp_ReadDeadLetter");
-        command.Parameters.AddWithValue("@ConnectorId", connectorId);
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+        return SqlExecutor.Execute(ConnectionString, connection =>
         {
-            var id = Convert.ToInt64(reader["Id"]);
-            var failedUtc = DateTime.SpecifyKind(
-                Convert.ToDateTime(reader["FailedUtc"]), DateTimeKind.Utc);
-            var record = new JsonObject
+            var rows = new List<(long, JsonObject)>();
+            using var command = Proc(connection, "dbo.usp_ReadDeadLetter");
+            command.Parameters.AddWithValue("@ConnectorId", connectorId);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
             {
-                ["item_id"] = Convert.ToString(reader["ItemId"]),
-                ["object_type"] = Convert.ToString(reader["ObjectType"]),
-                ["error"] = Convert.ToString(reader["Error"]),
-                ["timestamp"] = SyncState.IsoFormat(failedUtc),
-            };
-            var requestBody = reader["RequestBody"];
-            if (requestBody is not (DBNull or null))
-                record["request_body"] = ParseBodyText(Convert.ToString(requestBody));
-            var responseBody = reader["ResponseBody"];
-            if (responseBody is not (DBNull or null))
-                record["response_body"] = ParseBodyText(Convert.ToString(responseBody));
-            rows.Add((id, record));
-        }
-        return rows;
+                var id = Convert.ToInt64(reader["Id"]);
+                var failedUtc = DateTime.SpecifyKind(
+                    Convert.ToDateTime(reader["FailedUtc"]), DateTimeKind.Utc);
+                var record = new JsonObject
+                {
+                    ["item_id"] = Convert.ToString(reader["ItemId"]),
+                    ["object_type"] = Convert.ToString(reader["ObjectType"]),
+                    ["error"] = Convert.ToString(reader["Error"]),
+                    ["timestamp"] = SyncState.IsoFormat(failedUtc),
+                };
+                var requestBody = reader["RequestBody"];
+                if (requestBody is not (DBNull or null))
+                    record["request_body"] = ParseBodyText(Convert.ToString(requestBody));
+                var responseBody = reader["ResponseBody"];
+                if (responseBody is not (DBNull or null))
+                    record["response_body"] = ParseBodyText(Convert.ToString(responseBody));
+                rows.Add((id, record));
+            }
+            return rows;
+        });
     }
 
     /// <summary>Unretried dead-letter records in the exact file shape.</summary>
@@ -269,19 +281,23 @@ internal static class SqlStateStore
         var idList = ids.ToList();
         if (idList.Count == 0)
             return;
-        using var connection = OpenConnection();
-        using var command = Proc(connection, "dbo.usp_MarkDeadLetterRetried");
-        command.Parameters.AddWithValue("@Ids", "[" + string.Join(",", idList) + "]");
-        command.ExecuteNonQuery();
+        SqlExecutor.Execute(ConnectionString, connection =>
+        {
+            using var command = Proc(connection, "dbo.usp_MarkDeadLetterRetried");
+            command.Parameters.AddWithValue("@Ids", "[" + string.Join(",", idList) + "]");
+            command.ExecuteNonQuery();
+        });
     }
 
     /// <summary>Delete all dead-letter rows for <paramref name="connectorId"/>.</summary>
     public static void ClearDeadLetter(string connectorId)
     {
-        using var connection = OpenConnection();
-        using var command = Proc(connection, "dbo.usp_ClearDeadLetter");
-        command.Parameters.AddWithValue("@ConnectorId", connectorId);
-        command.ExecuteNonQuery();
+        SqlExecutor.Execute(ConnectionString, connection =>
+        {
+            using var command = Proc(connection, "dbo.usp_ClearDeadLetter");
+            command.Parameters.AddWithValue("@ConnectorId", connectorId);
+            command.ExecuteNonQuery();
+        });
     }
 
     private static JsonNode? ParseBodyText(string? text)

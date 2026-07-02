@@ -457,6 +457,121 @@ public class IdentityQueryClient
         return !_noShareTableTypes.Contains(objectName);
     }
 
+    // ── Incremental identity change detection (#12) ──────────────────────────
+
+    /// <summary>
+    /// Return True if any identity-relevant data for <paramref name="objectName"/>
+    /// has changed since <paramref name="since"/> (a UTC watermark).
+    ///
+    /// "Identity-relevant" means anything that can alter the external-group
+    /// membership the crawl would emit for this object: the object's own
+    /// <c>&lt;Object&gt;Share</c> rows, plus the org-wide signals that feed every
+    /// private object's child groups (User, Group, UserRole).
+    ///
+    /// Incremental query strategy
+    /// --------------------------
+    /// Each source is probed with a <c>LastModifiedDate &gt;= since LIMIT 1</c> SOQL;
+    /// a single row is enough to mark the object "changed" and trigger a full
+    /// re-gather (the connector always emits complete membership, so a targeted
+    /// row-level diff is unnecessary — we only need a yes/no per object).
+    ///
+    /// Per-object fallback (documented)
+    /// --------------------------------
+    /// Some sources cannot be filtered by LastModifiedDate:
+    ///   * <c>GroupMember</c> has no LastModifiedDate field — a public-group
+    ///     membership edit is invisible to an incremental probe.  We compensate
+    ///     by treating any change to the parent <c>Group</c> as "changed" and,
+    ///     when the object's share table is absent/unsupported, by returning
+    ///     True unconditionally (fall back to full for that object).
+    ///   * Objects with no share table (e.g. Product2, Pricebook2, User) or whose
+    ///     share table rejects the query → cannot be probed → return True
+    ///     (safe direction: never miss a change).
+    /// Any probe error also returns True so a transient failure degrades to a
+    /// full gather rather than silently skipping an object.
+    /// </summary>
+    public virtual async Task<bool> HasIdentityChangesSinceAsync(string objectName, DateTime since)
+    {
+        var iso = Utils.ToIsoZ(since);
+
+        // 1. Object-specific: the <Object>Share table. Missing/unsupported share
+        //    table → cannot probe incrementally → fall back to full for this object.
+        if (!HasShareTable(objectName))
+        {
+            Logger.Info(
+                $"[IdentityQuery] {objectName}: no share table — cannot probe incrementally, treating as changed (full)");
+            return true;
+        }
+        var shareTable = ShareTableName(objectName);
+        var shareSoql =
+            $"SELECT Id FROM {shareTable} " +
+            $"WHERE LastModifiedDate >= {iso} " +
+            $"LIMIT 1";
+        try
+        {
+            var shareRows = await _sf.QueryAllAsync(shareSoql);
+            if (shareRows.Count > 0)
+            {
+                Logger.Info($"[IdentityQuery] {objectName}: {shareTable} changed since {iso}");
+                return true;
+            }
+        }
+        catch (InvalidOperationException exc)
+        {
+            var excStr = exc.Message;
+            if (excStr.Contains("INVALID_TYPE") || excStr.Contains("is not supported"))
+            {
+                Logger.Info(
+                    $"[IdentityQuery] Share table {shareTable} does not exist — {objectName} treated as changed (full)");
+                _noShareTableTypes.Add(objectName);
+            }
+            else
+            {
+                Logger.Warning(
+                    $"[IdentityQuery] {shareTable} incremental probe failed ({exc.Message}); treating {objectName} as changed (full)");
+            }
+            return true;
+        }
+
+        // 2. Org-wide signals: User / Group / UserRole feed the derived child
+        //    groups (global-access, roles, public/queue groups, managers) of every
+        //    private object.  Any change here can reshuffle this object's members.
+        //    Note: GroupMember has no LastModifiedDate, so a bare membership edit is
+        //    covered only transitively via its parent Group (documented fallback).
+        foreach (var signal in IdentityChangeSignalObjects)
+        {
+            var soql =
+                $"SELECT Id FROM {signal} " +
+                $"WHERE LastModifiedDate >= {iso} " +
+                $"LIMIT 1";
+            try
+            {
+                var rows = await _sf.QueryAllAsync(soql);
+                if (rows.Count > 0)
+                {
+                    Logger.Info($"[IdentityQuery] {objectName}: org-wide signal {signal} changed since {iso}");
+                    return true;
+                }
+            }
+            catch (InvalidOperationException exc)
+            {
+                Logger.Warning(
+                    $"[IdentityQuery] {signal} incremental probe failed ({exc.Message}); treating {objectName} as changed (full)");
+                return true;
+            }
+        }
+
+        Logger.Info($"[IdentityQuery] {objectName}: no identity changes since {iso} — will re-emit stored membership");
+        return false;
+    }
+
+    /// <summary>
+    /// Org-wide Salesforce objects whose modification can alter the derived
+    /// child-group membership of any private object.  All support
+    /// LastModifiedDate.  (GroupMember is intentionally absent — it has no
+    /// LastModifiedDate; its edits are covered transitively via Group.)
+    /// </summary>
+    internal static readonly string[] IdentityChangeSignalObjects = { "User", "Group", "UserRole" };
+
     /// <summary>
     /// Return True if the object has a valid OWD field on Organization.
     ///

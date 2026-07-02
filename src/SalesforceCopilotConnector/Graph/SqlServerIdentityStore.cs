@@ -27,6 +27,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Data.SqlClient;
 using SalesforceCopilotConnector.Config;
+using SalesforceCopilotConnector.Infrastructure;
 
 namespace SalesforceCopilotConnector.Graph;
 
@@ -55,13 +56,10 @@ public class SqlServerIdentityStore : IIdentityStore
 
     // ── Connection helpers ────────────────────────────────────────────────────
 
-    /// <summary>Open a pooled connection for one operation.</summary>
-    private SqlConnection OpenConnection()
-    {
-        var conn = new SqlConnection(_connectionString);
-        conn.Open();
-        return conn;
-    }
+    // Every operation runs through SqlExecutor.Execute: it opens a hardened
+    // connection (Encrypt forced on, MI auth when configured) and retries the
+    // whole unit on a transient fault (AG failover / throttling / deadlock /
+    // timeout). Connections remain per-operation; SqlClient pooling handles reuse.
 
     private static SqlCommand Proc(SqlConnection conn, string procName)
     {
@@ -73,14 +71,16 @@ public class SqlServerIdentityStore : IIdentityStore
     /// <summary>Return all group IDs tracked for this connection.</summary>
     public HashSet<string> GetAllGroupIds()
     {
-        var result = new HashSet<string>();
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_GetGroups");
-        cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-            result.Add(reader.GetString(0));
-        return result;
+        return SqlExecutor.Execute(_connectionString, conn =>
+        {
+            var result = new HashSet<string>();
+            using var cmd = Proc(conn, "dbo.usp_GetGroups");
+            cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                result.Add(reader.GetString(0));
+            return result;
+        });
     }
 
     /// <summary>Check if a group is already tracked.</summary>
@@ -93,23 +93,27 @@ public class SqlServerIdentityStore : IIdentityStore
     /// <summary>Insert or update a group record.</summary>
     public void UpsertGroup(string groupId, string displayName = "", string description = "")
     {
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_UpsertGroup");
-        cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
-        cmd.Parameters.AddWithValue("@GroupId", groupId);
-        cmd.Parameters.AddWithValue("@DisplayName", displayName);
-        cmd.Parameters.AddWithValue("@Description", description);
-        cmd.ExecuteNonQuery();
+        SqlExecutor.Execute(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_UpsertGroup");
+            cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
+            cmd.Parameters.AddWithValue("@GroupId", groupId);
+            cmd.Parameters.AddWithValue("@DisplayName", displayName);
+            cmd.Parameters.AddWithValue("@Description", description);
+            cmd.ExecuteNonQuery();
+        });
     }
 
     /// <summary>Delete a group and all its members (CASCADE).</summary>
     public void DeleteGroup(string groupId)
     {
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_DeleteGroup");
-        cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
-        cmd.Parameters.AddWithValue("@GroupId", groupId);
-        cmd.ExecuteNonQuery();
+        SqlExecutor.Execute(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_DeleteGroup");
+            cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
+            cmd.Parameters.AddWithValue("@GroupId", groupId);
+            cmd.ExecuteNonQuery();
+        });
     }
 
     // ── Member CRUD ───────────────────────────────────────────────────────────
@@ -117,39 +121,45 @@ public class SqlServerIdentityStore : IIdentityStore
     /// <summary>Return all current members of a group.</summary>
     public HashSet<MemberEntry> GetMembers(string groupId)
     {
-        var result = new HashSet<MemberEntry>();
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_GetMembers");
-        cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
-        cmd.Parameters.AddWithValue("@GroupId", groupId);
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-            result.Add(new MemberEntry(memberId: reader.GetString(0), memberType: reader.GetString(1), identitySource: reader.GetString(2)));
-        return result;
+        return SqlExecutor.Execute(_connectionString, conn =>
+        {
+            var result = new HashSet<MemberEntry>();
+            using var cmd = Proc(conn, "dbo.usp_GetMembers");
+            cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
+            cmd.Parameters.AddWithValue("@GroupId", groupId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                result.Add(new MemberEntry(memberId: reader.GetString(0), memberType: reader.GetString(1), identitySource: reader.GetString(2)));
+            return result;
+        });
     }
 
     /// <summary>Add a single member to a group.</summary>
     public void AddMember(string groupId, MemberEntry member)
     {
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_AddMember");
-        cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
-        cmd.Parameters.AddWithValue("@GroupId", groupId);
-        cmd.Parameters.AddWithValue("@MemberId", member.MemberId);
-        cmd.Parameters.AddWithValue("@MemberType", member.MemberType);
-        cmd.Parameters.AddWithValue("@IdentitySource", member.IdentitySource);
-        cmd.ExecuteNonQuery();
+        SqlExecutor.Execute(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_AddMember");
+            cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
+            cmd.Parameters.AddWithValue("@GroupId", groupId);
+            cmd.Parameters.AddWithValue("@MemberId", member.MemberId);
+            cmd.Parameters.AddWithValue("@MemberType", member.MemberType);
+            cmd.Parameters.AddWithValue("@IdentitySource", member.IdentitySource);
+            cmd.ExecuteNonQuery();
+        });
     }
 
     /// <summary>Remove a single member from a group.</summary>
     public void RemoveMember(string groupId, MemberEntry member)
     {
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_RemoveMember");
-        cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
-        cmd.Parameters.AddWithValue("@GroupId", groupId);
-        cmd.Parameters.AddWithValue("@MemberId", member.MemberId);
-        cmd.ExecuteNonQuery();
+        SqlExecutor.Execute(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_RemoveMember");
+            cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
+            cmd.Parameters.AddWithValue("@GroupId", groupId);
+            cmd.Parameters.AddWithValue("@MemberId", member.MemberId);
+            cmd.ExecuteNonQuery();
+        });
     }
 
     /// <summary>
@@ -170,12 +180,14 @@ public class SqlServerIdentityStore : IIdentityStore
                 ["identitySource"] = m.IdentitySource,
             });
         }
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_ReplaceGroupMembers");
-        cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
-        cmd.Parameters.AddWithValue("@GroupId", groupId);
-        cmd.Parameters.AddWithValue("@MembersJson", json.ToJsonString());
-        cmd.ExecuteNonQuery();
+        SqlExecutor.Execute(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_ReplaceGroupMembers");
+            cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
+            cmd.Parameters.AddWithValue("@GroupId", groupId);
+            cmd.Parameters.AddWithValue("@MembersJson", json.ToJsonString());
+            cmd.ExecuteNonQuery();
+        });
     }
 
     // ── Diff computation ──────────────────────────────────────────────────────
@@ -261,75 +273,81 @@ public class SqlServerIdentityStore : IIdentityStore
     public string StartSession(string crawlType = "identity", string syncType = "full")
     {
         var sessionId = Guid.NewGuid();
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_StartSession");
-        cmd.Parameters.Add("@SessionId", SqlDbType.UniqueIdentifier).Value = sessionId;
-        cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
-        cmd.Parameters.AddWithValue("@CrawlType", crawlType);
-        cmd.Parameters.AddWithValue("@SyncType", syncType);
-        cmd.ExecuteNonQuery();
+        SqlExecutor.Execute(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_StartSession");
+            cmd.Parameters.Add("@SessionId", SqlDbType.UniqueIdentifier).Value = sessionId;
+            cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
+            cmd.Parameters.AddWithValue("@CrawlType", crawlType);
+            cmd.Parameters.AddWithValue("@SyncType", syncType);
+            cmd.ExecuteNonQuery();
+        });
         return sessionId.ToString();
     }
 
     /// <summary>Finalise a sync session with aggregate stats.</summary>
     public void CompleteSession(string sessionId, SyncSessionStats stats, string status = "completed")
     {
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_CompleteSession");
-        cmd.Parameters.Add("@SessionId", SqlDbType.UniqueIdentifier).Value = Guid.Parse(sessionId);
-        cmd.Parameters.AddWithValue("@Status", status);
-        cmd.Parameters.AddWithValue("@StatsJson", SerializeStats(stats));
-        cmd.ExecuteNonQuery();
+        SqlExecutor.Execute(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_CompleteSession");
+            cmd.Parameters.Add("@SessionId", SqlDbType.UniqueIdentifier).Value = Guid.Parse(sessionId);
+            cmd.Parameters.AddWithValue("@Status", status);
+            cmd.Parameters.AddWithValue("@StatsJson", SerializeStats(stats));
+            cmd.ExecuteNonQuery();
+        });
     }
 
     /// <summary>Return the most recent completed sync session, or null.</summary>
     public Dictionary<string, object?>? GetLastSession(string? crawlType = null)
     {
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_GetLastSession");
-        cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
-        cmd.Parameters.AddWithValue("@CrawlType", string.IsNullOrEmpty(crawlType) ? DBNull.Value : crawlType);
-        using var reader = cmd.ExecuteReader();
-        if (!reader.Read())
-            return null;
-
-        // Columns: SessionId, CrawlType, SyncType, StartedUtc, CompletedUtc, Status, StatsJson
-        var statsJson = reader.IsDBNull(6) ? null : reader.GetString(6);
-        JsonObject? stats = null;
-        if (!string.IsNullOrEmpty(statsJson))
+        return SqlExecutor.Execute<Dictionary<string, object?>?>(_connectionString, conn =>
         {
-            try
-            {
-                stats = JsonNode.Parse(statsJson) as JsonObject;
-            }
-            catch (JsonException)
-            {
-                // pass — treat unparsable stats as absent
-            }
-        }
+            using var cmd = Proc(conn, "dbo.usp_GetLastSession");
+            cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
+            cmd.Parameters.AddWithValue("@CrawlType", string.IsNullOrEmpty(crawlType) ? DBNull.Value : crawlType);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read())
+                return null;
 
-        return new Dictionary<string, object?>
-        {
-            ["session_id"] = reader.GetGuid(0).ToString(),
-            ["crawl_type"] = reader.GetString(1),
-            ["sync_type"] = reader.GetString(2),
-            ["started_at"] = PyIso(reader.GetDateTime(3)),
-            ["completed_at"] = reader.IsDBNull(4) ? null : PyIso(reader.GetDateTime(4)),
-            ["status"] = reader.GetString(5),
-            ["groups_created"] = StatInt(stats, "groups_created"),
-            ["groups_updated"] = StatInt(stats, "groups_updated"),
-            ["groups_deleted"] = StatInt(stats, "groups_deleted"),
-            ["groups_unchanged"] = StatInt(stats, "groups_unchanged"),
-            ["members_added"] = StatInt(stats, "members_added"),
-            ["members_removed"] = StatInt(stats, "members_removed"),
-            ["api_calls_made"] = StatInt(stats, "api_calls_made"),
-            ["errors"] = StatInt(stats, "errors"),
-            ["content_total_fetched"] = StatInt(stats, "content_total_fetched"),
-            ["content_success"] = StatInt(stats, "content_success"),
-            ["content_failed"] = StatInt(stats, "content_failed"),
-            ["content_deleted"] = StatInt(stats, "content_deleted"),
-            ["content_acl_engine"] = StatString(stats, "content_acl_engine"),
-        };
+            // Columns: SessionId, CrawlType, SyncType, StartedUtc, CompletedUtc, Status, StatsJson
+            var statsJson = reader.IsDBNull(6) ? null : reader.GetString(6);
+            JsonObject? stats = null;
+            if (!string.IsNullOrEmpty(statsJson))
+            {
+                try
+                {
+                    stats = JsonNode.Parse(statsJson) as JsonObject;
+                }
+                catch (JsonException)
+                {
+                    // pass — treat unparsable stats as absent
+                }
+            }
+
+            return new Dictionary<string, object?>
+            {
+                ["session_id"] = reader.GetGuid(0).ToString(),
+                ["crawl_type"] = reader.GetString(1),
+                ["sync_type"] = reader.GetString(2),
+                ["started_at"] = PyIso(reader.GetDateTime(3)),
+                ["completed_at"] = reader.IsDBNull(4) ? null : PyIso(reader.GetDateTime(4)),
+                ["status"] = reader.GetString(5),
+                ["groups_created"] = StatInt(stats, "groups_created"),
+                ["groups_updated"] = StatInt(stats, "groups_updated"),
+                ["groups_deleted"] = StatInt(stats, "groups_deleted"),
+                ["groups_unchanged"] = StatInt(stats, "groups_unchanged"),
+                ["members_added"] = StatInt(stats, "members_added"),
+                ["members_removed"] = StatInt(stats, "members_removed"),
+                ["api_calls_made"] = StatInt(stats, "api_calls_made"),
+                ["errors"] = StatInt(stats, "errors"),
+                ["content_total_fetched"] = StatInt(stats, "content_total_fetched"),
+                ["content_success"] = StatInt(stats, "content_success"),
+                ["content_failed"] = StatInt(stats, "content_failed"),
+                ["content_deleted"] = StatInt(stats, "content_deleted"),
+                ["content_acl_engine"] = StatString(stats, "content_acl_engine"),
+            };
+        });
     }
 
     /// <summary>
@@ -339,15 +357,17 @@ public class SqlServerIdentityStore : IIdentityStore
     /// </summary>
     public DateTime? GetLastSuccessfulContentCrawlTime()
     {
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_GetLastSuccessfulContentCrawl");
-        cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
-        using var reader = cmd.ExecuteReader();
-        if (!reader.Read())
-            return null;
-        if (reader.IsDBNull(0))
-            return null;
-        return DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
+        return SqlExecutor.Execute<DateTime?>(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_GetLastSuccessfulContentCrawl");
+            cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read())
+                return null;
+            if (reader.IsDBNull(0))
+                return null;
+            return DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
+        });
     }
 
     // ── Field cache ─────────────────────────────────────────────────────────
@@ -359,25 +379,27 @@ public class SqlServerIdentityStore : IIdentityStore
     public string[]? GetCachedFields(string instanceUrl, string objectType)
     {
         var instHash = InstanceHash(instanceUrl);
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_GetCachedFields");
-        cmd.Parameters.AddWithValue("@InstanceHash", instHash);
-        cmd.Parameters.AddWithValue("@ObjectType", objectType);
-        using var reader = cmd.ExecuteReader();
-        if (reader.Read())
+        return SqlExecutor.Execute<string[]?>(_connectionString, conn =>
         {
-            try
+            using var cmd = Proc(conn, "dbo.usp_GetCachedFields");
+            cmd.Parameters.AddWithValue("@InstanceHash", instHash);
+            cmd.Parameters.AddWithValue("@ObjectType", objectType);
+            using var reader = cmd.ExecuteReader();
+            if (reader.Read())
             {
-                var data = JsonNode.Parse(reader.GetString(0));
-                if (data is JsonArray array && array.Count > 0)
-                    return array.Select(n => n!.GetValue<string>()).ToArray();
+                try
+                {
+                    var data = JsonNode.Parse(reader.GetString(0));
+                    if (data is JsonArray array && array.Count > 0)
+                        return array.Select(n => n!.GetValue<string>()).ToArray();
+                }
+                catch (Exception e) when (e is JsonException or InvalidOperationException or ArgumentNullException)
+                {
+                    // pass
+                }
             }
-            catch (Exception e) when (e is JsonException or InvalidOperationException or ArgumentNullException)
-            {
-                // pass
-            }
-        }
-        return null;
+            return null;
+        });
     }
 
     /// <summary>
@@ -386,12 +408,14 @@ public class SqlServerIdentityStore : IIdentityStore
     /// </summary>
     public void SaveCachedFields(string instanceUrl, string objectType, string[] fields)
     {
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_SaveCachedFields");
-        cmd.Parameters.AddWithValue("@InstanceHash", InstanceHash(instanceUrl));
-        cmd.Parameters.AddWithValue("@ObjectType", objectType);
-        cmd.Parameters.AddWithValue("@FieldsJson", DumpsJsonList(fields));
-        cmd.ExecuteNonQuery();
+        SqlExecutor.Execute(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_SaveCachedFields");
+            cmd.Parameters.AddWithValue("@InstanceHash", InstanceHash(instanceUrl));
+            cmd.Parameters.AddWithValue("@ObjectType", objectType);
+            cmd.Parameters.AddWithValue("@FieldsJson", DumpsJsonList(fields));
+            cmd.ExecuteNonQuery();
+        });
     }
 
     /// <summary>
@@ -405,13 +429,15 @@ public class SqlServerIdentityStore : IIdentityStore
     /// </summary>
     public int ClearFieldCache(string? instanceUrl = null, string? objectType = null)
     {
-        using var conn = OpenConnection();
-        using var cmd = Proc(conn, "dbo.usp_ClearFieldCache");
-        cmd.Parameters.AddWithValue("@InstanceHash",
-            string.IsNullOrEmpty(instanceUrl) ? DBNull.Value : InstanceHash(instanceUrl));
-        cmd.Parameters.AddWithValue("@ObjectType",
-            string.IsNullOrEmpty(instanceUrl) || string.IsNullOrEmpty(objectType) ? DBNull.Value : objectType);
-        return Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+        return SqlExecutor.Execute(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_ClearFieldCache");
+            cmd.Parameters.AddWithValue("@InstanceHash",
+                string.IsNullOrEmpty(instanceUrl) ? DBNull.Value : InstanceHash(instanceUrl));
+            cmd.Parameters.AddWithValue("@ObjectType",
+                string.IsNullOrEmpty(instanceUrl) || string.IsNullOrEmpty(objectType) ? DBNull.Value : objectType);
+            return Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+        });
     }
 
     // ── Utility ───────────────────────────────────────────────────────────────
@@ -424,20 +450,22 @@ public class SqlServerIdentityStore : IIdentityStore
     /// <summary>Return current counts of groups and members.</summary>
     public Dictionary<string, int> GetStats()
     {
-        using var conn = OpenConnection();
-        // The one non-proc query: an aggregate over the contract's
-        // vGroupMemberCounts view (the app login has SELECT on views).
-        using var cmd = new SqlCommand(
-            "SELECT COUNT(*), ISNULL(SUM(MemberCount), 0) FROM dbo.vGroupMemberCounts WHERE ConnectionId = @ConnectionId",
-            conn);
-        cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
-        using var reader = cmd.ExecuteReader();
-        reader.Read();
-        return new Dictionary<string, int>
+        return SqlExecutor.Execute(_connectionString, conn =>
         {
-            ["groups"] = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture),
-            ["members"] = Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
-        };
+            // The one non-proc query: an aggregate over the contract's
+            // vGroupMemberCounts view (the app login has SELECT on views).
+            using var cmd = new SqlCommand(
+                "SELECT COUNT(*), ISNULL(SUM(MemberCount), 0) FROM dbo.vGroupMemberCounts WHERE ConnectionId = @ConnectionId",
+                conn);
+            cmd.Parameters.AddWithValue("@ConnectionId", _connectionId);
+            using var reader = cmd.ExecuteReader();
+            reader.Read();
+            return new Dictionary<string, int>
+            {
+                ["groups"] = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture),
+                ["members"] = Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
+            };
+        });
     }
 
     /// <summary>Close the store. Connections are per-operation, so this is a no-op.</summary>
