@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: "8.0.x"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Core build + unit/integration tests (no external services). SQL/HA and other
+  # network-gated tests self-skip here because their *_TEST_* env vars are unset,
+  # so this job stays hermetic and fast. This is the gating job.
+  # ---------------------------------------------------------------------------
+  build-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build -c Release --no-restore
+
+      - name: Test
+        run: >-
+          dotnet test -c Release --no-build
+          --logger "trx;LogFileName=test-results.trx"
+          --collect:"XPlat Code Coverage"
+          --results-directory ./TestResults
+
+      - name: Upload test results (trx)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-trx
+          path: "**/TestResults/**/*.trx"
+          if-no-files-found: warn
+
+      - name: Upload code coverage
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-coverage
+          path: "**/TestResults/**/coverage.cobertura.xml"
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # SQL Server integration: spin up SQL Server 2022, provision the schema, then
+  # run the suite AGAIN with SQLSERVER_TEST_CONNECTION_STRING set so the
+  # self-skipping SQL/HA integration tests actually execute.
+  #
+  # This is a SEPARATE job on purpose: if SQL Server fails to come up (or the
+  # schema step fails), only this job goes red — the gating build-test job is
+  # unaffected.
+  # ---------------------------------------------------------------------------
+  sql-integration:
+    name: SQL Server Integration Tests
+    runs-on: ubuntu-latest
+    env:
+      # Workflow-local throwaway SA password. NOT a real secret — it only exists
+      # for the lifetime of this job's service container. No repo secret needed.
+      SA_PASSWORD: "Your_strong!Passw0rd1"
+      SQL_DB_NAME: "SalesforceConnector"
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Your_strong!Passw0rd1"
+          MSSQL_PID: "Developer"
+        ports:
+          - 1433:1433
+        # A container-level healthcheck can't easily read the runner env, so we
+        # poll from a dedicated step below instead.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Wait for SQL Server to accept connections
+        run: |
+          echo "Waiting for SQL Server on 127.0.0.1:1433 ..."
+          for i in $(seq 1 40); do
+            if docker run --rm --network host \
+                 mcr.microsoft.com/mssql-tools:latest \
+                 /opt/mssql-tools/bin/sqlcmd -S 127.0.0.1 -U sa -P "$SA_PASSWORD" -Q "SELECT 1" >/dev/null 2>&1; then
+              echo "SQL Server is up (attempt $i)."
+              exit 0
+            fi
+            echo "  not ready yet (attempt $i/40); sleeping 5s"
+            sleep 5
+          done
+          echo "::error::SQL Server did not become ready in time."
+          exit 1
+
+      - name: Provision database schema
+        run: |
+          echo "Running scripts/sql/create-database.sql via sqlcmd ..."
+          docker run --rm --network host \
+            -v "${{ github.workspace }}/scripts/sql:/scripts:ro" \
+            mcr.microsoft.com/mssql-tools:latest \
+            /opt/mssql-tools/bin/sqlcmd -S 127.0.0.1 -U sa -P "$SA_PASSWORD" -b -i /scripts/create-database.sql
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build -c Release --no-restore
+
+      - name: Test (SQL/HA integration enabled)
+        env:
+          # Presence of this var flips the SQL/HA integration tests from skipped
+          # to executed (see SqlServerIdentityStoreTests / SqlStateStoreTests /
+          # HaCoordinatorTests).
+          SQLSERVER_TEST_CONNECTION_STRING: "Server=127.0.0.1,1433;Database=SalesforceConnector;User Id=sa;Password=Your_strong!Passw0rd1;TrustServerCertificate=true;Encrypt=true"
+        run: >-
+          dotnet test -c Release --no-build
+          --logger "trx;LogFileName=sql-integration-results.trx"
+          --results-directory ./TestResults
+
+      - name: Upload SQL integration test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-integration-trx
+          path: "**/TestResults/**/*.trx"
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Build the container image (no push) to validate the Dockerfile builds end to
+  # end. Uses Buildx with layer caching; load into the local daemon so a failure
+  # in the runtime stage is caught too.
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker Build (validate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: salesforce-copilot-connector:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
