@@ -27,11 +27,12 @@ services:
     environment:
       ACCEPT_EULA: "Y"
       # Dev-only SA password (meets SQL Server complexity rules). Override via a
-      # shell env var if you like: MSSQL_SA_PASSWORD is read from the environment.
-      MSSQL_SA_PASSWORD: "Your_strong!Passw0rd"
+      # Override from the shell: export MSSQL_SA_PASSWORD before `docker compose up`.
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Your_strong!Passw0rd}"
       MSSQL_PID: "Developer"
     ports:
-      - "1433:1433"
+      # Loopback-only: a dev SQL with a known SA password must not listen on the LAN.
+      - "127.0.0.1:1433:1433"
     volumes:
       - mssql-data:/var/opt/mssql
     healthcheck:
@@ -56,7 +57,7 @@ services:
       mssql:
         condition: service_healthy
     environment:
-      MSSQL_SA_PASSWORD: "Your_strong!Passw0rd"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Your_strong!Passw0rd}"
     volumes:
       - ./scripts/sql:/scripts:ro
     entrypoint:
@@ -86,7 +87,7 @@ services:
       SFCONNECTOR_HOME: /app
       # Switch the state backend from file/SQLite to shared SQL Server.
       USE_SQL_SERVER: "true"
-      SQL_CONNECTION_STRING: "Server=mssql,1433;Database=SalesforceConnector;User Id=sa;Password=Your_strong!Passw0rd;TrustServerCertificate=true;Encrypt=true"
+      SQL_CONNECTION_STRING: "Server=mssql,1433;Database=SalesforceConnector;User Id=sa;Password=${MSSQL_SA_PASSWORD:-Your_strong!Passw0rd};TrustServerCertificate=true;Encrypt=true"
     command: ["full-deployment", "--continuous"]
     volumes:
       - ./config:/app/config
@@ -115,7 +116,7 @@ services:
   #     SFCONNECTOR_HOME: /app
   #     USE_SQL_SERVER: "true"
   #     HA_MODE: "true"          # enable multi-node coordination on this node
-  #     SQL_CONNECTION_STRING: "Server=mssql,1433;Database=SalesforceConnector;User Id=sa;Password=Your_strong!Passw0rd;TrustServerCertificate=true;Encrypt=true"
+  #     SQL_CONNECTION_STRING: "Server=mssql,1433;Database=SalesforceConnector;User Id=sa;Password=${MSSQL_SA_PASSWORD:-Your_strong!Passw0rd};TrustServerCertificate=true;Encrypt=true"
   #   command: ["full-deployment", "--continuous"]
   #   volumes:
   #     - ./config:/app/config

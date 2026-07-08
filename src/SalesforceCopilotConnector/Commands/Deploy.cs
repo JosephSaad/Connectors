@@ -45,6 +45,15 @@ public static class Deploy
     internal static Action<AppConfig, IngestionStats, string> RecordContentCrawlHook = Identity.RecordContentCrawl;
     internal static Func<AppConfig, DateTime?> GetLastContentCrawlTimeHook = Identity.GetLastContentCrawlTime;
 
+    /// <summary>
+    /// Actual sync type ("full"/"incremental") of the most recent
+    /// <see cref="RunFullDeploymentAsync"/> call, AFTER HA crawl-kind adoption —
+    /// a node that requested a full crawl but joined an open incremental one ran
+    /// incrementally. The continuous loop uses this to decide whether the
+    /// scheduled full-crawl slot was really consumed.
+    /// </summary>
+    internal static string? LastRunActualSyncType;
+
     /// <summary>Clamp hours to the valid range [12, 168].</summary>
     internal static int ClampHours(int hours) => Math.Max(12, Math.Min(168, hours));
 
@@ -64,6 +73,7 @@ public static class Deploy
         AppConfig? configOverride = null)
     {
         var syncType = since != null ? "incremental" : "full";
+        LastRunActualSyncType = syncType;
 
         var verbose = args.GetBool("verbose");
         var useDashboard = !verbose && Dashboard.HasRich;
@@ -84,6 +94,7 @@ public static class Deploy
             logger.Info(new string('=', 70));
 
             config = configOverride ?? LoadConfigHook();
+            Metrics.IncCrawlsStarted();
 
             // Full or incremental based on 'since' parameter
             // (in HA mode only the node that CREATES the crawl clears the shared
@@ -185,6 +196,20 @@ public static class Deploy
                             ? null
                             : SyncState.ParseIsoFormat(haCrawl.SinceIso!);
                     }
+                    // The joined crawl may be a different kind than this node requested
+                    // (a due FULL landing on an open INCREMENTAL, or vice versa). The
+                    // crawl that exists wins: adopt its kind so identity sync, labels
+                    // and the recorded crawl type match what actually runs — and so
+                    // the continuous loop doesn't consume its full-crawl slot on a
+                    // run that was really incremental.
+                    if (!string.IsNullOrEmpty(haCrawl.CrawlKind) && haCrawl.CrawlKind != syncType)
+                    {
+                        logger.Warning(
+                            $"[HA] Requested a {syncType} crawl but joined an open {haCrawl.CrawlKind} crawl — " +
+                            "this run follows the joined crawl's kind.");
+                        syncType = haCrawl.CrawlKind!;
+                        LastRunActualSyncType = syncType;
+                    }
                 }
                 progress.Info(
                     $"  [HA] {(haCrawl.Created ? "Opened" : "Joined")} crawl {haCrawl.CrawlId} as node '{HaCoordinator.NodeId}'");
@@ -277,25 +302,40 @@ public static class Deploy
             // alert if the dead-letter queue crossed its threshold (both no-ops when
             // the corresponding env vars are unset).
             CommandRegistry.RecordCrawlMetrics(stats);
-            Alerting.MaybeAlertDeadLetter(config.Connector.Id, stats.FailedCount);
+            await Alerting.MaybeAlertDeadLetterAsync(
+                config.Connector.Id, CommandRegistry.DeadLetterDepth(config.Connector.Id));
 
             // HA mode: only the node whose CloseCrawlIfComplete call performed the
             // close records the crawl + sync timestamp; every other node skips it.
             var haClosedCrawl = true;
             if (haCrawlId != null)
             {
-                haClosedCrawl = await HaCoordinator.CloseCrawlIfCompleteAsync(haCrawlId.Value);
-                if (haClosedCrawl)
+                if (ServiceStop.Requested)
                 {
-                    logger.Info($"[HA] Crawl {haCrawlId} complete — this node closes it and records sync state.");
-                    SyncState.ClearCheckpoint(config.Connector.Id);
-                    SyncState.WriteLastSync(config.Connector.Id, syncStart);
+                    // Graceful stop: our claims were intentionally left held for
+                    // another node to reclaim, and every SQL call runs under the
+                    // now-cancelled ServiceStop token — attempting the close would
+                    // throw and misreport this routine stop as a crash.
+                    haClosedCrawl = false;
+                    logger.Info(
+                        $"[HA] Service stop requested — leaving crawl {haCrawlId} open; " +
+                        "another node (or the next start) resumes and closes it.");
                 }
                 else
                 {
-                    logger.Info(
-                        $"[HA] Crawl {haCrawlId} still in progress on other node(s) — " +
-                        "sync state will be recorded by the closing node.");
+                    haClosedCrawl = await HaCoordinator.CloseCrawlIfCompleteAsync(haCrawlId.Value);
+                    if (haClosedCrawl)
+                    {
+                        logger.Info($"[HA] Crawl {haCrawlId} complete — this node closes it and records sync state.");
+                        SyncState.ClearCheckpoint(config.Connector.Id);
+                        SyncState.WriteLastSync(config.Connector.Id, syncStart);
+                    }
+                    else
+                    {
+                        logger.Info(
+                            $"[HA] Crawl {haCrawlId} still in progress on other node(s) — " +
+                            "sync state will be recorded by the closing node.");
+                    }
                 }
             }
 
@@ -337,11 +377,14 @@ public static class Deploy
     /// (docs/SHARDING.md): N shards ≈ N × the per-connection Graph ceiling. Disabled ⇒
     /// byte-identical to the single-connection path.
     /// </summary>
-    private static async Task<bool> RunDeploymentCycleAsync(
+    private static async Task<(bool Ok, bool RanFull)> RunDeploymentCycleAsync(
         ParsedArgs args, DateTime? since, DateTime? haCycleDueUtc = null)
     {
         if (!ShardingConfig.IsEnabled)
-            return await RunFullDeploymentAsync(args, since: since, haCycleDueUtc: haCycleDueUtc);
+        {
+            var ok = await RunFullDeploymentAsync(args, since: since, haCycleDueUtc: haCycleDueUtc);
+            return (ok, LastRunActualSyncType == "full");
+        }
 
         var progress = Logging.GetLogger("progress");
         AppConfig baseConfig;
@@ -352,28 +395,35 @@ public static class Deploy
         catch (Exception e)
         {
             Logging.GetLogger("deployment").Error($"❌ Could not load config for sharding: {e.Message}", e);
-            return false;
+            return (false, false);
         }
 
         if (!ShardingConfig.TryLoad(baseConfig, out var shards, out var error))
         {
             Logging.GetLogger("deployment").Error($"❌ Invalid GRAPH_CONNECTION_SHARDS: {error}");
-            return false;
+            return (false, false);
         }
 
         progress.Info($"🔀 Connection sharding enabled — {shards.Count} shard(s) across separate Graph connections.");
         var allOk = true;
+        var allFull = true;
         foreach (var shard in shards)
         {
             if (ServiceStop.Requested)
                 break;
+            // Each shard run installs its own log handlers via SetupLogging; without
+            // a reset between shards the handlers stack (k× duplicate lines by shard
+            // k, cross-shard log bleed, corrupted dashboards). Mirror the continuous
+            // loop's per-cycle reset at per-shard granularity.
+            CommandRegistry.ResetLogging();
             progress.Info($"── Shard '{shard.ConnectionId}': {string.Join(", ", shard.ObjectTypes)} ──");
             var shardConfig = ShardingConfig.ForShard(baseConfig, shard);
             var ok = await RunFullDeploymentAsync(
                 args, since: since, haCycleDueUtc: haCycleDueUtc, configOverride: shardConfig);
             allOk = allOk && ok;
+            allFull = allFull && LastRunActualSyncType == "full";
         }
-        return allOk;
+        return (allOk, allFull);
     }
 
     /// <summary>
@@ -417,7 +467,7 @@ public static class Deploy
             else
                 Logging.GetLogger("progress").Info("--incremental: no previous crawl found, running full crawl");
         }
-        var success = await RunDeploymentCycleAsync(args, since);
+        var (success, _) = await RunDeploymentCycleAsync(args, since);
 
         var continuous = args.GetBool("continuous");
         if (!continuous)
@@ -464,8 +514,11 @@ public static class Deploy
             if (elapsedSinceFull >= fullInterval)
             {
                 progressLogger.Info("🔄 Starting scheduled FULL crawl...");
-                await RunDeploymentCycleAsync(args, null, cycleDue);
-                lastFullTime = CommandRegistry.MonotonicSeconds();
+                var (_, ranFull) = await RunDeploymentCycleAsync(args, null, cycleDue);
+                // HA: joining an open incremental crawl means the full crawl did NOT
+                // run — keep the slot due so the next cycle attempts it again.
+                if (ranFull)
+                    lastFullTime = CommandRegistry.MonotonicSeconds();
             }
             else
             {
@@ -479,7 +532,7 @@ public static class Deploy
                 catch
                 {
                 }
-                await RunDeploymentCycleAsync(args, since, cycleDue);
+                _ = await RunDeploymentCycleAsync(args, since, cycleDue);
             }
         }
     }

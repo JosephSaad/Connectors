@@ -178,8 +178,7 @@ public sealed class AlertingTests : IDisposable
         var handler = new CapturingHandler();
         Alerting.HttpClient = new HttpClient(handler);
 
-        Alerting.MaybeAlertDeadLetter("c1", depth: 1000);
-        await Task.Delay(100);  // give the fire-and-forget task a chance
+        await Alerting.MaybeAlertDeadLetterAsync("c1", depth: 1000);
 
         Assert.Equal(0, handler.Calls);
     }
@@ -192,8 +191,7 @@ public sealed class AlertingTests : IDisposable
         var handler = new CapturingHandler();
         Alerting.HttpClient = new HttpClient(handler);
 
-        Alerting.MaybeAlertDeadLetter("c1", depth: 10);  // equal, not exceeded
-        await Task.Delay(100);
+        await Alerting.MaybeAlertDeadLetterAsync("c1", depth: 10);  // equal, not exceeded
 
         Assert.Equal(0, handler.Calls);
     }
@@ -207,9 +205,9 @@ public sealed class AlertingTests : IDisposable
         var handler = new FiringHandler(tcs);
         Alerting.HttpClient = new HttpClient(handler);
 
-        Alerting.MaybeAlertDeadLetter("c1", depth: 6);
-        // Wait for the fire-and-forget POST to land (bounded).
-        await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(5)));
+        // Awaited end-to-end: delivery must complete before the call returns, so a
+        // one-shot run exiting right after the crawl cannot lose the alert.
+        await Alerting.MaybeAlertDeadLetterAsync("c1", depth: 6);
 
         Assert.True(tcs.Task.IsCompleted, "dead-letter alert POST was not made");
         var obj = JsonNode.Parse(handler.LastBody!)!.AsObject();

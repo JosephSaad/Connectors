@@ -181,7 +181,10 @@ internal static class SqlStateStore
     /// file-lock approach). ``@RecordsJson`` uses the contract's camelCase JSON
     /// convention: ``[{"itemId", "objectType", "error", "requestBody", "responseBody"}]``
     /// where requestBody/responseBody are serialized JSON text (or SQL NULL when
-    /// not captured for the item).
+    /// not captured for the item). A fresh ``@BatchId`` is generated per call —
+    /// outside the retry unit — so when a transient retry re-runs an append whose
+    /// COMMIT succeeded but whose ack was lost, the proc detects the stored batch
+    /// and does not duplicate it.
     /// </summary>
     public static void AppendDeadLetter(
         string connectorId,
@@ -212,6 +215,9 @@ internal static class SqlStateStore
             };
             records.Add(record);
         }
+        // Generated OUTSIDE the SqlExecutor.Execute lambda so every retry of
+        // this unit presents the same batch id (the idempotency key).
+        var batchId = Guid.NewGuid();
         try
         {
             SqlExecutor.Execute(ConnectionString, connection =>
@@ -219,6 +225,7 @@ internal static class SqlStateStore
                 using var command = Proc(connection, "dbo.usp_AppendDeadLetter");
                 command.Parameters.AddWithValue("@ConnectorId", connectorId);
                 command.Parameters.AddWithValue("@RecordsJson", PyJson.Dumps(records));
+                command.Parameters.AddWithValue("@BatchId", batchId);
                 command.ExecuteNonQuery();
             });
         }

@@ -122,6 +122,27 @@ public class ShardingConfigTests : IDisposable
         Assert.Equal(new[] { "Case", "Lead" }, b.ObjectTypes);
     }
 
+    // ── Error: exactly-duplicated JSON key ────────────────────────────────────
+
+    [Fact]
+    public void TryLoadDuplicateJsonKeyReportsErrorInsteadOfThrowing()
+    {
+        // JsonObject parses a duplicated key lazily and throws ArgumentException on
+        // first access — TryLoad must convert that into a validation error, never
+        // crash the command ("never throws for user-input problems").
+        var config = ConfigWithObjects("Account", "Contact");
+        Environment.SetEnvironmentVariable(
+            ShardingConfig.EnvVar,
+            "{\"salesforceCrmA\":[\"Account\"],\"salesforceCrmA\":[\"Contact\"]}");
+
+        var ok = ShardingConfig.TryLoad(config, out var shards, out var error);
+
+        Assert.False(ok);
+        Assert.Empty(shards);
+        Assert.NotNull(error);
+        Assert.Contains("duplicate connection id", error!, StringComparison.OrdinalIgnoreCase);
+    }
+
     // ── Error: unknown object ─────────────────────────────────────────────────
 
     [Fact]

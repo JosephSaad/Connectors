@@ -120,6 +120,8 @@ CREATE TABLE dbo.Checkpoints
 GO
 
 -- Failed ingestion records (replaces the failed-records JSONL files).
+-- BatchId: client-generated per usp_AppendDeadLetter call so a commit-ack-loss
+-- retry of the same append is detected and skipped (no duplicated batches).
 IF OBJECT_ID(N'dbo.DeadLetter', N'U') IS NULL
 CREATE TABLE dbo.DeadLetter
 (
@@ -131,15 +133,28 @@ CREATE TABLE dbo.DeadLetter
     RequestBody  nvarchar(max) NULL,
     ResponseBody nvarchar(max) NULL,
     FailedUtc    datetime2(7)  NOT NULL,
-    RetriedUtc   datetime2(7)  NULL
+    RetriedUtc   datetime2(7)  NULL,
+    BatchId      uniqueidentifier NULL
 );
+GO
+
+-- Existing-database migration (idempotent): BatchId added after v1.
+IF COL_LENGTH(N'dbo.DeadLetter', N'BatchId') IS NULL
+    ALTER TABLE dbo.DeadLetter ADD BatchId uniqueidentifier NULL;
 GO
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_DeadLetter_Connector' AND object_id = OBJECT_ID(N'dbo.DeadLetter'))
 CREATE INDEX IX_DeadLetter_Connector ON dbo.DeadLetter (ConnectorId, RetriedUtc);
 GO
 
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_DeadLetter_Batch' AND object_id = OBJECT_ID(N'dbo.DeadLetter'))
+CREATE INDEX IX_DeadLetter_Batch ON dbo.DeadLetter (BatchId);
+GO
+
 -- One row per coordinated (multi-node) crawl cycle.
+-- ClosedBy: NodeId of the caller whose usp_CloseCrawlIfComplete performed the
+-- open→closed transition, so a commit-ack-loss retry by that node still gets
+-- Closed=1 (and every other node still gets 0).
 IF OBJECT_ID(N'dbo.CrawlSessions', N'U') IS NULL
 CREATE TABLE dbo.CrawlSessions
 (
@@ -150,8 +165,14 @@ CREATE TABLE dbo.CrawlSessions
     SinceIso    nvarchar(64)     NULL,
     StartedUtc  datetime2(7)     NOT NULL,
     ClosedUtc   datetime2(7)     NULL,
-    CreatedBy   nvarchar(128)    NOT NULL
+    CreatedBy   nvarchar(128)    NOT NULL,
+    ClosedBy    nvarchar(128)    NULL
 );
+GO
+
+-- Existing-database migration (idempotent): ClosedBy added after v1.
+IF COL_LENGTH(N'dbo.CrawlSessions', N'ClosedBy') IS NULL
+    ALTER TABLE dbo.CrawlSessions ADD ClosedBy nvarchar(128) NULL;
 GO
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_CrawlSessions_Connector' AND object_id = OBJECT_ID(N'dbo.CrawlSessions'))
@@ -159,6 +180,10 @@ CREATE INDEX IX_CrawlSessions_Connector ON dbo.CrawlSessions (ConnectorId, Statu
 GO
 
 -- One row per object type within a coordinated crawl; nodes claim rows.
+-- ClaimToken: client-generated per usp_ClaimNextObject call; a commit-ack-loss
+-- retry presenting the same token gets its already-claimed row back instead of
+-- double-claiming a second object.  Deliberately NOT keyed on NodeId — one
+-- node runs several concurrent workers, each with its own token.
 IF OBJECT_ID(N'dbo.ObjectClaims', N'U') IS NULL
 CREATE TABLE dbo.ObjectClaims
 (
@@ -169,10 +194,16 @@ CREATE TABLE dbo.ObjectClaims
     ClaimedUtc   datetime2(7)     NULL,
     HeartbeatUtc datetime2(7)     NULL,
     CompletedUtc datetime2(7)     NULL,
+    ClaimToken   uniqueidentifier NULL,
     CONSTRAINT PK_ObjectClaims PRIMARY KEY (CrawlId, ObjectType),
     CONSTRAINT FK_ObjectClaims_CrawlSessions FOREIGN KEY (CrawlId)
         REFERENCES dbo.CrawlSessions (CrawlId) ON DELETE CASCADE
 );
+GO
+
+-- Existing-database migration (idempotent): ClaimToken added after v1.
+IF COL_LENGTH(N'dbo.ObjectClaims', N'ClaimToken') IS NULL
+    ALTER TABLE dbo.ObjectClaims ADD ClaimToken uniqueidentifier NULL;
 GO
 
 -- ═════════════════════════════════════════════════════════════════════════════
@@ -371,6 +402,9 @@ END;
 GO
 
 -- Create a new sync session record (status 'running').
+-- Idempotent on @SessionId: the id is client-generated, so when a transient
+-- retry re-runs a call whose COMMIT succeeded but whose ack was lost, the
+-- second INSERT is skipped instead of failing with a 2627 PK violation.
 CREATE OR ALTER PROCEDURE dbo.usp_StartSession
     @SessionId    uniqueidentifier,
     @ConnectionId nvarchar(64),
@@ -381,8 +415,10 @@ BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
     BEGIN TRANSACTION;
-        INSERT INTO dbo.SyncSessions (SessionId, ConnectionId, CrawlType, SyncType, Status, StartedUtc)
-        VALUES (@SessionId, @ConnectionId, @CrawlType, @SyncType, N'running', SYSUTCDATETIME());
+        IF NOT EXISTS (SELECT 1 FROM dbo.SyncSessions WITH (UPDLOCK, SERIALIZABLE)
+                       WHERE SessionId = @SessionId)
+            INSERT INTO dbo.SyncSessions (SessionId, ConnectionId, CrawlType, SyncType, Status, StartedUtc)
+            VALUES (@SessionId, @ConnectionId, @CrawlType, @SyncType, N'running', SYSUTCDATETIME());
     COMMIT TRANSACTION;
 END;
 GO
@@ -585,31 +621,40 @@ GO
 --                  "requestBody": "..."|null, "responseBody": "..."|null,
 --                  "failedUtc": "ISO-8601"|null}]
 -- failedUtc defaults to the current UTC time when omitted.
+-- @BatchId is client-generated per call: when a transient retry re-runs a call
+-- whose COMMIT succeeded but whose ack was lost, the already-stored batch is
+-- detected and the whole INSERT is skipped (no duplicated dead-letter rows).
+-- NULL (legacy callers) always appends.
 CREATE OR ALTER PROCEDURE dbo.usp_AppendDeadLetter
     @ConnectorId nvarchar(64),
-    @RecordsJson nvarchar(max)
+    @RecordsJson nvarchar(max),
+    @BatchId     uniqueidentifier = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
     BEGIN TRANSACTION;
-        INSERT INTO dbo.DeadLetter (ConnectorId, ItemId, ObjectType, Error, RequestBody, ResponseBody, FailedUtc)
-        SELECT @ConnectorId,
-               j.ItemId,
-               j.ObjectType,
-               j.Error,
-               j.RequestBody,
-               j.ResponseBody,
-               COALESCE(TRY_CONVERT(datetime2(7), j.FailedUtc, 127), SYSUTCDATETIME())
-        FROM OPENJSON(@RecordsJson)
-        WITH (
-            ItemId       nvarchar(64)  '$.itemId',
-            ObjectType   nvarchar(128) '$.objectType',
-            Error        nvarchar(max) '$.error',
-            RequestBody  nvarchar(max) '$.requestBody',
-            ResponseBody nvarchar(max) '$.responseBody',
-            FailedUtc    nvarchar(64)  '$.failedUtc'
-        ) j;
+        IF @BatchId IS NULL
+           OR NOT EXISTS (SELECT 1 FROM dbo.DeadLetter WITH (UPDLOCK, HOLDLOCK)
+                          WHERE BatchId = @BatchId)
+            INSERT INTO dbo.DeadLetter (ConnectorId, ItemId, ObjectType, Error, RequestBody, ResponseBody, FailedUtc, BatchId)
+            SELECT @ConnectorId,
+                   j.ItemId,
+                   j.ObjectType,
+                   j.Error,
+                   j.RequestBody,
+                   j.ResponseBody,
+                   COALESCE(TRY_CONVERT(datetime2(7), j.FailedUtc, 127), SYSUTCDATETIME()),
+                   @BatchId
+            FROM OPENJSON(@RecordsJson)
+            WITH (
+                ItemId       nvarchar(64)  '$.itemId',
+                ObjectType   nvarchar(128) '$.objectType',
+                Error        nvarchar(max) '$.error',
+                RequestBody  nvarchar(max) '$.requestBody',
+                ResponseBody nvarchar(max) '$.responseBody',
+                FailedUtc    nvarchar(64)  '$.failedUtc'
+            ) j;
     COMMIT TRANSACTION;
 END;
 GO
@@ -663,6 +708,15 @@ GO
 -- if one exists, else create a CrawlSessions row plus one pending ObjectClaims
 -- row per object type.  @ObjectTypesJson = ["Account", "Case", ...]
 -- Result set: CrawlId uniqueidentifier, Created bit.
+-- Created derives from the crawl row (CreatedBy = @NodeId AND Status = 'open')
+-- rather than from "this call inserted": a commit-ack-loss retry by the
+-- creator re-finds the crawl it just created and still gets Created = 1, so
+-- the creator-only reset is not skipped.  Joining nodes still get 0.
+-- Creating a 'full' crawl also clears the connector's Checkpoints rows in the
+-- same transaction, so a creator that dies before its client-side clear cannot
+-- leave a stale checkpoint behind (the C# clear remains as a harmless no-op).
+-- DeadLetter is intentionally NOT cleared here — client behavior differs per
+-- command.
 CREATE OR ALTER PROCEDURE dbo.usp_OpenOrJoinCrawl
     @ConnectorId     nvarchar(64),
     @CrawlKind       nvarchar(16),
@@ -674,7 +728,6 @@ BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
     DECLARE @CrawlId  uniqueidentifier;
-    DECLARE @Created  bit = 0;
     DECLARE @Resource nvarchar(255) = N'SFC_' + @ConnectorId;
     DECLARE @LockResult int;
     BEGIN TRANSACTION;
@@ -695,17 +748,23 @@ BEGIN
         IF @CrawlId IS NULL
         BEGIN
             SET @CrawlId = NEWID();
-            SET @Created = 1;
             INSERT INTO dbo.CrawlSessions (CrawlId, ConnectorId, CrawlKind, Status, SinceIso, StartedUtc, CreatedBy)
             VALUES (@CrawlId, @ConnectorId, @CrawlKind, N'open', @SinceIso, SYSUTCDATETIME(), @NodeId);
+            -- DISTINCT (post-cast to the column type): a schema with a
+            -- duplicated objectName must not violate PK (CrawlId, ObjectType).
             INSERT INTO dbo.ObjectClaims (CrawlId, ObjectType, Status)
-            SELECT @CrawlId, j.value, N'pending'
+            SELECT DISTINCT @CrawlId, CAST(j.value AS nvarchar(128)), N'pending'
             FROM OPENJSON(@ObjectTypesJson) j;
+            -- Creator-side full-crawl reset, transactional with the create.
+            IF @CrawlKind = N'full'
+                DELETE FROM dbo.Checkpoints WHERE ConnectorId = @ConnectorId;
         END;
     COMMIT TRANSACTION;  -- releases the applock
     -- SinceIso/CrawlKind come from the crawl row so JOINING nodes adopt the
     -- creator's incremental boundary (checkpoints must share one 'since').
-    SELECT cs.CrawlId, @Created AS Created, cs.SinceIso, cs.CrawlKind
+    SELECT cs.CrawlId,
+           CAST(CASE WHEN cs.CreatedBy = @NodeId AND cs.Status = N'open' THEN 1 ELSE 0 END AS bit) AS Created,
+           cs.SinceIso, cs.CrawlKind
     FROM dbo.CrawlSessions cs
     WHERE cs.CrawlId = @CrawlId;
 END;
@@ -714,19 +773,37 @@ GO
 -- Atomically (UPDLOCK, READPAST) claim one pending row, or reclaim a claimed
 -- row whose heartbeat is older than @ClaimTimeoutSeconds.
 -- Result set: 0 or 1 rows with ObjectType.
+-- @ClaimToken is client-generated per call (NOT per node — one node runs
+-- several concurrent workers): before claiming anew, the proc returns any row
+-- in this crawl already carrying the token, so a commit-ack-loss retry gets
+-- its own committed claim back instead of double-claiming a second object and
+-- stranding the first until the claim timeout.
 CREATE OR ALTER PROCEDURE dbo.usp_ClaimNextObject
     @CrawlId             uniqueidentifier,
     @NodeId              nvarchar(128),
-    @ClaimTimeoutSeconds int = 300
+    @ClaimTimeoutSeconds int = 300,
+    @ClaimToken          uniqueidentifier = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
+    IF @ClaimToken IS NOT NULL
+    BEGIN
+        DECLARE @AlreadyClaimed nvarchar(128);
+        SELECT TOP (1) @AlreadyClaimed = ObjectType
+        FROM dbo.ObjectClaims
+        WHERE CrawlId = @CrawlId AND ClaimToken = @ClaimToken;
+        IF @AlreadyClaimed IS NOT NULL
+        BEGIN
+            SELECT @AlreadyClaimed AS ObjectType;
+            RETURN;
+        END;
+    END;
     DECLARE @Cutoff datetime2(7) = DATEADD(SECOND, -@ClaimTimeoutSeconds, SYSUTCDATETIME());
     DECLARE @Claimed TABLE (ObjectType nvarchar(128));
     WITH candidate AS
     (
-        SELECT TOP (1) Status, NodeId, ClaimedUtc, HeartbeatUtc, ObjectType
+        SELECT TOP (1) Status, NodeId, ClaimedUtc, HeartbeatUtc, ClaimToken, ObjectType
         FROM dbo.ObjectClaims WITH (UPDLOCK, READPAST, ROWLOCK)
         WHERE CrawlId = @CrawlId
           AND (Status = N'pending'
@@ -736,6 +813,7 @@ BEGIN
     UPDATE candidate
        SET Status       = N'claimed',
            NodeId       = @NodeId,
+           ClaimToken   = @ClaimToken,
            ClaimedUtc   = SYSUTCDATETIME(),
            HeartbeatUtc = SYSUTCDATETIME()
     OUTPUT inserted.ObjectType INTO @Claimed;
@@ -781,10 +859,16 @@ END;
 GO
 
 -- Close the crawl when no pending/claimed rows remain ('failed' if any claim
--- failed).  Result set: Closed = 1 when THIS call performed the close (that
+-- failed).  Result set: Closed = 1 when THIS NODE performed the close (that
 -- caller writes the sync timestamp), else 0.
+-- Only one UPDATE ever wins the open→closed transition (recording @NodeId in
+-- ClosedBy), so under concurrency exactly one node reports 1; deriving the
+-- result from ClosedBy = @NodeId keeps it stable when a commit-ack-loss retry
+-- re-runs the closer's call.  @NodeId = NULL (legacy callers) preserves the
+-- old @@ROWCOUNT-of-the-UPDATE semantics.
 CREATE OR ALTER PROCEDURE dbo.usp_CloseCrawlIfComplete
-    @CrawlId uniqueidentifier
+    @CrawlId uniqueidentifier,
+    @NodeId  nvarchar(128) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -798,18 +882,27 @@ BEGIN
                SET Status = CASE WHEN EXISTS (SELECT 1 FROM dbo.ObjectClaims
                                               WHERE CrawlId = @CrawlId AND Status = N'failed')
                                  THEN N'failed' ELSE N'closed' END,
-                   ClosedUtc = SYSUTCDATETIME()
+                   ClosedUtc = SYSUTCDATETIME(),
+                   ClosedBy  = @NodeId
              WHERE CrawlId = @CrawlId AND Status = N'open';
             SET @Closed = @@ROWCOUNT;
         END;
+        IF @NodeId IS NOT NULL
+            SET @Closed = CASE WHEN EXISTS (SELECT 1 FROM dbo.CrawlSessions
+                                            WHERE CrawlId = @CrawlId
+                                              AND Status IN (N'closed', N'failed')
+                                              AND ClosedBy = @NodeId)
+                               THEN 1 ELSE 0 END;
     COMMIT TRANSACTION;
     SELECT @Closed AS Closed;
 END;
 GO
 
 -- Prune history older than @RetentionDays: retried dead-letter rows, sync
--- sessions, and crawl sessions (+claims, via FK cascade).  Open/running rows
--- are never pruned.  Result set: rows deleted per table.
+-- sessions, and crawl sessions (+claims, via FK cascade).  Open crawls are
+-- never pruned; SyncSessions rows still 'running' past the cutoff are zombies
+-- (crashed runs that never completed) and ARE pruned.
+-- Result set: rows deleted per table.
 CREATE OR ALTER PROCEDURE dbo.usp_PruneHistory
     @RetentionDays int
 AS
@@ -829,8 +922,10 @@ BEGIN
         DELETE FROM dbo.DeadLetter
          WHERE RetriedUtc IS NOT NULL AND RetriedUtc < @Cutoff;
         SET @DeadLetterDeleted = @@ROWCOUNT;
+        -- Includes zombie 'running' rows: anything started before the cutoff
+        -- is history (a live run is never older than the retention window).
         DELETE FROM dbo.SyncSessions
-         WHERE StartedUtc < @Cutoff AND Status <> N'running';
+         WHERE StartedUtc < @Cutoff;
         SET @SyncSessionsDeleted = @@ROWCOUNT;
         DELETE FROM dbo.CrawlSessions
          WHERE StartedUtc < @Cutoff AND Status <> N'open';

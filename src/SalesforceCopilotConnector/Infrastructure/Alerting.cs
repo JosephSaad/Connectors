@@ -102,23 +102,26 @@ public static class Alerting
     /// Raise a <c>dead_letter</c> alert when <paramref name="depth"/> exceeds
     /// <c>ALERT_DEADLETTER_THRESHOLD</c> (a positive integer enables the check).
     /// No-op when the threshold is unset, non-positive, or not exceeded.
-    /// Fire-and-forget: the POST is not awaited by the caller.
+    /// Callers must await the returned task: on a one-shot run the process exits
+    /// right after the crawl summary, and an unawaited webhook POST would be
+    /// aborted mid-flight (RaiseAsync already swallows every delivery failure,
+    /// so awaiting can never break the crawl).
     /// </summary>
-    public static void MaybeAlertDeadLetter(string connectorId, int depth)
+    public static Task MaybeAlertDeadLetterAsync(string connectorId, int depth)
     {
         var raw = Environment.GetEnvironmentVariable(DeadLetterThresholdEnvVar);
         if (string.IsNullOrWhiteSpace(raw))
         {
-            return;
+            return Task.CompletedTask;
         }
         if (!int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var threshold)
             || threshold <= 0)
         {
-            return;
+            return Task.CompletedTask;
         }
         if (depth <= threshold)
         {
-            return;
+            return Task.CompletedTask;
         }
 
         var data = new Dictionary<string, object?>
@@ -127,15 +130,10 @@ public static class Alerting
             ["depth"] = depth,
             ["threshold"] = threshold,
         };
-        // Fire-and-forget; RaiseAsync itself swallows all failures. Observe the
-        // task to avoid unobserved-exception warnings (there won't be any).
-        _ = RaiseAsync(
-                "dead_letter",
-                $"Dead-letter depth {depth} exceeded threshold {threshold} for connector '{connectorId}'",
-                data)
-            .ContinueWith(
-                t => Logger.Error($"Alerting: dead-letter alert task faulted: {t.Exception?.Message}"),
-                TaskContinuationOptions.OnlyOnFaulted);
+        return RaiseAsync(
+            "dead_letter",
+            $"Dead-letter depth {depth} exceeded threshold {threshold} for connector '{connectorId}'",
+            data);
     }
 
     /// <summary>Build the alert JSON envelope. Separated for testability.</summary>

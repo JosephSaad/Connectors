@@ -303,6 +303,69 @@ public class SqlExecutorHardenTests
     }
 }
 
+// ── Cancellation on the open path (pure, via a fake) ─────────────────────────
+
+/// <summary>
+/// SqlExecutor observes the caller's CancellationToken right after a successful
+/// Open (OpenRaw → OpenWithCancellation). On that path the just-opened
+/// connection must be disposed BEFORE the OperationCanceledException propagates
+/// (no leaked connection), and the cancellation must never be classified
+/// transient (no retry). Driven through the internal seam with a fake
+/// disposable — no SQL Server, no sleeps.
+/// </summary>
+public class SqlExecutorOpenCancellationTests
+{
+    private sealed class FakeConnection : IDisposable
+    {
+        public bool Disposed { get; private set; }
+
+        public void Dispose() => Disposed = true;
+    }
+
+    [Fact]
+    public void CancellationAfterOpenDisposesTheJustOpenedConnection()
+    {
+        var fake = new FakeConnection();
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        Assert.Throws<OperationCanceledException>(
+            () => SqlExecutor.OpenWithCancellation(() => fake, cts.Token));
+        Assert.True(fake.Disposed);
+    }
+
+    [Fact]
+    public void NoCancellationReturnsTheConnectionUndisposed()
+    {
+        var fake = new FakeConnection();
+
+        var returned = SqlExecutor.OpenWithCancellation(() => fake, CancellationToken.None);
+
+        Assert.Same(fake, returned);
+        Assert.False(fake.Disposed);
+    }
+
+    [Fact]
+    public void OpenFailurePropagatesUnchanged()
+    {
+        // A failed open (factory throws) propagates as-is — the factory owns
+        // disposal on that path; the cancellation guard must not mask it.
+        Assert.Throws<InvalidOperationException>(
+            () => SqlExecutor.OpenWithCancellation<FakeConnection>(
+                () => throw new InvalidOperationException("open failed"),
+                CancellationToken.None));
+    }
+
+    [Fact]
+    public void CancellationIsNotClassifiedTransient()
+    {
+        // A cancellation thrown from the open path (or anywhere in the body)
+        // must rethrow immediately — never retried like a transient SQL fault.
+        Assert.False(SqlExecutor.IsTransient(new OperationCanceledException()));
+        Assert.False(SqlExecutor.IsTransient(new TaskCanceledException()));
+    }
+}
+
 // ── Env-driven config (cached + resettable) ──────────────────────────────────
 
 /// <summary>

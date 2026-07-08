@@ -27,13 +27,13 @@ COPY tests/SalesforceCopilotConnector.Tests/SalesforceCopilotConnector.Tests.csp
 COPY tools/StressHarness/StressHarness.csproj tools/StressHarness/
 RUN dotnet restore src/SalesforceCopilotConnector/SalesforceCopilotConnector.csproj
 
-# Copy the remaining sources and publish the connector only (Release, linux-x64,
-# framework-dependent — the runtime stage already ships the .NET runtime).
+# Copy the remaining sources and publish the connector only (Release,
+# framework-dependent, portable — the runtime stage already ships the .NET
+# runtime, and a RID here would need a matching `dotnet restore -r`; the
+# portable publish carries the native assets (e.g. SQLite) under runtimes/).
 COPY . .
 RUN dotnet publish src/SalesforceCopilotConnector/SalesforceCopilotConnector.csproj \
         -c Release \
-        -r linux-x64 \
-        --no-self-contained \
         --no-restore \
         -o /app/publish
 

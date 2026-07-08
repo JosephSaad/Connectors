@@ -261,18 +261,44 @@ public static class SqlExecutor
     // the string is hardened once per call, not once per retry attempt).
     private static SqlConnection OpenRaw(string hardenedConnectionString, CancellationToken cancellationToken = default)
     {
-        var connection = new SqlConnection(hardenedConnectionString);
+        return OpenWithCancellation(() =>
+        {
+            var connection = new SqlConnection(hardenedConnectionString);
+            try
+            {
+                connection.Open();
+            }
+            catch
+            {
+                connection.Dispose();
+                throw;
+            }
+            return connection;
+        }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Open a disposable resource, then honor <paramref name="cancellationToken"/>:
+    /// when cancellation is observed AFTER a successful open, the just-opened
+    /// resource is disposed before the <see cref="OperationCanceledException"/>
+    /// propagates — never leaked. The cancellation is deliberately NOT classified
+    /// transient (see <see cref="IsTransient"/>), so it is never retried.
+    /// Internal seam so the dispose-on-cancel path is unit-testable via a fake.
+    /// </summary>
+    internal static T OpenWithCancellation<T>(Func<T> open, CancellationToken cancellationToken)
+        where T : IDisposable
+    {
+        var resource = open();
         try
         {
-            connection.Open();
+            cancellationToken.ThrowIfCancellationRequested();
         }
         catch
         {
-            connection.Dispose();
+            resource.Dispose();
             throw;
         }
-        cancellationToken.ThrowIfCancellationRequested();
-        return connection;
+        return resource;
     }
 
     // ── Transient classification (#1, pure) ───────────────────────────────────
@@ -285,7 +311,9 @@ public static class SqlExecutor
     /// is a <see cref="SqlException"/> whose <c>IsTransient</c> is set, or any error
     /// in its collection carries a known transient number, or (for timeouts surfaced
     /// as a plain <see cref="TimeoutException"/>) it is a timeout. Everything else is
-    /// non-transient and must rethrow without retry.
+    /// non-transient and must rethrow without retry — notably a cancellation
+    /// (<see cref="OperationCanceledException"/>) must propagate immediately, never
+    /// be retried.
     /// </summary>
     internal static bool IsTransient(Exception exception)
     {

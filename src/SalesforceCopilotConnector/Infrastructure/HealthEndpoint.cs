@@ -144,6 +144,9 @@ public sealed class HealthEndpoint : IDisposable
                     return;
                 }
                 Logger.Warning($"Health endpoint: accept error: {exc.Message}");
+                // A persistently broken listener (fd exhaustion, dead socket) must not
+                // spin this thread hot and flood the rotating log — pace the retries.
+                Thread.Sleep(1000);
                 continue;
             }
 
@@ -191,7 +194,19 @@ public sealed class HealthEndpoint : IDisposable
     {
         try
         {
-            var depth = SyncState.ReadFailedRecords(_config.Connector.Id).Count;
+            // Under connection sharding each shard dead-letters against its own
+            // connector id, so the depth is the sum across shards; otherwise the
+            // base connector id's queue is the whole story.
+            int depth;
+            if (Salesforce.ShardingConfig.IsEnabled
+                && Salesforce.ShardingConfig.TryLoad(_config, out var shards, out _))
+            {
+                depth = shards.Sum(s => SyncState.ReadFailedRecords(s.ConnectionId).Count);
+            }
+            else
+            {
+                depth = SyncState.ReadFailedRecords(_config.Connector.Id).Count;
+            }
             Metrics.SetDeadLetterDepth(depth);
         }
         catch (Exception exc)

@@ -27,7 +27,6 @@
 using System.Data;
 using System.Globalization;
 using System.Text.RegularExpressions;
-using Microsoft.Data.SqlClient;
 using SalesforceCopilotConnector.Config;
 
 namespace SalesforceCopilotConnector.Infrastructure;
@@ -116,17 +115,24 @@ public static class LogPruner
         logger.Info($"Log pruning: pruned {pruned} run dir(s) older than {days} day(s)");
 
         // SQL Server mode: also prune server-side history per the contract.
+        // Routed through SqlExecutor (like every other SQL caller) so the
+        // connection is hardened — Encrypt forced on, and with
+        // SQL_USE_MANAGED_IDENTITY=true the Entra (ActiveDirectoryDefault)
+        // auth is injected (a raw SqlConnection would fail login every run,
+        // since the connection string legitimately carries no credentials) —
+        // and transient faults are retried.
         if (SyncState.UseSqlServer)
         {
             try
             {
-                using var connection = new SqlConnection(SqlStateStore.ConnectionString);
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandType = CommandType.StoredProcedure;
-                command.CommandText = "dbo.usp_PruneHistory";
-                command.Parameters.AddWithValue("@RetentionDays", days);
-                command.ExecuteNonQuery();
+                SqlExecutor.Execute(SqlStateStore.ConnectionString, connection =>
+                {
+                    using var command = connection.CreateCommand();
+                    command.CommandType = CommandType.StoredProcedure;
+                    command.CommandText = "dbo.usp_PruneHistory";
+                    command.Parameters.AddWithValue("@RetentionDays", days);
+                    command.ExecuteNonQuery();
+                });
                 logger.Info($"Log pruning: usp_PruneHistory executed (@RetentionDays={days})");
             }
             catch (Exception exc)

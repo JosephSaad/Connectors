@@ -36,6 +36,13 @@ public static class IngestCommand
     internal static Func<AppConfig, GraphClient, DateTime?, IngestionDashboard?, Task<IngestionStats>> IngestContentHook =
         (config, client, since, dashboard) => Ingest.IngestContentAsync(config, client, since: since, dashboard: dashboard);
 
+    /// <summary>
+    /// Actual sync type ("full"/"incremental") of the most recent
+    /// <see cref="RunIngestAsync"/> call, AFTER HA crawl-kind adoption (see
+    /// <see cref="Deploy.LastRunActualSyncType"/> for the rationale).
+    /// </summary>
+    internal static string? LastRunActualSyncType;
+
     /// <summary>Clamp hours to the valid range [12, 168].</summary>
     internal static int ClampHours(int hours) => Math.Max(12, Math.Min(168, hours));
 
@@ -55,6 +62,7 @@ public static class IngestCommand
         AppConfig? configOverride = null)
     {
         var syncType = since != null ? "incremental" : "full";
+        LastRunActualSyncType = syncType;
 
         var verbose = args.GetBool("verbose");
         var useDashboard = !verbose && Dashboard.HasRich;
@@ -74,6 +82,7 @@ public static class IngestCommand
             logger.Info(new string('=', 70));
 
             config = configOverride ?? LoadConfigHook();
+            Metrics.IncCrawlsStarted();
 
             // Full or incremental based on 'since' parameter
             // (in HA mode only the node that CREATES the crawl clears the shared
@@ -145,6 +154,16 @@ public static class IngestCommand
                 else
                 {
                     logger.Info($"[HA] Joined crawl {haCrawl.CrawlId} (node={HaCoordinator.NodeId})");
+                    // The joined crawl's kind wins (see Deploy.cs) — adopt it so the
+                    // identity-sync decision, labels and recorded crawl type match.
+                    if (!string.IsNullOrEmpty(haCrawl.CrawlKind) && haCrawl.CrawlKind != syncType)
+                    {
+                        logger.Warning(
+                            $"[HA] Requested a {syncType} crawl but joined an open {haCrawl.CrawlKind} crawl — " +
+                            "this run follows the joined crawl's kind.");
+                        syncType = haCrawl.CrawlKind!;
+                        LastRunActualSyncType = syncType;
+                    }
                     // Adopt the crawl's incremental boundary so checkpoints line up across nodes.
                     if (haCrawl.HasSinceIso)
                     {
@@ -239,25 +258,39 @@ public static class IngestCommand
             // Observability: fold outcome into /metrics and alert on dead-letter threshold
             // (no-ops when HEALTH_PORT / ALERT_* env vars are unset).
             CommandRegistry.RecordCrawlMetrics(stats);
-            Alerting.MaybeAlertDeadLetter(config.Connector.Id, stats.FailedCount);
+            await Alerting.MaybeAlertDeadLetterAsync(
+                config.Connector.Id, CommandRegistry.DeadLetterDepth(config.Connector.Id));
 
             // HA mode: only the node whose CloseCrawlIfComplete call performed the
             // close records the crawl + sync timestamp; every other node skips it.
             var haClosedCrawl = true;
             if (haCrawlId != null)
             {
-                haClosedCrawl = await HaCoordinator.CloseCrawlIfCompleteAsync(haCrawlId.Value);
-                if (haClosedCrawl)
+                if (ServiceStop.Requested)
                 {
-                    logger.Info($"[HA] Crawl {haCrawlId} complete — this node closes it and records sync state.");
-                    SyncState.ClearCheckpoint(config.Connector.Id);
-                    SyncState.WriteLastSync(config.Connector.Id, syncStart);
+                    // Graceful stop: claims stay held for reclaim, and SQL calls run
+                    // under the now-cancelled ServiceStop token — closing here would
+                    // throw and misreport the routine stop as a crash.
+                    haClosedCrawl = false;
+                    logger.Info(
+                        $"[HA] Service stop requested — leaving crawl {haCrawlId} open; " +
+                        "another node (or the next start) resumes and closes it.");
                 }
                 else
                 {
-                    logger.Info(
-                        $"[HA] Crawl {haCrawlId} still in progress on other node(s) — " +
-                        "sync state will be recorded by the closing node.");
+                    haClosedCrawl = await HaCoordinator.CloseCrawlIfCompleteAsync(haCrawlId.Value);
+                    if (haClosedCrawl)
+                    {
+                        logger.Info($"[HA] Crawl {haCrawlId} complete — this node closes it and records sync state.");
+                        SyncState.ClearCheckpoint(config.Connector.Id);
+                        SyncState.WriteLastSync(config.Connector.Id, syncStart);
+                    }
+                    else
+                    {
+                        logger.Info(
+                            $"[HA] Crawl {haCrawlId} still in progress on other node(s) — " +
+                            "sync state will be recorded by the closing node.");
+                    }
                 }
             }
 
@@ -297,11 +330,14 @@ public static class IngestCommand
     /// <c>GRAPH_CONNECTION_SHARDS</c> is set, else a single ingest. Disabled ⇒ byte-identical
     /// to the single-connection path. See docs/SHARDING.md.
     /// </summary>
-    private static async Task<bool> RunIngestCycleAsync(
+    private static async Task<(bool Ok, bool RanFull)> RunIngestCycleAsync(
         ParsedArgs args, DateTime? since, DateTime? haCycleDueUtc = null)
     {
         if (!ShardingConfig.IsEnabled)
-            return await RunIngestAsync(args, since: since, haCycleDueUtc: haCycleDueUtc);
+        {
+            var ok = await RunIngestAsync(args, since: since, haCycleDueUtc: haCycleDueUtc);
+            return (ok, LastRunActualSyncType == "full");
+        }
 
         var progress = Logging.GetLogger("progress");
         AppConfig baseConfig;
@@ -312,28 +348,34 @@ public static class IngestCommand
         catch (Exception e)
         {
             Logging.GetLogger("ingestion_only").Error($"❌ Could not load config for sharding: {e.Message}", e);
-            return false;
+            return (false, false);
         }
 
         if (!ShardingConfig.TryLoad(baseConfig, out var shards, out var error))
         {
             Logging.GetLogger("ingestion_only").Error($"❌ Invalid GRAPH_CONNECTION_SHARDS: {error}");
-            return false;
+            return (false, false);
         }
 
         progress.Info($"🔀 Connection sharding enabled — {shards.Count} shard(s) across separate Graph connections.");
         var allOk = true;
+        var allFull = true;
         foreach (var shard in shards)
         {
             if (ServiceStop.Requested)
                 break;
+            // Reset log handlers between shards — each shard's SetupLogging would
+            // otherwise stack onto the previous shard's (duplicate lines, cross-shard
+            // log bleed, corrupted dashboards). Mirrors the continuous loop's reset.
+            CommandRegistry.ResetLogging();
             progress.Info($"── Shard '{shard.ConnectionId}': {string.Join(", ", shard.ObjectTypes)} ──");
             var shardConfig = ShardingConfig.ForShard(baseConfig, shard);
             var ok = await RunIngestAsync(
                 args, since: since, haCycleDueUtc: haCycleDueUtc, configOverride: shardConfig);
             allOk = allOk && ok;
+            allFull = allFull && LastRunActualSyncType == "full";
         }
-        return allOk;
+        return (allOk, allFull);
     }
 
     /// <summary>
@@ -375,7 +417,7 @@ public static class IngestCommand
             else
                 Logging.GetLogger("progress").Info("--incremental: no previous crawl found, running full crawl");
         }
-        var success = await RunIngestCycleAsync(args, since);
+        var (success, _) = await RunIngestCycleAsync(args, since);
 
         var continuous = args.GetBool("continuous");
         if (!continuous)
@@ -422,8 +464,11 @@ public static class IngestCommand
             if (elapsedSinceFull >= fullInterval)
             {
                 progressLogger.Info("🔄 Starting scheduled FULL crawl...");
-                await RunIngestCycleAsync(args, null, cycleDue);
-                lastFullTime = CommandRegistry.MonotonicSeconds();
+                var (_, ranFull) = await RunIngestCycleAsync(args, null, cycleDue);
+                // HA: joining an open incremental crawl means the full crawl did NOT
+                // run — keep the slot due so the next cycle attempts it again.
+                if (ranFull)
+                    lastFullTime = CommandRegistry.MonotonicSeconds();
             }
             else
             {
@@ -437,7 +482,7 @@ public static class IngestCommand
                 catch
                 {
                 }
-                await RunIngestCycleAsync(args, since, cycleDue);
+                _ = await RunIngestCycleAsync(args, since, cycleDue);
             }
         }
     }

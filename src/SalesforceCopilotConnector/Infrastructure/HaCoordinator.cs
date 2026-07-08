@@ -201,12 +201,20 @@ public static class HaCoordinator
     /// </summary>
     public static async Task<string?> ClaimNextObjectAsync(Guid crawlId, string? nodeId = null)
     {
+        // Fresh token per ClaimNextObjectAsync call, generated OUTSIDE the
+        // retry unit below: when a transient retry re-runs a call whose claim
+        // COMMITted but whose ack was lost, the proc sees the same token and
+        // returns the already-claimed object instead of double-claiming a
+        // second one (which would strand the first until the claim timeout).
+        // Per call, not per node — one node runs several concurrent workers.
+        var claimToken = Guid.NewGuid();
         return await SqlExecutor.ExecuteAsync(SqlStateStore.ConnectionString, async connection =>
         {
             await using var command = Proc(connection, "dbo.usp_ClaimNextObject");
             command.Parameters.AddWithValue("@CrawlId", crawlId);
             command.Parameters.AddWithValue("@NodeId", nodeId ?? NodeId);
             command.Parameters.AddWithValue("@ClaimTimeoutSeconds", ClaimTimeoutSeconds);
+            command.Parameters.AddWithValue("@ClaimToken", claimToken);
             var result = await command.ExecuteScalarAsync(ServiceStop.Token);
             return result is string objectType && objectType.Length > 0 ? objectType : null;
         }, ServiceStop.Token);
@@ -242,15 +250,20 @@ public static class HaCoordinator
 
     /// <summary>
     /// Close the crawl session when no pending/claimed rows remain. Returns
-    /// true only for the caller that performed the close — that node records
-    /// the sync timestamp; every other node skips it.
+    /// true only for the node that performed the close — that node records
+    /// the sync timestamp; every other node skips it. The proc records this
+    /// node's id in CrawlSessions.ClosedBy and derives the result from it, so
+    /// a transient retry of a close whose COMMIT succeeded but whose ack was
+    /// lost still reports true (exactly one node ever wins the open→closed
+    /// UPDATE, so it stays exactly-one under concurrency).
     /// </summary>
-    public static async Task<bool> CloseCrawlIfCompleteAsync(Guid crawlId)
+    public static async Task<bool> CloseCrawlIfCompleteAsync(Guid crawlId, string? nodeId = null)
     {
         return await SqlExecutor.ExecuteAsync(SqlStateStore.ConnectionString, async connection =>
         {
             await using var command = Proc(connection, "dbo.usp_CloseCrawlIfComplete");
             command.Parameters.AddWithValue("@CrawlId", crawlId);
+            command.Parameters.AddWithValue("@NodeId", nodeId ?? NodeId);
             var result = await command.ExecuteScalarAsync(ServiceStop.Token);
             return result is not (null or DBNull) && Convert.ToInt32(result) == 1;
         }, ServiceStop.Token);

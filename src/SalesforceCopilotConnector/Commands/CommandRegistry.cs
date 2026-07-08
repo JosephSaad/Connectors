@@ -34,6 +34,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
+using SalesforceCopilotConnector.Config;
 using SalesforceCopilotConnector.Graph;
 using SalesforceCopilotConnector.Infrastructure;
 using SalesforceCopilotConnector.Salesforce;
@@ -174,7 +175,27 @@ public static class CommandRegistry
         Metrics.IncItemsSkipped(stats.SkippedCount);
         Metrics.IncCrawlsCompleted();
         Metrics.MarkCrawlCompletedNow();
-        Metrics.SetDeadLetterDepth(stats.FailedCount);
+        // dead_letter_depth is QUEUE state, not per-run state — the queue
+        // accumulates across runs until retry-failed drains it. The /metrics
+        // endpoint reads the live depth from SyncState on every scrape, and the
+        // commands compute it the same way for threshold alerts.
+    }
+
+    /// <summary>
+    /// Current dead-letter queue depth for <paramref name="connectorId"/> — the
+    /// accumulated unretried backlog, not this run's failure count. Read failures
+    /// return 0 (depth is advisory: used for alerts/metrics only).
+    /// </summary>
+    public static int DeadLetterDepth(string connectorId)
+    {
+        try
+        {
+            return SyncState.ReadFailedRecords(connectorId).Count;
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     public static void WriteSummary(

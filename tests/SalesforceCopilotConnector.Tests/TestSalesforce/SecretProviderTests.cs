@@ -171,4 +171,23 @@ public class SecretProviderTests
 
         Assert.Null(SecretProvider.GetSecret("SECRET_SALESFORCE_CLIENT_SECRET"));
     }
+
+    [Fact]
+    public void TransientFetchFailureIsNotCachedAndRecovers()
+    {
+        // A transient vault outage must not pin the fallback for the process
+        // lifetime: in --continuous mode the next cycle re-attempts the vault.
+        using var scope = new SecretEnvScope();
+        Environment.SetEnvironmentVariable("USE_KEY_VAULT", "true");
+        Environment.SetEnvironmentVariable("KEY_VAULT_URI", "https://example.vault.azure.net/");
+
+        var calls = 0;
+        SecretProvider.OverrideFetch = _ =>
+            ++calls == 1 ? throw new InvalidOperationException("transient outage") : "kv-recovered";
+
+        Assert.Null(SecretProvider.GetSecret("SECRET_SALESFORCE_CLIENT_SECRET"));          // outage → null, NOT cached
+        Assert.Equal("kv-recovered", SecretProvider.GetSecret("SECRET_SALESFORCE_CLIENT_SECRET"));  // vault back → real value
+        Assert.Equal("kv-recovered", SecretProvider.GetSecret("SECRET_SALESFORCE_CLIENT_SECRET"));  // success IS cached
+        Assert.Equal(2, calls);
+    }
 }

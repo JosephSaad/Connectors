@@ -272,6 +272,10 @@ public class SqlServerIdentityStore : IIdentityStore
     /// <summary>Create a new sync session record. Returns the session ID.</summary>
     public string StartSession(string crawlType = "identity", string syncType = "full")
     {
+        // Generated OUTSIDE the SqlExecutor.Execute lambda so every transient
+        // retry of the unit presents the same id; usp_StartSession guards on
+        // it (IF NOT EXISTS), so a retry after a committed-but-unacked INSERT
+        // is a no-op instead of a 2627 PK violation failing the sync run.
         var sessionId = Guid.NewGuid();
         SqlExecutor.Execute(_connectionString, conn =>
         {

@@ -189,6 +189,19 @@ public static class ShardingConfig
             return false;
         }
 
+        try
+        {
+            // JsonObject materializes lazily: an exactly-duplicated key parses but
+            // throws ArgumentException on first access. Surface it as a validation
+            // error instead of crashing the command ("never throws for user input").
+            _ = root.Count;
+        }
+        catch (ArgumentException ex)
+        {
+            error = $"{EnvVar} contains a duplicate connection id key: {ex.Message}";
+            return false;
+        }
+
         if (root.Count == 0)
         {
             error = $"{EnvVar} declares no shards (empty JSON object).";

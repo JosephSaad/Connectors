@@ -7,6 +7,7 @@
 // SQLSERVER_TEST_CONNECTION_STRING environment variable is set, so the suite
 // stays green on machines without SQL Server.
 
+using System.Data;
 using System.Text.Json.Nodes;
 using SalesforceCopilotConnector.Config;
 using SalesforceCopilotConnector.Infrastructure;
@@ -186,6 +187,200 @@ public class SqlStateStoreTests
 
         SyncState.ClearFailedRecords(connectorId);
         Assert.Empty(SyncState.ReadFailedRecords(connectorId));
+    }
+
+    // ── Commit-ack-loss idempotency (retry of a committed-but-unacked unit) ──
+
+    /// <summary>
+    /// usp_AppendDeadLetter with an explicit @BatchId — proc-level, mirroring a
+    /// transient retry of ONE SqlStateStore.AppendDeadLetter unit (which
+    /// generates its batch id outside the retry lambda and therefore
+    /// re-presents the same one).
+    /// </summary>
+    private static void AppendDeadLetterBatch(string connectorId, Guid batchId, string recordsJson)
+    {
+        SqlExecutor.Execute(SqlStateStore.ConnectionString, connection =>
+        {
+            using var command = connection.CreateCommand();
+            command.CommandType = CommandType.StoredProcedure;
+            command.CommandText = "dbo.usp_AppendDeadLetter";
+            command.Parameters.AddWithValue("@ConnectorId", connectorId);
+            command.Parameters.AddWithValue("@RecordsJson", recordsJson);
+            command.Parameters.AddWithValue("@BatchId", batchId);
+            command.ExecuteNonQuery();
+        });
+    }
+
+    /// <summary>Start a session via usp_StartSession with an explicit id (proc-level).</summary>
+    private static void ExecStartSession(Guid sessionId, string connectionId)
+    {
+        SqlExecutor.Execute(SqlStateStore.ConnectionString, connection =>
+        {
+            using var command = connection.CreateCommand();
+            command.CommandType = CommandType.StoredProcedure;
+            command.CommandText = "dbo.usp_StartSession";
+            command.Parameters.AddWithValue("@SessionId", sessionId);
+            command.Parameters.AddWithValue("@ConnectionId", connectionId);
+            command.Parameters.AddWithValue("@CrawlType", "content");
+            command.Parameters.AddWithValue("@SyncType", "full");
+            command.ExecuteNonQuery();
+        });
+    }
+
+    /// <summary>Back-date a session's StartedUtc so it falls past a retention cutoff.</summary>
+    private static void AgeSessionBack(Guid sessionId, int days)
+    {
+        SqlExecutor.Execute(SqlStateStore.ConnectionString, connection =>
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "UPDATE dbo.SyncSessions SET StartedUtc = DATEADD(DAY, -@Days, SYSUTCDATETIME()) "
+                + "WHERE SessionId = @SessionId";
+            command.Parameters.AddWithValue("@Days", days);
+            command.Parameters.AddWithValue("@SessionId", sessionId);
+            command.ExecuteNonQuery();
+        });
+    }
+
+    private static int CountSessions(Guid sessionId)
+    {
+        return SqlExecutor.Execute(SqlStateStore.ConnectionString, connection =>
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM dbo.SyncSessions WHERE SessionId = @SessionId";
+            command.Parameters.AddWithValue("@SessionId", sessionId);
+            return Convert.ToInt32(command.ExecuteScalar());
+        });
+    }
+
+    private static void DeleteSession(Guid sessionId)
+    {
+        SqlExecutor.Execute(SqlStateStore.ConnectionString, connection =>
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM dbo.SyncSessions WHERE SessionId = @SessionId";
+            command.Parameters.AddWithValue("@SessionId", sessionId);
+            command.ExecuteNonQuery();
+        });
+    }
+
+    [Fact]
+    public void AppendDeadLetterSameBatchIdTwiceDoesNotDuplicate()
+    {
+        if (string.IsNullOrEmpty(SqlTestSupport.TestConnectionString))
+            return;  // SKIP: no SQL Server available
+        using var scope = SqlTestSupport.SqlScope();
+        var connectorId = SqlTestSupport.UniqueConnectorId("sqltest-dlbatch");
+        const string recordsJson =
+            "[{\"itemId\": \"it-1\", \"objectType\": \"Account\", \"error\": \"boom\"}, "
+            + "{\"itemId\": \"it-2\", \"objectType\": \"Account\", \"error\": \"bang\"}]";
+
+        // A commit-ack-loss retry re-runs the SAME append with the SAME batch
+        // id — the batch must not be duplicated.
+        var batchId = Guid.NewGuid();
+        AppendDeadLetterBatch(connectorId, batchId, recordsJson);
+        AppendDeadLetterBatch(connectorId, batchId, recordsJson);
+        Assert.Equal(2, SyncState.ReadFailedRecords(connectorId).Count);
+
+        // A different batch id (a genuinely new append) still lands.
+        AppendDeadLetterBatch(connectorId, Guid.NewGuid(), recordsJson);
+        Assert.Equal(4, SyncState.ReadFailedRecords(connectorId).Count);
+
+        SyncState.ClearFailedRecords(connectorId);
+    }
+
+    [Fact]
+    public void AppendDeadLetterSeparateCallsBothAppend()
+    {
+        if (string.IsNullOrEmpty(SqlTestSupport.TestConnectionString))
+            return;  // SKIP: no SQL Server available
+        using var scope = SqlTestSupport.SqlScope();
+        var connectorId = SqlTestSupport.UniqueConnectorId("sqltest-dlfresh");
+        var dlPath = SyncState.FailedRecordsPath(connectorId);
+
+        // Two separate AppendDeadLetter calls carry FRESH batch ids, so even
+        // identical payloads (the same item failing twice) both land — the
+        // batch guard only dedupes retries of one unit, never real failures.
+        var failures = new List<(string, string)> { ("it-1", "[Graph] HTTP 400: bad request") };
+        SyncState.AppendFailedRecords(dlPath, failures, "Account");
+        SyncState.AppendFailedRecords(dlPath, failures, "Account");
+        Assert.Equal(2, SyncState.ReadFailedRecords(connectorId).Count);
+
+        SyncState.ClearFailedRecords(connectorId);
+    }
+
+    [Fact]
+    public void PruneHistoryDeletesZombieRunningSessions()
+    {
+        if (string.IsNullOrEmpty(SqlTestSupport.TestConnectionString))
+            return;  // SKIP: no SQL Server available
+        using var scope = SqlTestSupport.SqlScope();
+        var connectionId = SqlTestSupport.UniqueConnectorId("sqltest-zombie");
+        var zombie = Guid.NewGuid();
+        var live = Guid.NewGuid();
+        try
+        {
+            ExecStartSession(zombie, connectionId);
+            ExecStartSession(live, connectionId);
+            AgeSessionBack(zombie, days: 40);
+
+            // 30-day retention: a 'running' row started 40 days ago is a zombie
+            // from a crashed run and is pruned; the fresh running row survives.
+            SqlExecutor.Execute(SqlStateStore.ConnectionString, connection =>
+            {
+                using var command = connection.CreateCommand();
+                command.CommandType = CommandType.StoredProcedure;
+                command.CommandText = "dbo.usp_PruneHistory";
+                command.Parameters.AddWithValue("@RetentionDays", 30);
+                command.ExecuteNonQuery();
+            });
+
+            Assert.Equal(0, CountSessions(zombie));
+            Assert.Equal(1, CountSessions(live));
+        }
+        finally
+        {
+            DeleteSession(zombie);
+            DeleteSession(live);
+        }
+    }
+
+    [Fact]
+    public void LogPrunerSqlModePrunesServerHistoryThroughSqlExecutor()
+    {
+        if (string.IsNullOrEmpty(SqlTestSupport.TestConnectionString))
+            return;  // SKIP: no SQL Server available
+        // LogPruner no longer builds a raw SqlConnection (which skipped the
+        // Encrypt-forcing / managed-identity / retry hardening and failed login
+        // every run under SQL_USE_MANAGED_IDENTITY=true) — usp_PruneHistory now
+        // runs through SqlExecutor. End-to-end: SQL-mode Prune() must delete an
+        // aged zombie 'running' session.
+        using var scope = SqlTestSupport.SqlScope(("LOG_RETENTION_DAYS", "30"));
+        var connectionId = SqlTestSupport.UniqueConnectorId("sqltest-logprune");
+        var tmpLogs = Directory.CreateTempSubdirectory("log_pruner_sql_").FullName;
+        LogPruner.LogsDirOverride = tmpLogs;
+        var zombie = Guid.NewGuid();
+        try
+        {
+            ExecStartSession(zombie, connectionId);
+            AgeSessionBack(zombie, days: 40);
+
+            LogPruner.Prune();
+
+            Assert.Equal(0, CountSessions(zombie));
+        }
+        finally
+        {
+            LogPruner.LogsDirOverride = null;
+            DeleteSession(zombie);
+            try
+            {
+                Directory.Delete(tmpLogs, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
     }
 
     [Fact]

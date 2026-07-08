@@ -1610,9 +1610,42 @@ public static class Ingest
         {
             while (!ServiceStop.Requested && !(dashboard?.StopRequested ?? false))
             {
-                var objType = await workSource.ClaimNextAsync();
+                string? objType;
+                try
+                {
+                    objType = await workSource.ClaimNextAsync();
+                }
+                catch (OperationCanceledException) when (ServiceStop.Requested)
+                {
+                    // Graceful stop raced the claim call (the coordinator's SQL runs
+                    // under the ServiceStop token) — treat exactly like the loop
+                    // condition: stop cleanly, claims stay reclaimable.
+                    break;
+                }
                 if (objType == null)
                     break;
+
+                // Re-read the shared checkpoint for THIS claim: when reclaiming an
+                // object abandoned by a dead node, the run-start snapshot predates
+                // that node's chunk checkpoints — a fresh read resumes where it
+                // died instead of re-ingesting the object from scratch. Same
+                // since-boundary validation as the run-start read.
+                var claimCheckpoint = checkpoint;
+                if (string.IsNullOrEmpty(config.DebugItemId))
+                {
+                    try
+                    {
+                        var reread = SyncState.ReadCheckpoint(config.Connector.Id);
+                        claimCheckpoint = reread != null && reread["since"]?.ToString() == sinceIso
+                            ? reread
+                            : null;
+                    }
+                    catch (Exception exc)
+                    {
+                        Logger.Warning(
+                            $"[{objType}] Could not refresh checkpoint for claim; using run-start snapshot: {exc.Message}");
+                    }
+                }
 
                 using var heartbeat = workSource.BeginHeartbeat(objType);
                 var failed = false;
@@ -1631,7 +1664,7 @@ public static class Ingest
                         stats,
                         concurrency,
                         since,
-                        checkpoint,
+                        claimCheckpoint,
                         sinceIso,
                         dlPath,
                         dashboard,
@@ -1681,7 +1714,18 @@ public static class Ingest
                 }
                 if (!failed)
                     Logger.Info($"[{objType}] completed — {count} items");
-                await workSource.CompleteAsync(objType, !failed);
+                try
+                {
+                    await workSource.CompleteAsync(objType, !failed);
+                }
+                catch (OperationCanceledException) when (ServiceStop.Requested)
+                {
+                    // Stop raced the completion call — the claim stays held and is
+                    // reclaimed after heartbeat expiry; the object's work IS done and
+                    // checkpointed, so the reclaiming node skips straight through it.
+                    Logger.Info($"[{objType}] service stop during claim completion — claim left for reclaim.");
+                    break;
+                }
             }
         }
 

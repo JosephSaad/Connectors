@@ -11,6 +11,7 @@
 //
 //     SQLSERVER_TEST_CONNECTION_STRING="Server=localhost;Database=SalesforceConnector;User Id=sa;Password=...;TrustServerCertificate=true" dotnet test
 
+using System.Data;
 using Microsoft.Data.SqlClient;
 using SalesforceCopilotConnector.Graph;
 using Xunit.Abstractions;
@@ -543,6 +544,44 @@ public class SqlServerSyncSessionTests : SqlServerIdentityStoreTestBase
         Store.CompleteSession(sid, new SyncSessionStats { GroupsCreated = 5 });
 
         Assert.Null(Store.GetLastSuccessfulContentCrawlTime());
+    }
+}
+
+// ── Sync session idempotency (commit-ack-loss retry) ──────────────────────────
+
+public class SqlServerStartSessionIdempotencyTests : SqlServerIdentityStoreTestBase
+{
+    [Fact]
+    public void StartSessionSameSessionIdTwiceDoesNotThrowOrDuplicate()
+    {
+        if (Skip) return;
+        // SqlExecutor retries the whole unit on a transient fault, and
+        // StartSession generates its SessionId OUTSIDE the retry lambda — so a
+        // retry after a committed-but-unacked INSERT re-runs usp_StartSession
+        // with the SAME @SessionId. That second call must be a no-op (IF NOT
+        // EXISTS guard), not a 2627 PK violation that fails the sync run.
+        var sessionId = Guid.NewGuid();
+        for (var call = 0; call < 2; call++)
+        {
+            using var conn = new SqlConnection(SqlServerTestEnv.ConnectionString);
+            conn.Open();
+            using var cmd = new SqlCommand("dbo.usp_StartSession", conn)
+            {
+                CommandType = CommandType.StoredProcedure,
+            };
+            cmd.Parameters.AddWithValue("@SessionId", sessionId);
+            cmd.Parameters.AddWithValue("@ConnectionId", TestConnectionId);
+            cmd.Parameters.AddWithValue("@CrawlType", "content");
+            cmd.Parameters.AddWithValue("@SyncType", "full");
+            cmd.ExecuteNonQuery();  // the second call must not throw
+        }
+
+        using var check = new SqlConnection(SqlServerTestEnv.ConnectionString);
+        check.Open();
+        using var count = new SqlCommand(
+            "SELECT COUNT(*) FROM dbo.SyncSessions WHERE SessionId = @SessionId", check);
+        count.Parameters.AddWithValue("@SessionId", sessionId);
+        Assert.Equal(1, Convert.ToInt32(count.ExecuteScalar()));
     }
 }
 

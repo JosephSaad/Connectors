@@ -78,7 +78,16 @@ public static class SecretProvider
         if (OverrideFetch is null && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("KEY_VAULT_URI")))
             throw new ArgumentException("Invalid configuration: Missing KEY_VAULT_URI");
 
-        return Cache.GetOrAdd(envVarName, FetchFromKeyVault);
+        // Cache SUCCESSFUL fetches only: caching the failure-path fallback (or null)
+        // would pin one transient Key Vault hiccup for the process lifetime — fatal
+        // in --continuous/service mode, where the next cycle should retry the vault.
+        if (Cache.TryGetValue(envVarName, out var cached))
+            return cached;
+
+        var (fetched, success) = FetchFromKeyVault(envVarName);
+        if (success)
+            Cache.TryAdd(envVarName, fetched);
+        return fetched;
     }
 
     /// <summary>Map an env-var name to its Key Vault secret name: lowercase, <c>_</c>→<c>-</c>.</summary>
@@ -89,17 +98,19 @@ public static class SecretProvider
     internal static string ToSecretName(string envVarName) =>
         envVarName.ToLowerInvariant().Replace('_', '-');
 
-    private static string? FetchFromKeyVault(string envVarName)
+    /// <returns>The value plus whether it came from a successful vault fetch
+    /// (only successes are cache-eligible; fallbacks must be re-attempted next call).</returns>
+    private static (string? Value, bool Success) FetchFromKeyVault(string envVarName)
     {
         var secretName = ToSecretName(envVarName);
         try
         {
             var fetch = OverrideFetch;
             if (fetch is not null)
-                return fetch(secretName);
+                return (fetch(secretName), true);
 
             var client = GetClient();
-            return client.GetSecret(secretName).Value.Value;
+            return (client.GetSecret(secretName).Value.Value, true);
         }
         catch (Exception ex)
         {
@@ -109,13 +120,13 @@ public static class SecretProvider
                 Logger.Error(
                     $"Failed to fetch secret '{secretName}' from Key Vault; falling back to environment variable '{envVarName}'.",
                     ex);
-                return fallback;
+                return (fallback, false);
             }
 
             Logger.Error(
                 $"Failed to fetch secret '{secretName}' from Key Vault and no environment variable '{envVarName}' is set; returning null.",
                 ex);
-            return null;
+            return (null, false);
         }
     }
 
