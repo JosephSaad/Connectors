@@ -184,7 +184,7 @@ public static class Ingest
             Logger.Info("\nRequest Payload:");
             Logger.Info(payload.ToJsonString(IndentedJson));
         }
-        else
+        else if (Logger.IsEnabledFor(LogLevels.Debug))
         {
             Logger.Debug($"ITEM REQUEST: {itemId} | PUT {url}");
         }
@@ -629,7 +629,7 @@ public static class Ingest
                         Logger.Info(
                             $"ITEM REQUEST — PUT {itemUrl}\nRequest Body:\n{body.ToJsonString(IndentedJson)}");
                     }
-                    else
+                    else if (Logger.IsEnabledFor(LogLevels.Debug))
                     {
                         Logger.Debug($"ITEM REQUEST — PUT {itemUrl}");
                     }
@@ -721,8 +721,11 @@ public static class Ingest
                         Logger.Info(
                             $"ITEM RESPONSE (attempt {attempt}):\n{JsonSerializer.Serialize(responses, IndentedJson)}");
                     }
-                    else
+                    else if (Logger.IsEnabledFor(LogLevels.Debug))
                     {
+                        // The isEnabledFor gate (from the Python original) matters here:
+                        // serializing the full $batch response array is the hot path's
+                        // most expensive log message, and DEBUG is filtered in normal runs.
                         Logger.Debug(
                             $"BATCH RESPONSE (attempt {attempt}): {JsonSerializer.Serialize(responses, IndentedJson)}");
                     }

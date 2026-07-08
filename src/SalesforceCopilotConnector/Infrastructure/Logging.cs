@@ -22,6 +22,13 @@ public interface IAppLogger
     void Warning(string message);
     void Error(string message);
     void Error(string message, Exception ex);
+
+    /// <summary>
+    /// Whether a record at <paramref name="level"/> would be processed
+    /// (Python <c>Logger.isEnabledFor</c>). Callers use it to skip building
+    /// expensive log messages that would be dropped by the level check.
+    /// </summary>
+    bool IsEnabledFor(int level);
 }
 
 /// <summary>Numeric log levels matching the Python <c>logging</c> module constants.</summary>
@@ -299,6 +306,9 @@ public sealed class LoggerObject : IAppLogger
         }
         return LogLevels.Warning;  // Python root logger default
     }
+
+    /// <summary>Python <c>Logger.isEnabledFor</c>: true when <paramref name="level"/> ≥ the effective level.</summary>
+    public bool IsEnabledFor(int level) => level >= EffectiveLevel();
 
     public void Log(int level, string message, Exception? ex = null)
     {
