@@ -58,3 +58,13 @@ updates:
       - "docker"
     commit-message:
       prefix: "docker"
+    ignore:
+      # The app targets net8.0: a 10.x runtime base image cannot run the
+      # framework-dependent publish (the docker CI job only BUILDS the image,
+      # so its green check would not catch that), and the SDK image stays in
+      # lockstep with the runtime. Remove both entries when the project
+      # deliberately migrates TargetFramework to net10.0.
+      - dependency-name: "dotnet/sdk"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "dotnet/runtime"
+        update-types: ["version-update:semver-major"]
