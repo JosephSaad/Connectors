@@ -93,8 +93,30 @@ public class GraphApiError : Exception
 
 public class GraphClient
 {
-    public const string GraphScope = "https://graph.microsoft.com/.default";
-    public const string GraphBaseUrl = "https://graph.microsoft.com";
+    // Sovereign/national clouds host Graph at different endpoints with matching
+    // token audiences (e.g. https://graph.microsoft.us for US Government,
+    // https://microsoftgraph.chinacloudapi.cn for 21Vianet). GRAPH_BASE_URL and
+    // GRAPH_SCOPE override the public-cloud defaults; when unset (the default)
+    // both values are byte-identical to the upstream constants. Read per access
+    // so each cycle/shard sees live env state, like the other env-gated knobs.
+    public static string GraphBaseUrl
+    {
+        get
+        {
+            var custom = Environment.GetEnvironmentVariable("GRAPH_BASE_URL");
+            return string.IsNullOrEmpty(custom) ? "https://graph.microsoft.com" : custom.TrimEnd('/');
+        }
+    }
+
+    public static string GraphScope
+    {
+        get
+        {
+            var scope = Environment.GetEnvironmentVariable("GRAPH_SCOPE");
+            return !string.IsNullOrEmpty(scope) ? scope : $"{GraphBaseUrl}/.default";
+        }
+    }
+
     public const string GraphDefaultApiVersion = "v1.0";
     public const string ExternalConnectionsPath = "/external/connections";
 
