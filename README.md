@@ -42,8 +42,9 @@ cp env/.env.local.example env/.env.local    # fill in credentials
 ```
 
 Releases build automatically from `v*` tags (test-gated, checksummed — see
-`.github/workflows/release.yml`). Building from source instead only needs the
-requirements below.
+`.github/workflows/release.yml`); each release also pushes a container image to
+`ghcr.io/josephsaad/salesforce-copilot-connector` (`:<version>` and `:latest`).
+Building from source instead only needs the requirements below.
 
 ## Requirements
 

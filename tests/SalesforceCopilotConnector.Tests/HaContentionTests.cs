@@ -192,6 +192,39 @@ public class HaContentionTests
     }
 
     [Fact]
+    public async Task CrawlWithFailedClaimStillClosesExactlyOnce()
+    {
+        if (string.IsNullOrEmpty(SqlTestSupport.TestConnectionString))
+            return;  // SKIP: no SQL Server available
+        using var scope = SqlTestSupport.SqlScope(("HA_MODE", "true"));
+        var connectorId = SqlTestSupport.UniqueConnectorId("hacon-failclose");
+
+        var crawl = await HaCoordinator.OpenOrJoinCrawlAsync(
+            connectorId, "full", null, new[] { "Account", "Contact" }, nodeId: "nodeA");
+        Assert.NotNull(crawl);
+
+        // One object crashes (terminal 'failed', recovery is the WORKER_CRASH
+        // dead-letter marker — Python parity), the other succeeds. 'failed' must
+        // count toward completion: if it didn't, a crashed object would wedge the
+        // crawl open forever, since a failed claim is never reclaimed.
+        var first = await HaCoordinator.ClaimNextObjectAsync(crawl!.CrawlId, "nodeA");
+        var second = await HaCoordinator.ClaimNextObjectAsync(crawl.CrawlId, "nodeA");
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        await HaCoordinator.CompleteClaimAsync(crawl.CrawlId, first!, "failed", "nodeA");
+
+        // Not closable while the healthy object is still claimed.
+        Assert.False(await HaCoordinator.CloseCrawlIfCompleteAsync(crawl.CrawlId, "nodeA"));
+
+        await HaCoordinator.CompleteClaimAsync(crawl.CrawlId, second!, "done", "nodeA");
+
+        // done + failed = nothing pending/claimed → the crawl closes, and the
+        // exactly-one-closer guarantee holds for the mixed-outcome case too.
+        Assert.True(await HaCoordinator.CloseCrawlIfCompleteAsync(crawl.CrawlId, "nodeA"));
+        Assert.False(await HaCoordinator.CloseCrawlIfCompleteAsync(crawl.CrawlId, "nodeB"));
+    }
+
+    [Fact]
     public async Task StaleClaimIsReclaimedByExactlyOneRacingNode()
     {
         if (string.IsNullOrEmpty(SqlTestSupport.TestConnectionString))

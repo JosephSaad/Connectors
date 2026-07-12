@@ -115,6 +115,51 @@ jobs:
           path: bundle/*.zip*
           if-no-files-found: error
 
+  # Container distribution: the same image the docker CI job validates, pushed
+  # to GHCR on tag builds. Dispatch dry runs build it end to end but never push.
+  container:
+    name: Container image (ghcr.io)
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tags
+        id: img
+        run: |
+          # Registry paths must be lowercase; the repo owner is not.
+          IMAGE="$(echo "ghcr.io/${{ github.repository_owner }}/salesforce-copilot-connector" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tags=${IMAGE}:${GITHUB_REF_NAME#v},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${IMAGE}:ci-dryrun" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image (push on tag builds only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.img.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release:
     name: Create GitHub release
     needs: package
