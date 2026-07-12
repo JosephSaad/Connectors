@@ -27,8 +27,15 @@ jobs:
   # so this job stays hermetic and fast. This is the gating job.
   # ---------------------------------------------------------------------------
   build-test:
-    name: Build & Test
-    runs-on: ubuntu-latest
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-latest is not a nicety: Windows Server is the primary
+        # deployment target (Windows service mode), so the suite must pass
+        # there, not only on the linux CI/dev machines.
+        os: [ubuntu-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,7 +62,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-trx
+          name: test-results-trx-${{ matrix.os }}
           path: "**/TestResults/**/*.trx"
           if-no-files-found: warn
 
@@ -63,7 +70,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: code-coverage
+          name: code-coverage-${{ matrix.os }}
           path: "**/TestResults/**/coverage.cobertura.xml"
           if-no-files-found: warn
 
@@ -156,6 +163,37 @@ jobs:
         with:
           name: sql-integration-trx
           path: "**/TestResults/**/*.trx"
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Stress harness: 4 concurrency scenarios (throughput / throttle / failures /
+  # stop-resume) against the file+SQLite backend with fake APIs, gated on its
+  # 44 correctness invariants — NOT on throughput numbers, which vary by
+  # runner. This is the tool that caught the dead-letter interleaving bug; it
+  # exits non-zero if any invariant fails.
+  # ---------------------------------------------------------------------------
+  stress:
+    name: Stress Harness (invariants)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Run stress scenarios
+        run: dotnet run --project tools/StressHarness -c Release
+
+      - name: Upload harness workdir (failure diagnosis)
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-workdir
+          path: stress-out/
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
