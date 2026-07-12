@@ -20,7 +20,7 @@ cp env/.env.local.example env/.env.local
 # Create .env.local.user with client secrets
 ```
 
-Refer to `python run.py guide` for the full list of required environment variables.
+Refer to `SalesforceCopilotConnector guide` (or `dotnet run --project src/SalesforceCopilotConnector -- guide` from a checkout) for the full list of required environment variables.
 
 ## Variable Reference
 

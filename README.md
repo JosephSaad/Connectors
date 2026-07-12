@@ -24,6 +24,27 @@ SQLite identity store) so it can pick up where the Python version left off.
 | `tests/SalesforceCopilotConnector.Tests/` | `tests/` — full pytest suite as xUnit + C# additions (665 tests) |
 | `config/` | schema.json, graph-schema.json, template.json (same files) |
 
+## Install from a release
+
+Prebuilt self-contained bundles (no .NET SDK or runtime required on the box) are
+published on the [releases page](https://github.com/JosephSaad/SalesforceCopilotConnector/releases)
+for `win-x64` (includes `scripts/install-windows-service.ps1` for service mode)
+and `linux-x64`. Each zip extracts to a ready-to-run directory — binary plus
+`config/`, `env/`, `docs/`, `scripts/sql/` — laid out the way the app resolves
+paths at runtime. Verify, extract, configure, run:
+
+```bash
+sha256sum -c SalesforceCopilotConnector-<version>-linux-x64.zip.sha256
+unzip SalesforceCopilotConnector-<version>-linux-x64.zip
+cd SalesforceCopilotConnector-<version>-linux-x64
+cp env/.env.local.example env/.env.local    # fill in credentials
+./SalesforceCopilotConnector validate-config
+```
+
+Releases build automatically from `v*` tags (test-gated, checksummed — see
+`.github/workflows/release.yml`). Building from source instead only needs the
+requirements below.
+
 ## Requirements
 
 - .NET 8 SDK
