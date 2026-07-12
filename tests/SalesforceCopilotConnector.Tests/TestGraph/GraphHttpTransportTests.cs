@@ -10,91 +10,16 @@
 // override) and assert on what actually crossed the wire.
 
 using System.Diagnostics;
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
 using System.Text.Json.Nodes;
 using Azure.Core;
 using SalesforceCopilotConnector.Graph;
+using SalesforceCopilotConnector.Tests.TestInfrastructure;
 
 namespace SalesforceCopilotConnector.Tests.TestGraph;
 
 [Collection("EnvVars")]
 public class GraphHttpTransportTests
 {
-    private sealed record RecordedRequest(string Method, string PathAndQuery, string? Authorization, string Body);
-
-    /// <summary>
-    /// Minimal scriptable Graph endpoint on a loopback port. The Nth request
-    /// gets <c>Script(N)</c>'s response; every request is recorded verbatim.
-    /// </summary>
-    private sealed class FakeGraphServer : IDisposable
-    {
-        private readonly HttpListener _listener;
-        private readonly object _lock = new();
-        private int _count;
-
-        public List<RecordedRequest> Requests { get; } = new();
-        public Func<int, (int Status, string Body, Dictionary<string, string>? Headers)> Script { get; set; }
-            = _ => (200, "{}", null);
-        public string BaseUrl { get; }
-
-        public FakeGraphServer()
-        {
-            // HttpListener cannot bind port 0; reserve a free one first.
-            var probe = new TcpListener(IPAddress.Loopback, 0);
-            probe.Start();
-            var port = ((IPEndPoint)probe.LocalEndpoint).Port;
-            probe.Stop();
-
-            BaseUrl = $"http://127.0.0.1:{port}";
-            _listener = new HttpListener();
-            _listener.Prefixes.Add($"{BaseUrl}/");
-            _listener.Start();
-            _ = Task.Run(LoopAsync);
-        }
-
-        private async Task LoopAsync()
-        {
-            while (_listener.IsListening)
-            {
-                HttpListenerContext context;
-                try { context = await _listener.GetContextAsync(); }
-                catch { return; }  // listener disposed — test is over
-
-                string body;
-                using (var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8))
-                    body = await reader.ReadToEndAsync();
-
-                int n;
-                lock (_lock)
-                {
-                    Requests.Add(new RecordedRequest(
-                        context.Request.HttpMethod,
-                        context.Request.Url!.PathAndQuery,
-                        context.Request.Headers["Authorization"],
-                        body));
-                    n = _count++;
-                }
-
-                var (status, responseBody, headers) = Script(n);
-                context.Response.StatusCode = status;
-                if (headers != null)
-                    foreach (var (key, value) in headers)
-                        context.Response.Headers[key] = value;
-                context.Response.ContentType = "application/json";
-                var bytes = Encoding.UTF8.GetBytes(responseBody);
-                await context.Response.OutputStream.WriteAsync(bytes);
-                context.Response.Close();
-            }
-        }
-
-        public void Dispose()
-        {
-            try { _listener.Stop(); _listener.Close(); } catch { /* already down */ }
-        }
-    }
-
     /// <summary>
     /// Real GraphClient aimed at the fake server, with a preset far-future token
     /// (the documented seam — mirrors the Python tests patching get_token) so no
@@ -135,7 +60,7 @@ public class GraphHttpTransportTests
     [Fact]
     public async Task PutSendsBearerTokenAndJsonBodyOverTheWire()
     {
-        using var server = new FakeGraphServer();
+        using var server = new LoopbackJsonServer();
         using var scope = new EnvVarScope(("GRAPH_BASE_URL", server.BaseUrl), ("GRAPH_RETRY_JITTER", null));
         var client = NewClient();
 
@@ -155,11 +80,11 @@ public class GraphHttpTransportTests
     [Fact]
     public async Task RetryAfterHeaderIsHonoredOverComputedBackoff()
     {
-        using var server = new FakeGraphServer();
+        using var server = new LoopbackJsonServer();
         using var scope = new EnvVarScope(("GRAPH_BASE_URL", server.BaseUrl), ("GRAPH_RETRY_JITTER", null));
         // Computed backoff would be 4s (base 4, attempt 0); Retry-After says 1s.
         var client = NewClient(maxRetries: 2, retryBackoffBase: 4);
-        server.Script = n => n == 0
+        server.Script = (n, _) => n == 0
             ? (429, "{}", new Dictionary<string, string> { ["Retry-After"] = "1" })
             : (200, "{\"ok\":true}", null);
 
@@ -179,10 +104,10 @@ public class GraphHttpTransportTests
     [Fact]
     public async Task BadRequestSurfacesGraphApiErrorWithoutRetrying()
     {
-        using var server = new FakeGraphServer();
+        using var server = new LoopbackJsonServer();
         using var scope = new EnvVarScope(("GRAPH_BASE_URL", server.BaseUrl), ("GRAPH_RETRY_JITTER", null));
         var client = NewClient();
-        server.Script = _ => (400, "{\"error\":{\"code\":\"invalidRequest\",\"message\":\"bad item\"}}", null);
+        server.Script = (_, _) => (400, "{\"error\":{\"code\":\"invalidRequest\",\"message\":\"bad item\"}}", null);
 
         await Assert.ThrowsAsync<GraphApiError>(
             () => client.PostAsync("/external/connections", new JsonObject()));
@@ -192,12 +117,12 @@ public class GraphHttpTransportTests
     [Fact]
     public async Task TransientErrorsRetryUntilExhaustionThenThrow()
     {
-        using var server = new FakeGraphServer();
+        using var server = new LoopbackJsonServer();
         using var scope = new EnvVarScope(("GRAPH_BASE_URL", server.BaseUrl), ("GRAPH_RETRY_JITTER", null));
         var client = NewClient(maxRetries: 2, retryBackoffBase: 4);
         // Always 503, but with an instant Retry-After so the test doesn't sleep
         // through the computed ladder.
-        server.Script = _ => (503, "{}", new Dictionary<string, string> { ["Retry-After"] = "0" });
+        server.Script = (_, _) => (503, "{}", new Dictionary<string, string> { ["Retry-After"] = "0" });
 
         await Assert.ThrowsAsync<GraphApiError>(() => client.GetAsync("/external/connections/conn1"));
         Assert.Equal(3, server.Requests.Count);  // initial + maxRetries
@@ -208,10 +133,10 @@ public class GraphHttpTransportTests
     [Fact]
     public async Task PaginateFollowsAbsoluteNextLinks()
     {
-        using var server = new FakeGraphServer();
+        using var server = new LoopbackJsonServer();
         using var scope = new EnvVarScope(("GRAPH_BASE_URL", server.BaseUrl), ("GRAPH_RETRY_JITTER", null));
         var client = NewClient();
-        server.Script = n => n == 0
+        server.Script = (n, _) => n == 0
             ? (200, $"{{\"value\":[{{\"id\":\"a\"}},{{\"id\":\"b\"}}],\"@odata.nextLink\":\"{server.BaseUrl}/v1.0/things?$skiptoken=page2\"}}", null)
             : (200, "{\"value\":[{\"id\":\"c\"}]}", null);
 
@@ -229,10 +154,10 @@ public class GraphHttpTransportTests
     [Fact]
     public async Task BatchPostsSingleBatchEnvelopeAndMapsPerItemResponses()
     {
-        using var server = new FakeGraphServer();
+        using var server = new LoopbackJsonServer();
         using var scope = new EnvVarScope(("GRAPH_BASE_URL", server.BaseUrl), ("GRAPH_RETRY_JITTER", null));
         var client = NewClient();
-        server.Script = _ => (200,
+        server.Script = (_, _) => (200,
             "{\"responses\":[" +
             "{\"id\":\"1\",\"status\":200,\"body\":{}}," +
             "{\"id\":\"2\",\"status\":200,\"body\":{}}," +
