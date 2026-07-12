@@ -1,6 +1,6 @@
 # Salesforce Copilot Connector (C#)
 
-A complete C#/.NET 8 port of Microsoft's [Salesforce-Custom-Copilot-Connector](https://github.com/microsoft/Salesforce-Custom-Copilot-Connector)
+A complete C#/.NET 10 port of Microsoft's [Salesforce-Custom-Copilot-Connector](https://github.com/microsoft/Salesforce-Custom-Copilot-Connector)
 (Python) — a production-tested template for building Microsoft 365 Copilot custom
 connectors for Salesforce CRM, covering standard + custom objects and fields with
 all permission models enabled.
@@ -48,7 +48,7 @@ Building from source instead only needs the requirements below.
 
 ## Requirements
 
-- .NET 8 SDK
+- .NET 10 SDK
 - The same environment variables as the Python version (see `env/README.md`);
   `.env.local` / `env/.env.local` files are loaded the same way.
 

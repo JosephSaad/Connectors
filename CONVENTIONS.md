@@ -10,7 +10,7 @@ A faithful, complete 1:1 behavioral port. Same commands, same log messages, same
 Python version), same API calls, same retry/backoff logic, same edge-case handling.
 
 ## Project facts
-- net8.0 console app, `<Nullable>enable</Nullable>`, `<ImplicitUsings>enable</ImplicitUsings>`.
+- net10.0 console app (originally ported on net8.0), `<Nullable>enable</Nullable>`, `<ImplicitUsings>enable</ImplicitUsings>`.
 - NuGet available: `Azure.Identity`, `Spectre.Console`, `DotNetEnv`. Tests: xUnit.
 - Root namespace `SalesforceCopilotConnector`.
 

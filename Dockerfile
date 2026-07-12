@@ -16,7 +16,7 @@
 # =============================================================================
 
 # ---- Build stage ------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /source
 
 # Restore first (better layer caching): copy the solution + project files, then
@@ -38,7 +38,7 @@ RUN dotnet publish src/SalesforceCopilotConnector/SalesforceCopilotConnector.csp
         -o /app/publish
 
 # ---- Runtime stage ----------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/runtime:8.0 AS runtime
+FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
 
 # WORKDIR is the connector's "home": config/, env/, logs/, data/ resolve here.
 WORKDIR /app
