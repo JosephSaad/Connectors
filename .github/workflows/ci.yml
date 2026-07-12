@@ -60,7 +60,7 @@ jobs:
 
       - name: Upload test results (trx)
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-trx-${{ matrix.os }}
           path: "**/TestResults/**/*.trx"
@@ -68,7 +68,7 @@ jobs:
 
       - name: Upload code coverage
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: code-coverage-${{ matrix.os }}
           path: "**/TestResults/**/coverage.cobertura.xml"
@@ -159,7 +159,7 @@ jobs:
 
       - name: Upload SQL integration test results
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sql-integration-trx
           path: "**/TestResults/**/*.trx"
@@ -190,7 +190,7 @@ jobs:
 
       - name: Upload harness workdir (failure diagnosis)
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stress-workdir
           path: stress-out/
