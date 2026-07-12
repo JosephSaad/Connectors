@@ -120,13 +120,18 @@ jobs:
           echo "::error::SQL Server did not become ready in time."
           exit 1
 
-      - name: Provision database schema
+      - name: Provision database schema (twice)
+        # Two passes on purpose: the second run proves the documented
+        # idempotent re-run/upgrade path against a live engine, not just
+        # by static lint.
         run: |
-          echo "Running scripts/sql/create-database.sql via sqlcmd ..."
-          docker run --rm --network host \
-            -v "${{ github.workspace }}/scripts/sql:/scripts:ro" \
-            mcr.microsoft.com/mssql-tools:latest \
-            /opt/mssql-tools/bin/sqlcmd -S 127.0.0.1 -U sa -P "$SA_PASSWORD" -b -i /scripts/create-database.sql
+          for pass in 1 2; do
+            echo "Running scripts/sql/create-database.sql via sqlcmd (pass $pass) ..."
+            docker run --rm --network host \
+              -v "${{ github.workspace }}/scripts/sql:/scripts:ro" \
+              mcr.microsoft.com/mssql-tools:latest \
+              /opt/mssql-tools/bin/sqlcmd -S 127.0.0.1 -U sa -P "$SA_PASSWORD" -b -i /scripts/create-database.sql
+          done
 
       - name: Restore
         run: dotnet restore
