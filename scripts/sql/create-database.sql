@@ -206,6 +206,23 @@ IF COL_LENGTH(N'dbo.ObjectClaims', N'ClaimToken') IS NULL
     ALTER TABLE dbo.ObjectClaims ADD ClaimToken uniqueidentifier NULL;
 GO
 
+-- The connector's record of every external item id ingested into a Graph
+-- connection, keyed per connector (ConnectorId) so connection sharding keeps a
+-- per-shard inventory automatically.  Shared by all HA nodes and the `reconcile`
+-- command (mirrors the SQLite ItemInventory backend).  A brand-new table, so the
+-- IF OBJECT_ID ... IS NULL CREATE guard is sufficient — no migration ALTER.
+IF OBJECT_ID(N'dbo.ItemInventory', N'U') IS NULL
+CREATE TABLE dbo.ItemInventory
+(
+    ConnectorId  nvarchar(64)   NOT NULL,
+    ItemId       nvarchar(256)  NOT NULL,
+    ObjectType   nvarchar(128)  NOT NULL,
+    LastSeenUtc  datetime2(7)   NOT NULL,
+    CONSTRAINT PK_ItemInventory PRIMARY KEY (ConnectorId, ItemId),
+    INDEX IX_ItemInventory_Object (ConnectorId, ObjectType)
+);
+GO
+
 -- ═════════════════════════════════════════════════════════════════════════════
 -- Views
 -- ═════════════════════════════════════════════════════════════════════════════
@@ -697,6 +714,101 @@ BEGIN
         DELETE FROM dbo.DeadLetter
          WHERE ConnectorId = @ConnectorId;
     COMMIT TRANSACTION;
+END;
+GO
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- Stored procedures — ingested-item inventory (reconcile)
+-- (mirror the SQLite Graph/ItemInventory semantics exactly)
+-- ═════════════════════════════════════════════════════════════════════════════
+
+-- Upsert a batch of ingested items (stamps LastSeenUtc), keyed on
+-- (ConnectorId, ItemId).  @ItemsJson = [{"itemId": "...", "objectType": "..."}]
+-- via OPENJSON.  Mirrors the SQLite INSERT ... ON CONFLICT upsert: a matched row
+-- has its ObjectType refreshed to the incoming value and LastSeenUtc stamped.
+CREATE OR ALTER PROCEDURE dbo.usp_RecordInventoryItems
+    @ConnectorId nvarchar(64),
+    @ItemsJson   nvarchar(max),
+    @SeenUtc     datetime2(7)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRANSACTION;
+        MERGE dbo.ItemInventory WITH (HOLDLOCK) AS target
+        USING (
+            SELECT j.ItemId, j.ObjectType
+            FROM OPENJSON(@ItemsJson)
+            WITH (
+                ItemId     nvarchar(256) '$.itemId',
+                ObjectType nvarchar(128) '$.objectType'
+            ) j
+        ) AS source
+            ON target.ConnectorId = @ConnectorId AND target.ItemId = source.ItemId
+        WHEN MATCHED THEN
+            UPDATE SET ObjectType  = source.ObjectType,
+                       LastSeenUtc = @SeenUtc
+        WHEN NOT MATCHED THEN
+            INSERT (ConnectorId, ItemId, ObjectType, LastSeenUtc)
+            VALUES (@ConnectorId, source.ItemId, source.ObjectType, @SeenUtc);
+    COMMIT TRANSACTION;
+END;
+GO
+
+-- Remove inventoried items (after a successful Graph DELETE).
+-- @ItemIdsJson = ["id1", "id2"] via OPENJSON; a missing id is a harmless no-op.
+CREATE OR ALTER PROCEDURE dbo.usp_RemoveInventoryItems
+    @ConnectorId nvarchar(64),
+    @ItemIdsJson nvarchar(max)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRANSACTION;
+        DELETE FROM dbo.ItemInventory
+         WHERE ConnectorId = @ConnectorId
+           AND ItemId IN (SELECT value FROM OPENJSON(@ItemIdsJson));
+    COMMIT TRANSACTION;
+END;
+GO
+
+-- All inventoried item ids for one object type (ordinal-sorted).
+CREATE OR ALTER PROCEDURE dbo.usp_GetInventoryByObject
+    @ConnectorId nvarchar(64),
+    @ObjectType  nvarchar(128)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT ItemId
+    FROM dbo.ItemInventory
+    WHERE ConnectorId = @ConnectorId AND ObjectType = @ObjectType
+    ORDER BY ItemId;
+END;
+GO
+
+-- All inventoried (ItemId, ObjectType) rows for a connector; C# groups by
+-- ObjectType, preserving the ItemId order.
+CREATE OR ALTER PROCEDURE dbo.usp_GetInventoryAll
+    @ConnectorId nvarchar(64)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT ItemId, ObjectType
+    FROM dbo.ItemInventory
+    WHERE ConnectorId = @ConnectorId
+    ORDER BY ItemId;
+END;
+GO
+
+-- Total inventoried item count for a connector.
+CREATE OR ALTER PROCEDURE dbo.usp_CountInventory
+    @ConnectorId nvarchar(64)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT COUNT(*)
+    FROM dbo.ItemInventory
+    WHERE ConnectorId = @ConnectorId;
 END;
 GO
 

@@ -17,10 +17,17 @@
 // and reconcile compares against FetchSalesforceRecordsAsync(...) r["Id"] — the
 // same id space, compared directly.
 //
-// Backend: SQLite only (data/{connectorId}_inventory.db, table `items`).
+// Backends mirror the identity store: SQLite by default
+// (data/{connectorId}_inventory.db, table `items`) and SQL Server
+// (dbo.ItemInventory) when USE_SQL_SERVER=true — see docs/SQL_CONTRACT.md. The
+// SQL Server table is shared, so HA nodes and reconcile see one inventory.
 
+using System.Data;
 using System.Globalization;
+using System.Text.Json.Nodes;
+using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
+using SalesforceCopilotConnector.Config;
 using SalesforceCopilotConnector.Infrastructure;
 
 namespace SalesforceCopilotConnector.Graph;
@@ -44,7 +51,7 @@ public interface IItemInventory : IDisposable
     int Count();
 }
 
-/// <summary>SQLite-backed inventory (the only backend this round). One file per connection id.</summary>
+/// <summary>SQLite-backed inventory (default backend). One file per connection id.</summary>
 public sealed class ItemInventory : IItemInventory
 {
     private static readonly IAppLogger Logger = Logging.GetLogger("salesforce_connector.inventory");
@@ -168,14 +175,124 @@ public sealed class ItemInventory : IItemInventory
     public void Dispose() => _connection.Dispose();
 
     /// <summary>
-    /// Open the ingested-item inventory for <paramref name="connectorId"/> (the SQLite backend).
+    /// Open the configured ingested-item inventory backend for <paramref name="connectorId"/>.
     ///
-    /// <para><b>Deferred:</b> a shared SQL Server inventory backend (mirroring
-    /// <see cref="IdentityStore.CreateStore"/>'s <c>USE_SQL_SERVER</c> switch and a
-    /// <c>dbo.ItemInventory</c> table in docs/SQL_CONTRACT.md) is a planned follow-up. Until it
-    /// lands the inventory is <b>per-node/local</b>: in HA multi-node mode each node keeps its own
-    /// SQLite inventory, so <c>reconcile</c> should be run from a single node (or per node) rather
-    /// than assuming one shared cross-node view.</para>
+    /// <para>SQLite by default (one <c>data/{connectorId}_inventory.db</c> file per node); the
+    /// shared SQL Server backend (<c>dbo.ItemInventory</c>, docs/SQL_CONTRACT.md) when
+    /// <c>USE_SQL_SERVER=true</c>. Because the SQL Server table is shared, all HA nodes and
+    /// <c>reconcile</c> see one cross-node inventory; the SQLite backend remains per-node/local.</para>
     /// </summary>
-    public static IItemInventory Open(string connectorId) => new ItemInventory(connectorId);
+    public static IItemInventory Open(string connectorId) =>
+        SyncState.UseSqlServer
+            ? new SqlServerItemInventory(connectorId)
+            : new ItemInventory(connectorId);
+}
+
+/// <summary>
+/// SQL Server-backed inventory (USE_SQL_SERVER=true): <c>dbo.ItemInventory</c>, keyed on
+/// (ConnectorId, ItemId) and shared by every HA node and <c>reconcile</c>. All access goes
+/// through the contract's stored procedures via <see cref="SqlExecutor"/> (hardened connection +
+/// transient-fault retry) using <see cref="SqlStateStore.ConnectionString"/>. Stateless over the
+/// executor — connections are per-operation (SqlClient pooling owns them) so Dispose is a no-op.
+/// </summary>
+public sealed class SqlServerItemInventory : IItemInventory
+{
+    private readonly string _connectorId;
+
+    public SqlServerItemInventory(string connectorId) => _connectorId = connectorId;
+
+    private static SqlCommand Proc(SqlConnection conn, string procName) =>
+        new(procName, conn) { CommandType = CommandType.StoredProcedure };
+
+    public void RecordSeen(IEnumerable<(string ItemId, string ObjectType)> items, DateTime seenUtc)
+    {
+        var records = new JsonArray();
+        foreach (var (itemId, objectType) in items)
+        {
+            records.Add(new JsonObject
+            {
+                ["itemId"] = itemId,
+                ["objectType"] = objectType,
+            });
+        }
+        if (records.Count == 0)
+            return;  // nothing to record
+
+        var utc = seenUtc.Kind == DateTimeKind.Local ? seenUtc.ToUniversalTime() : seenUtc;
+        SqlExecutor.Execute(SqlStateStore.ConnectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_RecordInventoryItems");
+            cmd.Parameters.AddWithValue("@ConnectorId", _connectorId);
+            cmd.Parameters.AddWithValue("@ItemsJson", records.ToJsonString());
+            cmd.Parameters.Add(new SqlParameter("@SeenUtc", SqlDbType.DateTime2) { Value = utc });
+            cmd.ExecuteNonQuery();
+        });
+    }
+
+    public void Remove(IEnumerable<string> itemIds)
+    {
+        var ids = new JsonArray();
+        foreach (var itemId in itemIds)
+            ids.Add(JsonValue.Create(itemId));
+        if (ids.Count == 0)
+            return;  // nothing to remove
+
+        SqlExecutor.Execute(SqlStateStore.ConnectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_RemoveInventoryItems");
+            cmd.Parameters.AddWithValue("@ConnectorId", _connectorId);
+            cmd.Parameters.AddWithValue("@ItemIdsJson", ids.ToJsonString());
+            cmd.ExecuteNonQuery();
+        });
+    }
+
+    public List<string> IdsForObject(string objectType)
+    {
+        return SqlExecutor.Execute(SqlStateStore.ConnectionString, conn =>
+        {
+            var result = new List<string>();
+            using var cmd = Proc(conn, "dbo.usp_GetInventoryByObject");
+            cmd.Parameters.AddWithValue("@ConnectorId", _connectorId);
+            cmd.Parameters.AddWithValue("@ObjectType", objectType);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                result.Add(reader.GetString(0));
+            return result;
+        });
+    }
+
+    public Dictionary<string, List<string>> AllByObject()
+    {
+        return SqlExecutor.Execute(SqlStateStore.ConnectionString, conn =>
+        {
+            var result = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            using var cmd = Proc(conn, "dbo.usp_GetInventoryAll");
+            cmd.Parameters.AddWithValue("@ConnectorId", _connectorId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var itemId = reader.GetString(0);
+                var objectType = reader.GetString(1);
+                if (!result.TryGetValue(objectType, out var ids))
+                    result[objectType] = ids = new List<string>();
+                ids.Add(itemId);
+            }
+            return result;
+        });
+    }
+
+    public int Count()
+    {
+        return SqlExecutor.Execute(SqlStateStore.ConnectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_CountInventory");
+            cmd.Parameters.AddWithValue("@ConnectorId", _connectorId);
+            return Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+        });
+    }
+
+    public void Dispose()
+    {
+        // Stateless over SqlExecutor; SqlClient pooling owns the physical connections.
+    }
 }

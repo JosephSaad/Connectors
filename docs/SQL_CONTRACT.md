@@ -52,6 +52,10 @@ ObjectClaims    (CrawlId uniqueidentifier, ObjectType nvarchar(128), NodeId nvar
                  ClaimedUtc NULL, HeartbeatUtc NULL, CompletedUtc NULL,
                  ClaimToken uniqueidentifier NULL,  -- idempotency key of the claiming usp_ClaimNextObject call
                  PK (CrawlId, ObjectType))
+ItemInventory   (ConnectorId nvarchar(64), ItemId nvarchar(256), ObjectType nvarchar(128),
+                 LastSeenUtc,  -- ingested-item inventory behind `reconcile`; shared across HA nodes
+                 PK (ConnectorId, ItemId),
+                 INDEX IX_ItemInventory_Object (ConnectorId, ObjectType))
 ```
 
 Existing databases migrate in place: `create-database.sql` is idempotent
@@ -109,6 +113,16 @@ State (mirror `config/sync_state.py` file semantics):
   whole insert is skipped, so a commit-ack-loss retry cannot duplicate the batch.
   The `@RecordsJson` record shape is unchanged.
 - `usp_ReadDeadLetter(@ConnectorId)` — unretried rows. `usp_MarkDeadLetterRetried(@Ids)` / `usp_ClearDeadLetter(@ConnectorId)`
+
+Ingested-item inventory (mirror `Graph/ItemInventory` SQLite semantics; the shared table lets HA nodes and `reconcile` see one inventory):
+- `usp_RecordInventoryItems(@ConnectorId, @ItemsJson, @SeenUtc)` — MERGE `WITH (HOLDLOCK)` upsert
+  keyed on (ConnectorId, ItemId); `@ItemsJson` = `[{"itemId":..., "objectType":...}]` via OPENJSON.
+  A matched row has ObjectType refreshed and LastSeenUtc re-stamped, else a row is inserted.
+- `usp_RemoveInventoryItems(@ConnectorId, @ItemIdsJson)` — delete the listed ids
+  (`@ItemIdsJson` = `["id1", "id2"]` via OPENJSON); a missing id is a no-op.
+- `usp_GetInventoryByObject(@ConnectorId, @ObjectType)` — inventoried item ids for one object type, ordered by ItemId.
+- `usp_GetInventoryAll(@ConnectorId)` — (ItemId, ObjectType) rows for the connector, ordered by ItemId; C# groups by ObjectType.
+- `usp_CountInventory(@ConnectorId)` — total inventoried item count.
 
 HA coordination:
 - `usp_OpenOrJoinCrawl(@ConnectorId, @CrawlKind, @SinceIso, @NodeId, @ObjectTypesJson)` —
