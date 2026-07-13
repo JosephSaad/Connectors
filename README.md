@@ -73,6 +73,12 @@ Full reference: `env/.env.local.example`.
 New preflight command: `validate-config [--strict]` checks env, config files, schema
 shape, and (best-effort) Salesforce/Graph connectivity before a long crawl.
 
+New drift command: `reconcile [--type X] [--fix]` compares the ingested-item inventory
+(`data/{connector_id}_inventory.db`, populated during ingest) against the live Salesforce
+source — reporting MISSING (in Salesforce, not indexed; the next crawl ingests these) and
+STALE (indexed, gone from Salesforce). With `--fix` the stale items are DELETEd from the
+Graph connection and dropped from the inventory.
+
 ## Usage
 
 Run from the repository root (paths like `logs/` and `config/` resolve against the
@@ -89,6 +95,8 @@ dotnet run --project src/SalesforceCopilotConnector -- ingest-object --type Case
 dotnet run --project src/SalesforceCopilotConnector -- retry-failed --clear-on-success
 dotnet run --project src/SalesforceCopilotConnector -- identity-dry-run --save --verbose
 dotnet run --project src/SalesforceCopilotConnector -- validate-config --strict
+dotnet run --project src/SalesforceCopilotConnector -- reconcile
+dotnet run --project src/SalesforceCopilotConnector -- reconcile --type Case --fix
 ```
 
 (Help text intentionally still reads `run.py` — the CLI parser tests assert

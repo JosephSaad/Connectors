@@ -521,6 +521,22 @@ public static class CommandRegistry
         pValidate.AddArgument("--verbose", isFlag: true, help: "Print all INFO+ logs to console.");
         pValidate.SetDefaults(async a => await ValidateConfig.RunAsync(a));
 
+        // reconcile (C#-side addition — index-vs-source drift over the ingested-item
+        // inventory; additive like validate-config, not in the Python original)
+        var pReconcile = parser.AddParser(
+            "reconcile",
+            "Report (and optionally fix) index-vs-source drift using the ingested-item inventory");
+        pReconcile.AddArgument(
+            "--type",
+            metavar: "TYPE",
+            help: "Restrict reconciliation to a single Salesforce object type (e.g. Account, Case).");
+        pReconcile.AddArgument(
+            "--fix",
+            isFlag: true,
+            help: "DELETE stale items (indexed but gone from Salesforce) from the Graph connection and inventory.");
+        pReconcile.AddArgument("--verbose", isFlag: true, help: "Print all INFO+ logs to console.");
+        pReconcile.SetDefaults(Reconcile.CmdReconcileAsync);
+
         return parser;
     }
 }

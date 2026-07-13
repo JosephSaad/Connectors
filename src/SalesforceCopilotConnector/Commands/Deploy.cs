@@ -254,8 +254,18 @@ public static class Deploy
             }
 
             var syncStart = DateTime.UtcNow;
+            // Ingested-item inventory (reconcile support): record every successful item
+            // PUT / delete so `reconcile` can detect index-vs-source drift. Hooks are
+            // cleared in the finally so the process-wide static seams never outlive this
+            // crawl (mirrors the ObjectWorkSourceFactory set/clear pattern below).
+            IItemInventory? inventory = null;
             try
             {
+                var inv = ItemInventory.Open(config.Connector.Id);
+                inventory = inv;
+                Ingest.InventoryRecordHook = pairs => inv.RecordSeen(pairs, DateTime.UtcNow);
+                Ingest.InventoryDeleteHook = ids => inv.Remove(ids);
+
                 // Identity Crawl: always on full sync; on incremental only when
                 // IDENTITY_SYNC_ON_INCREMENTAL=true (large orgs whose groups drift
                 // between full crawls). Default (unset) = today's full-only behavior.
@@ -287,6 +297,9 @@ public static class Deploy
             }
             finally
             {
+                Ingest.InventoryRecordHook = null;
+                Ingest.InventoryDeleteHook = null;
+                inventory?.Dispose();
                 if (haCrawlId != null)
                     Ingest.ObjectWorkSourceFactory = null;
                 if (dashboard != null)

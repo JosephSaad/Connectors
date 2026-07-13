@@ -151,6 +151,14 @@ public static class Ingest
     // instead of the static schema list. Null (default) → behavior unchanged.
     internal static Func<AppConfig, List<string>, Task<IObjectWorkSource>>? ObjectWorkSourceFactory;
 
+    // Inventory seams (reconcile support): the primary content-ingest path
+    // (IngestCommand/Deploy) sets these to record successful item PUTs / deletes
+    // into the ingested-item inventory that `reconcile` compares against the live
+    // Salesforce source. Null (default) → no inventory writes (e.g. ingest-item /
+    // ingest-object, and tests that don't opt in).
+    internal static Action<IReadOnlyList<(string ItemId, string ObjectType)>>? InventoryRecordHook;
+    internal static Action<IReadOnlyList<string>>? InventoryDeleteHook;
+
     // Track sample items for detailed logging
     private static readonly HashSet<string> SampleItemsLoggedByType = new();
     private static readonly object SampleItemsLock = new();
@@ -784,6 +792,8 @@ public static class Ingest
                     }
                     else
                     {
+                        var ingestedPairs = new List<(string ItemId, string ObjectType)>();
+                        var deletedIds = new List<string>();
                         foreach (var resp in responses)
                         {
                             var idxStr = resp["id"]?.ToString() ?? "";
@@ -801,9 +811,17 @@ public static class Ingest
                             if (200 <= status && status < 300)
                             {
                                 if (item["type"]?.ToString() == "deleted")
+                                {
                                     stats.DeletedCount += 1;
+                                    deletedIds.Add(item["id"]!.ToString());
+                                }
                                 else
+                                {
                                     stats.SuccessCount += 1;
+                                    ingestedPairs.Add((
+                                        item["id"]!.ToString(),
+                                        (item["properties"] as JsonObject)?["ObjectName"]?.ToString() ?? ""));
+                                }
                                 okThisRound += 1;
                             }
                             else if (status == 429)
@@ -857,6 +875,14 @@ public static class Ingest
                                     $"Graph batch item {fid} — no response received (missing from $batch response)");
                             }
                         }
+
+                        // Inventory bookkeeping (reconcile): mirror the Success/Deleted
+                        // accounting above so the ingested-item inventory tracks live Graph
+                        // state. Runs under statsLock — single-writer to the SQLite inventory.
+                        if (ingestedPairs.Count > 0)
+                            InventoryRecordHook?.Invoke(ingestedPairs);
+                        if (deletedIds.Count > 0)
+                            InventoryDeleteHook?.Invoke(deletedIds);
                     }
                 }
 
