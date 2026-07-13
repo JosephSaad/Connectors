@@ -149,6 +149,57 @@ public class SalesforceTests
     }
 
     [Fact]
+    public async Task FetchRecordIdsUsesIdOnlySoqlWithFilterConditionAndPaginates()
+    {
+        // The deletion sweep's source of truth. It must (a) project ONLY Id (no bodies, no
+        // field-retry loop), (b) apply the SAME filterCondition the content crawl uses — so
+        // filtered-out records are never mistaken for deletions — and (c) paginate to completion.
+        var objectConfig = new SalesforceObjectConfig(
+            ObjectType: "Account",
+            Fields: new[] { "Id", "Name", "Industry" },  // ignored — id-only projection
+            FilterCondition: "IsDeleted = false");
+
+        var handler = new StubHandler(
+            StubResponse(
+                200,
+                "OK",
+                new JsonObject
+                {
+                    ["records"] = new JsonArray(
+                        new JsonObject { ["Id"] = "001A" },
+                        new JsonObject { ["Id"] = "001B" }),
+                    ["nextRecordsUrl"] = "/services/data/v60.0/query/01g-2000",
+                }),
+            StubResponse(
+                200,
+                "OK",
+                new JsonObject
+                {
+                    ["records"] = new JsonArray(new JsonObject { ["Id"] = "001C" }),
+                }));
+
+        var originalSession = ApiClient.SfSession;
+        ApiClient.SfSession = new HttpClient(handler);
+        try
+        {
+            var ids = new List<string>();
+            await foreach (var id in ApiClient.FetchRecordIdsAsync(
+                               TestConfigWithoutFieldCache(), "token", objectConfig))
+            {
+                ids.Add(id);
+            }
+
+            Assert.Equal("SELECT Id FROM Account WHERE IsDeleted = false", ExtractSoql(handler.Requests[0]));
+            Assert.Equal(new[] { "001A", "001B", "001C" }, ids);  // paginated via nextRecordsUrl
+            Assert.Equal(2, handler.Requests.Count);
+        }
+        finally
+        {
+            ApiClient.SfSession = originalSession;
+        }
+    }
+
+    [Fact]
     public void ExtractUnsupportedFieldsForRelationshipPath()
     {
         var errorInfo = new SalesforceErrorInfo(

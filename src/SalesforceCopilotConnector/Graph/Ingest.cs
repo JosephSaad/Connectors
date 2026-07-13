@@ -22,6 +22,13 @@ public class IngestionStats
     public int FailedCount { get; set; }
     public int DeletedCount { get; set; }
     public int SkippedCount { get; set; }
+
+    /// <summary>Items withdrawn by the automatic post-full-crawl deletion sweep (Reconciler).</summary>
+    public int SweepDeletedCount { get; set; }
+
+    /// <summary>Object types the deletion sweep's mass-deletion safety guard skipped this crawl.</summary>
+    public List<string> SweepSkipped { get; } = new();
+
     public List<string> FailedIds { get; } = new();
     public Dictionary<string, int> ObjectTypeCounts { get; } = new();
     public string AclEngine { get; set; } = "LEGACY";

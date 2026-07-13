@@ -318,6 +318,33 @@ public static class IngestCommand
                 {
                     logger.Warning($"Could not record content crawl stats: {recErr.Message}");
                 }
+
+                // Automatic deletion sweep — FULL crawls only (an incremental crawl never sees the
+                // complete source, so absence proves nothing) and only once the sync state is
+                // recorded. haClosedCrawl gives exactly-once semantics for free (single-node always;
+                // in HA only the crawl-closing node). The sweep opens its OWN inventory handles via
+                // the Reconciler default factory and must NEVER fail the crawl — every error is
+                // caught and logged. See docs/DELETION_SYNC.md.
+                if (syncType == "full" && EnvFlags.DeletionSync && !ServiceStop.Requested)
+                {
+                    try
+                    {
+                        var sweeper = new Reconciler(config, client);
+                        var sweep = await sweeper.SweepDeletionsAsync(
+                            EnvFlags.DeletionSyncMaxPercent, ServiceStop.Token);
+                        stats.SweepDeletedCount = sweep.Deleted;
+                        stats.SweepSkipped.AddRange(sweep.Skipped);
+                        logger.Info(
+                            $"[DeletionSweep] withdrew {sweep.Deleted} deleted item(s); "
+                            + $"skipped {sweep.Skipped.Count} object(s) on the safety guard");
+                    }
+                    catch (Exception sweepErr)
+                    {
+                        logger.Warning(
+                            "[DeletionSweep] sweep failed (non-fatal; next full crawl or "
+                            + $"reconcile --fix retries): {sweepErr.Message}");
+                    }
+                }
             }
 
             var elapsed = CommandRegistry.MonotonicSeconds() - startTime;

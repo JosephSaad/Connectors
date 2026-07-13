@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Net;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -582,6 +583,93 @@ public static class ApiClient
             }
             Logger.Info($"Fetched {fetchedCount} {activeConfig.ObjectType} records from Salesforce");
             yield break;
+        }
+    }
+
+    /// <summary>
+    /// Yield the <c>Id</c> of every live Salesforce record for <paramref name="objectConfig"/> — a
+    /// lightweight <c>SELECT Id FROM {ObjectType} [WHERE {FilterCondition}]</c> that paginates via
+    /// <c>nextRecordsUrl</c> exactly like <see cref="FetchSalesforceRecordsAsync"/>.
+    ///
+    /// <para>No <c>since</c> clause is applied, so this is the FULL current id set. The SAME
+    /// <see cref="SalesforceObjectConfig.FilterCondition"/> the content crawl uses is applied so
+    /// records filtered out of the crawl are never considered stale by the deletion sweep. This is
+    /// the sweep's <b>source of truth</b>: a fresh id-only query at sweep time — never the set of
+    /// ids ingested during the crawl (an item that still exists but merely failed to ingest this
+    /// run must not be swept).</para>
+    ///
+    /// <para>Only <c>Id</c> is projected (always a valid column), so the per-org field-retry loop
+    /// and field cache that <see cref="FetchSalesforceRecordsAsync"/> needs are unnecessary here.
+    /// A single 401 triggers one token refresh, mirroring the record fetch. An object type that is
+    /// not available in this org still raises <see cref="_SkipObjectError"/> (never an empty set —
+    /// treating "object missing" as "everything deleted" would be a data-loss bug).</para>
+    /// </summary>
+    public static async IAsyncEnumerable<string> FetchRecordIdsAsync(
+        AppConfig config,
+        string accessToken,
+        SalesforceObjectConfig objectConfig,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var baseUrl = config.Connector.Salesforce.InstanceUrl;
+        var apiVersion = config.Connector.Salesforce.ApiVersion;
+
+        var headers = new Dictionary<string, string>
+        {
+            ["accept"] = "application/json",
+            ["accept-language"] = "en-US,en;q=0.9,en-IN;q=0.8",
+            ["content-type"] = "application/json",
+            ["authorization"] = $"Bearer {accessToken}",
+        };
+
+        // Id-only projection with the crawl's filter, no delta cursor — the full live id set.
+        var idOnlyConfig = objectConfig with { Fields = new[] { "Id" } };
+        var soql = BuildSoqlQuery(idOnlyConfig, since: null);
+        var queryUrl = BuildQueryUrl(baseUrl, apiVersion, soql);
+        Logger.Info($"Querying Salesforce ids {objectConfig.ObjectType}: {soql}");
+
+        var nextUrl = (string?)queryUrl;
+        while (nextUrl is not null)
+        {
+            ct.ThrowIfCancellationRequested();
+            var response = await SfGetAsync(nextUrl, headers, 60);
+
+            // 401: token expired — refresh once and retry immediately.
+            if (response.StatusCode == 401)
+            {
+                Logger.Warning(
+                    $"[SF] 401 Unauthorized for {objectConfig.ObjectType} (id fetch) — refreshing token and retrying");
+                var refreshed = await GetSalesforceAccessTokenAsync(config);
+                headers["authorization"] = $"Bearer {refreshed}";
+                response = await SfGetAsync(nextUrl, headers, 60);
+            }
+
+            if (!response.Ok)
+            {
+                var errorInfo = ExtractSalesforceErrorInfo(response);
+                if (response.StatusCode == 400 && errorInfo.ToString().Contains("INVALID_TYPE"))
+                {
+                    throw new _SkipObjectError(
+                        $"{objectConfig.ObjectType} is not available in this Salesforce org (INVALID_TYPE)");
+                }
+                throw new InvalidOperationException(
+                    FormatSalesforceFetchError(objectConfig.ObjectType, response));
+            }
+
+            var data = JsonNode.Parse(response.Text) as JsonObject ?? new JsonObject();
+            if (data["records"] is JsonArray records)
+            {
+                foreach (var node in records)
+                {
+                    if (node is not JsonObject record)
+                        continue;
+                    var id = record["Id"]?.GetValue<string>();
+                    if (!string.IsNullOrEmpty(id))
+                        yield return id!;
+                }
+            }
+
+            var nextRecordsUrl = data["nextRecordsUrl"]?.GetValue<string>();
+            nextUrl = !string.IsNullOrEmpty(nextRecordsUrl) ? $"{baseUrl}{nextRecordsUrl}" : null;
         }
     }
 
