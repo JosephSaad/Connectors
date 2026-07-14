@@ -68,7 +68,7 @@ Full reference: `env/.env.local.example`.
 | `ALERT_WEBHOOK_URL` + `ALERT_DEADLETTER_THRESHOLD` | POST an alert on crawl failure / dead-letter growth. | `docs/OBSERVABILITY.md` |
 | `IDENTITY_SYNC_ON_INCREMENTAL=true` | Run the (incremental) identity crawl on incremental cycles too. | |
 | `DELETION_SYNC=false` / `DELETION_SYNC_MAX_PERCENT=N` | Full-crawl existence sweep that withdraws items deleted in Salesforce (default **ON**, N=25); `DELETION_SYNC=false` disables it, `DELETION_SYNC_MAX_PERCENT` is the mass-deletion guard. | `docs/DELETION_SYNC.md` |
-| `GRAPH_CONNECTION_SHARDS={...}` | Shard objects across N Graph connections — the throughput lever. | `docs/SHARDING.md` |
+| `GRAPH_CONNECTION_SHARDS={...}` | Shard objects across N Graph connections — the throughput lever. `"Case#0/3"` entries hash-split one huge object across connections (the item-quota lever). | `docs/SHARDING.md` |
 | `GRAPH_BASE_URL` (+ `GRAPH_SCOPE`) | Sovereign-cloud Graph endpoint (e.g. `https://graph.microsoft.us`); scope defaults to `<base>/.default`. | |
 
 New preflight command: `validate-config [--strict]` checks env, config files, schema

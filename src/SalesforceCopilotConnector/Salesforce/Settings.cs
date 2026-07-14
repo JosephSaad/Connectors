@@ -69,6 +69,15 @@ public sealed class AppConfig
     /// covering its slice of the schema). <c>null</c> ⇒ single-connection default, all objects.
     /// </summary>
     public IReadOnlyList<string>? ShardObjectTypes { get; init; }
+
+    /// <summary>
+    /// Intra-object hash-sharding restriction (<c>GRAPH_CONNECTION_SHARDS</c> entries of the
+    /// form <c>"Object#bucket/of"</c>). When non-null, records of a listed object type are
+    /// fetched/ingested by this connection only when their id hashes into one of the shard's
+    /// buckets (<see cref="ShardBucketSpec.Owns"/>) — the record-level counterpart of
+    /// <see cref="ShardObjectTypes"/>. <c>null</c> ⇒ no record-level filtering (default).
+    /// </summary>
+    public IReadOnlyDictionary<string, ShardBucketSpec>? ShardObjectBuckets { get; init; }
 }
 
 public static class Settings

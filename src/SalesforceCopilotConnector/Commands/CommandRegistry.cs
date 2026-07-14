@@ -358,6 +358,8 @@ public static class CommandRegistry
             UseEntityDefinitionOwd = config.UseEntityDefinitionOwd,
             DebugObjectType = debugObjectType ?? config.DebugObjectType,
             DebugItemId = debugItemId ?? config.DebugItemId,
+            ShardObjectTypes = config.ShardObjectTypes,
+            ShardObjectBuckets = config.ShardObjectBuckets,
         };
 
     /// <summary>

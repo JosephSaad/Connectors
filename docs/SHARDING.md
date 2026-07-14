@@ -192,3 +192,62 @@ Therefore:
 - **Schema drift.** Adding a new object type to `config/schema.json` means it is now
   unassigned; `TryLoad` will fail until you add it to exactly one shard. This is
   intentional — it prevents silently dropping an object type from the crawl.
+
+## 7. Intra-object hash sharding (`Object#bucket/of`)
+
+Plain sharding assigns whole object types to connections, so its floor is "one
+connection holds all of one object". With ~5M items per connection (last-documented
+limit #3, `docs/CAPACITY.md`), any object bigger than that — e.g. tens of millions of
+Cases — cannot fit however you arrange types. Bucket entries split ONE object type
+across several connections:
+
+```
+GRAPH_CONNECTION_SHARDS={
+  "SfCaseA": ["Case#0/3"],
+  "SfCaseB": ["Case#1/3"],
+  "SfCaseC": ["Case#2/3", "Account", "Lead"]
+}
+```
+
+### Routing contract
+
+- A record's bucket is `ShardHash.Bucket(Id, of)` — FNV-1a 64 over the first 15
+  characters of the Salesforce Id (the 15- and 18-char forms of the same record
+  co-hash), modulo `of`. Deterministic across processes, platforms and runtime
+  versions: **the assignment is a compatibility contract**, pinned by
+  `ShardHashTests` — a record's owning connection must never move on its own.
+- The filter runs at the two record-stream choke points (`FetchSalesforceRecordsAsync`
+  and the id-only `FetchRecordIdsAsync`), so everything downstream inherits the same
+  routing with no further wiring: the crawl, checkpoints, `ingest-item`, the
+  ingested-item inventory, the automatic deletion sweep and `reconcile` all see only
+  the shard's slice. `reconcile` reports one row per (object, owning connection).
+- Sequential Salesforce ids spread evenly (hashing, not id-range slicing — ranges
+  would send all NEW records to one hot shard).
+
+### Validation (all enforced by `TryLoad`)
+
+Every bucket `0..of-1` owned by exactly one shard (a shard may own several); one
+consistent `of` per object; no mixing plain and bucketed forms of one object; the
+plain object name still appears exactly once in the shard's `ObjectTypes`, so every
+existing object-type mechanism is unchanged.
+
+### Costs and caveats
+
+- **Salesforce fetch multiplies.** Each owning shard queries the FULL object and
+  discards non-owned records client-side (SOQL cannot express a hash). For an object
+  split N ways, Salesforce query/paging cost is ×N; ACL resolution, transform and
+  Graph writes are NOT multiplied (records are dropped before those stages). Graph —
+  not Salesforce — is the throughput ceiling, so wall-clock impact is small; budget
+  Salesforce API limits accordingly. A future fetch-once/route-N optimization would
+  need per-connection state plumbing through the single-crawl path.
+- **COUNT() estimates.** The dashboard ETA for a bucketed object is
+  `total × ownedBuckets / of` (SOQL cannot count a hash bucket).
+- **Re-sharding.** Changing `of` (or moving buckets between connections) reassigns
+  records: after the change, run a full crawl on every affected connection (items land
+  on their new owners) and `reconcile --fix` per connection to withdraw the strays
+  left on the old owners. The mass-deletion guard (`DELETION_SYNC_MAX_PERCENT`)
+  will — correctly — block the automatic sweep from doing this migration for you when
+  the moved share exceeds the threshold.
+- **Capacity example** (149.7M-record org, ~50M in Copilot scope): `Case#0/5..#4/5`,
+  `Account#0/4..#3/4`, `Contact#0/2..#1/2`, plain `Opportunity` + `Lead` → 13
+  connections of ~4M each, inside the 30-connection and 5M/connection ceilings.

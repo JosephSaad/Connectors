@@ -129,18 +129,11 @@ public sealed class Reconciler
     {
         _sourceToken = null;  // fresh token per call for the default fetcher
 
-        // Object type → owning connection id (sharding-aware; a bad shard map aborts).
-        var owner = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (ShardingConfig.TryLoad(_config, out var shards, out var shardError))
-        {
-            foreach (var shard in shards)
-                foreach (var objectType in shard.ObjectTypes)
-                    owner[objectType] = shard.ConnectionId;
-        }
-        else if (shardError is not null)
-        {
-            throw new ArgumentException(shardError);
-        }
+        // Object type → owning connections (sharding-aware; a bad shard map aborts). A plain
+        // object has exactly one owner; an intra-object hash-sharded one has one owner per
+        // bucket subset, and each owner reconciles ONLY its slice of the source id set —
+        // against its own connection's inventory.
+        var owners = BuildOwnerMap();
 
         var report = new DriftReport();
         foreach (var objectConfig in ApiClient.ObjectConfigs)
@@ -152,40 +145,80 @@ public sealed class Reconciler
                 continue;
             }
 
-            var connectionId = owner.GetValueOrDefault(objectConfig.ObjectType, _config.Connector.Id);
+            // One Salesforce id fetch per object type, shared by every owning connection.
             var sourceIds = await _sourceIdsFetcher(objectConfig, ct).ConfigureAwait(false);
 
-            using var inventory = _inventoryFactory(connectionId);
-            var indexedIds = inventory.IdsForObject(objectConfig.ObjectType);
-            var (missing, stale) = ComputeDrift(sourceIds, indexedIds);
-
-            var drift = new ObjectDrift
+            foreach (var (connectionId, bucketSpec) in owners.GetValueOrDefault(
+                         objectConfig.ObjectType,
+                         new List<(string, ShardBucketSpec?)> { (_config.Connector.Id, null) }))
             {
-                ObjectName = objectConfig.ObjectType,
-                ConnectionId = connectionId,
-                SourceCount = sourceIds.Count,
-                IndexedCount = indexedIds.Count,
-                Missing = missing,
-                Stale = stale,
-            };
+                ct.ThrowIfCancellationRequested();
+                var ownedSourceIds = bucketSpec is null
+                    ? sourceIds
+                    : sourceIds.Where(bucketSpec.Owns).ToList();
 
-            if (fix && stale.Count > 0)
-            {
-                // reconcile --fix intentionally has NO mass-deletion guard: it is an explicit,
-                // on-demand operator action and its own consent. The AUTOMATIC post-crawl sweep
-                // (SweepDeletionsAsync) IS guarded, because it fires unattended on every full crawl.
-                var (fixedCount, failures) = await DeleteStaleAsync(
-                    objectConfig.ObjectType, connectionId, stale, inventory, ct).ConfigureAwait(false);
-                drift.FixedCount = fixedCount;
-                drift.FixFailures.AddRange(failures);
-                Logger.Info(
-                    $"{objectConfig.ObjectType}: fixed {drift.FixedCount}/{stale.Count} stale item(s)"
-                    + (drift.FixFailures.Count > 0 ? $" ({drift.FixFailures.Count} failed)" : string.Empty));
+                using var inventory = _inventoryFactory(connectionId);
+                var indexedIds = inventory.IdsForObject(objectConfig.ObjectType);
+                var (missing, stale) = ComputeDrift(ownedSourceIds, indexedIds);
+
+                var drift = new ObjectDrift
+                {
+                    ObjectName = objectConfig.ObjectType,
+                    ConnectionId = connectionId,
+                    SourceCount = ownedSourceIds.Count,
+                    IndexedCount = indexedIds.Count,
+                    Missing = missing,
+                    Stale = stale,
+                };
+
+                if (fix && stale.Count > 0)
+                {
+                    // reconcile --fix intentionally has NO mass-deletion guard: it is an explicit,
+                    // on-demand operator action and its own consent. The AUTOMATIC post-crawl sweep
+                    // (SweepDeletionsAsync) IS guarded, because it fires unattended on every full crawl.
+                    var (fixedCount, failures) = await DeleteStaleAsync(
+                        objectConfig.ObjectType, connectionId, stale, inventory, ct).ConfigureAwait(false);
+                    drift.FixedCount = fixedCount;
+                    drift.FixFailures.AddRange(failures);
+                    Logger.Info(
+                        $"{objectConfig.ObjectType} [{connectionId}]: fixed {drift.FixedCount}/{stale.Count} stale item(s)"
+                        + (drift.FixFailures.Count > 0 ? $" ({drift.FixFailures.Count} failed)" : string.Empty));
+                }
+
+                report.Objects.Add(drift);
             }
-
-            report.Objects.Add(drift);
         }
         return report;
+    }
+
+    /// <summary>
+    /// Object type → every owning (connection, bucket-subset) pair, from the validated shard
+    /// map. Plain assignment ⇒ a single owner with a <c>null</c> spec; hash-sharded ⇒ one
+    /// owner per shard holding buckets, each carrying its <see cref="ShardBucketSpec"/>.
+    /// Empty when sharding is disabled (callers fall back to the base connection).
+    /// </summary>
+    private Dictionary<string, List<(string ConnectionId, ShardBucketSpec? Spec)>> BuildOwnerMap()
+    {
+        var owners = new Dictionary<string, List<(string, ShardBucketSpec?)>>(StringComparer.OrdinalIgnoreCase);
+        if (ShardingConfig.TryLoad(_config, out var shards, out var shardError))
+        {
+            foreach (var shard in shards)
+            {
+                foreach (var objectType in shard.ObjectTypes)
+                {
+                    if (!owners.TryGetValue(objectType, out var list))
+                        owners[objectType] = list = new List<(string, ShardBucketSpec?)>();
+                    var spec = shard.ObjectBuckets is not null
+                        && shard.ObjectBuckets.TryGetValue(objectType, out var s) ? s : null;
+                    list.Add((shard.ConnectionId, spec));
+                }
+            }
+        }
+        else if (shardError is not null)
+        {
+            throw new ArgumentException(shardError);
+        }
+        return owners;
     }
 
     /// <summary>
@@ -256,19 +289,9 @@ public sealed class Reconciler
     {
         _sourceToken = null;  // fresh token per call for the default fetcher
 
-        // Object type → owning connection id (sharding-aware; a bad shard map aborts) — identical
-        // to ReconcileAsync so an object always sweeps against the connection that ingested it.
-        var owner = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (ShardingConfig.TryLoad(_config, out var shards, out var shardError))
-        {
-            foreach (var shard in shards)
-                foreach (var objectType in shard.ObjectTypes)
-                    owner[objectType] = shard.ConnectionId;
-        }
-        else if (shardError is not null)
-        {
-            throw new ArgumentException(shardError);
-        }
+        // Object type → owning connections (sharding-aware; a bad shard map aborts) — the same
+        // map ReconcileAsync uses, so an object always sweeps against connections that ingested it.
+        var owners = BuildOwnerMap();
 
         // When wired into a per-shard crawl the config carries that shard's object subset; sweep
         // only those so each object is swept exactly once (by its owning shard). Unset (the default
@@ -285,7 +308,16 @@ public sealed class Reconciler
             if (shardObjects is not null && !shardObjects.Contains(objectType))
                 continue;
 
-            var connectionId = owner.GetValueOrDefault(objectType, _config.Connector.Id);
+            // In a per-shard crawl (shardObjects set) the sweeping connection is ALWAYS this
+            // shard's own — for a hash-sharded object several connections own slices, and the
+            // per-shard config's ShardObjectBuckets already restricts the source id query to
+            // this shard's buckets, so inventory and source line up per connection. Outside a
+            // per-shard run, fall back to the object's single owner (plain-sharded or default).
+            var connectionId = shardObjects is not null
+                ? _config.Connector.Id
+                : owners.TryGetValue(objectType, out var objectOwners) && objectOwners.Count == 1
+                    ? objectOwners[0].ConnectionId
+                    : _config.Connector.Id;
 
             // Source of truth: a FRESH id-only, same-filter query (NEVER the ingested set).
             var sourceIds = (await _sourceIdsFetcher(objectConfig, ct).ConfigureAwait(false))

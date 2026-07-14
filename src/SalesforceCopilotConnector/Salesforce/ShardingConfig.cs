@@ -19,9 +19,70 @@ namespace SalesforceCopilotConnector.Salesforce;
 /// <param name="ConnectionId">The Graph external-connection id for this shard. Validated
 /// with the same rules as <see cref="Settings.ValidateConnectorId"/>.</param>
 /// <param name="ObjectTypes">The Salesforce object types (e.g. <c>Account</c>,
-/// <c>Contact</c>) ingested by this shard. Every type exists in the base schema and is
-/// owned by exactly one shard.</param>
-public sealed record Shard(string ConnectionId, IReadOnlyList<string> ObjectTypes);
+/// <c>Contact</c>) ingested by this shard — plain names, with any <c>#i/N</c> bucket
+/// suffix already stripped. Every type exists in the base schema; a plain type is owned
+/// by exactly one shard, a hash-sharded type by every shard holding one of its buckets.</param>
+/// <param name="ObjectBuckets">For hash-sharded object types only: plain object name →
+/// the bucket subset of that type this shard owns (see <see cref="ShardBucketSpec"/>).
+/// <c>null</c>/absent for shards with no hash-sharded types.</param>
+public sealed record Shard(
+    string ConnectionId,
+    IReadOnlyList<string> ObjectTypes,
+    IReadOnlyDictionary<string, ShardBucketSpec>? ObjectBuckets = null);
+
+/// <summary>
+/// The bucket subset of one hash-sharded object type owned by one shard: this shard
+/// ingests exactly the records whose <see cref="ShardHash.Bucket"/> (over
+/// <see cref="BucketCount"/>) lands in <see cref="Buckets"/>.
+/// </summary>
+/// <param name="BucketCount">Total buckets the object type is split into (the <c>N</c> in
+/// <c>Object#i/N</c>). Identical across every shard holding a bucket of the type.</param>
+/// <param name="Buckets">The bucket indices this shard owns (usually one; several when an
+/// operator packs multiple buckets onto one connection).</param>
+public sealed record ShardBucketSpec(int BucketCount, IReadOnlySet<int> Buckets)
+{
+    /// <summary>Whether <paramref name="recordId"/> routes to this shard.</summary>
+    public bool Owns(string recordId) => Buckets.Contains(ShardHash.Bucket(recordId, BucketCount));
+}
+
+/// <summary>
+/// Deterministic record-id → bucket assignment for intra-object hash sharding.
+///
+/// <para><b>Stability is a contract.</b> The assignment decides which Graph connection
+/// permanently owns a record — its item PUTs, deletes, inventory row and reconcile scope
+/// all follow it — so the hash must never vary by process, platform or runtime version
+/// (ruling out <see cref="string.GetHashCode()"/>, which is randomized per process).
+/// FNV-1a 64-bit over the id's UTF-16 code units, reduced modulo the bucket count.
+/// Changing this function, or a type's bucket count, is a re-shard: every affected
+/// connection needs a full crawl and a <c>reconcile --fix</c> (see docs/SHARDING.md).</para>
+///
+/// <para><b>Canonical form.</b> Only the first 15 characters are hashed: Salesforce ids
+/// come in a case-sensitive 15-char form and an 18-char form (the last 3 characters are a
+/// checksum of the casing), and both refer to the same record — hashing the 15-char prefix
+/// makes both forms land in the same bucket. The prefix is case-sensitive by design:
+/// ids differing in case are different records.</para>
+/// </summary>
+public static class ShardHash
+{
+    private const ulong FnvOffsetBasis = 14695981039346656037UL;
+    private const ulong FnvPrime = 1099511628211UL;
+
+    /// <summary>Bucket index in <c>[0, bucketCount)</c> for <paramref name="recordId"/>.</summary>
+    public static int Bucket(string recordId, int bucketCount)
+    {
+        if (bucketCount < 1)
+            throw new ArgumentOutOfRangeException(nameof(bucketCount), bucketCount, "bucket count must be >= 1");
+
+        var length = Math.Min(recordId.Length, 15);
+        var hash = FnvOffsetBasis;
+        for (var i = 0; i < length; i++)
+        {
+            hash ^= recordId[i];
+            hash *= FnvPrime;
+        }
+        return (int)(hash % (ulong)bucketCount);
+    }
+}
 
 /// <summary>
 /// Parse, validate and apply the <c>GRAPH_CONNECTION_SHARDS</c> multi-connection
@@ -37,6 +98,17 @@ public sealed record Shard(string ConnectionId, IReadOnlyList<string> ObjectType
 /// <code>
 /// GRAPH_CONNECTION_SHARDS={"salesforceCrmA":["Account","Contact","Opportunity"],"salesforceCrmB":["Case","Lead"]}
 /// </code>
+/// <para><b>Intra-object hash sharding.</b> An object type too large for one connection's
+/// item quota is split across several connections with <c>"Object#bucket/of"</c> entries:
+/// each record routes to bucket <c>ShardHash.Bucket(Id, of)</c>, deterministically, so
+/// incremental updates, deletes, the ingested-item inventory and <c>reconcile</c> all stay
+/// consistent per connection. Every bucket <c>0..of-1</c> must be assigned to exactly one
+/// shard (a shard may own several buckets), and a type cannot be both plain and bucketed:</para>
+/// <code>
+/// GRAPH_CONNECTION_SHARDS={"sfCaseA":["Case#0/3"],"sfCaseB":["Case#1/3"],"sfCaseC":["Case#2/3","Lead"],...}
+/// </code>
+/// <para>See <c>docs/SHARDING.md</c> for capacity planning, the Salesforce fetch-cost
+/// trade-off, and the re-shard procedure (changing <c>of</c> reassigns records).</para>
 ///
 /// <para><b>Validation</b> (all failures reported through the <c>error</c> out-param, no
 /// exceptions): every connection id passes <see cref="Settings.ValidateConnectorId"/>;
@@ -216,8 +288,10 @@ public static class ShardingConfig
         var parsedShards = new List<Shard>();
         var connectionIdsSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // objectType -> list of connection ids that claimed it (for duplicate detection).
-        var assignmentOwners = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        // Plain assignments: objectType -> connection ids that claimed it un-bucketed.
+        var plainOwners = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        // Bucketed assignments: objectType -> every (connection, bucket, of) claim.
+        var bucketOwners = new Dictionary<string, List<(string ConnectionId, int Bucket, int Of)>>(StringComparer.Ordinal);
 
         foreach (var (connectionId, valueNode) in root)
         {
@@ -241,16 +315,42 @@ public static class ShardingConfig
                 continue;
             }
 
-            var objectTypes = new List<string>();
+            var objectTypes = new List<string>();                 // plain names, listed order, deduped
+            var shardBuckets = new Dictionary<string, (int Of, SortedSet<int> Buckets)>(StringComparer.Ordinal);
             foreach (var element in arr)
             {
-                if (element is JsonValue v && v.TryGetValue(out string? typeName) && !string.IsNullOrWhiteSpace(typeName))
+                if (element is not JsonValue v || !v.TryGetValue(out string? entry) || string.IsNullOrWhiteSpace(entry))
                 {
-                    objectTypes.Add(typeName!);
+                    problems.Add($"Shard '{connectionId}' has a non-string or empty object-type entry.");
+                    continue;
+                }
+
+                if (!TryParseEntry(entry!, out var typeName, out var bucket, out var of, out var entryError))
+                {
+                    problems.Add($"Shard '{connectionId}': {entryError}");
+                    continue;
+                }
+
+                if (bucket is null)
+                {
+                    // Plain (un-bucketed) assignment.
+                    objectTypes.Add(typeName);
+                    if (!plainOwners.TryGetValue(typeName, out var owners))
+                        plainOwners[typeName] = owners = new List<string>();
+                    owners.Add(connectionId);
                 }
                 else
                 {
-                    problems.Add($"Shard '{connectionId}' has a non-string or empty object-type entry.");
+                    // Hash-bucket assignment: "Name#i/N".
+                    if (!shardBuckets.TryGetValue(typeName, out var acc))
+                    {
+                        shardBuckets[typeName] = acc = (of!.Value, new SortedSet<int>());
+                        objectTypes.Add(typeName);  // plain name once, so object-type filters work unchanged
+                    }
+                    acc.Buckets.Add(bucket.Value);  // same-shard duplicate surfaces via the global claim list
+                    if (!bucketOwners.TryGetValue(typeName, out var claims))
+                        bucketOwners[typeName] = claims = new List<(string, int, int)>();
+                    claims.Add((connectionId, bucket.Value, of!.Value));
                 }
             }
 
@@ -269,21 +369,19 @@ public static class ShardingConfig
                         $"Shard '{connectionId}' references unknown object type '{objectType}' " +
                         "(not in the base schema object list).");
                 }
-
-                if (!assignmentOwners.TryGetValue(objectType, out var owners))
-                {
-                    owners = new List<string>();
-                    assignmentOwners[objectType] = owners;
-                }
-                owners.Add(connectionId);
             }
 
-            parsedShards.Add(new Shard(connectionId, objectTypes));
+            var objectBuckets = shardBuckets.Count == 0
+                ? null
+                : shardBuckets.ToDictionary(
+                    kv => kv.Key,
+                    kv => new ShardBucketSpec(kv.Value.Of, kv.Value.Buckets),
+                    StringComparer.Ordinal);
+            parsedShards.Add(new Shard(connectionId, objectTypes, objectBuckets));
         }
 
-        // ── Every schema object assigned to exactly one shard ─────────────────────
-        // Duplicates: object types claimed by more than one shard.
-        foreach (var (objectType, owners) in assignmentOwners)
+        // ── Plain objects: assigned to exactly one shard, and never ALSO bucketed ─
+        foreach (var (objectType, owners) in plainOwners)
         {
             if (owners.Count > 1 && schemaSet.Contains(objectType))
             {
@@ -291,10 +389,50 @@ public static class ShardingConfig
                     $"Object type '{objectType}' is assigned to multiple shards: " +
                     $"{string.Join(", ", owners)} (each object must map to exactly one shard).");
             }
+            if (bucketOwners.ContainsKey(objectType))
+            {
+                problems.Add(
+                    $"Object type '{objectType}' is assigned both plain and hash-bucketed " +
+                    "(use one or the other for a given object type).");
+            }
         }
 
-        // Unassigned: schema objects no shard claimed. Reported in schema order.
-        var unassigned = schemaObjects.Where(o => !assignmentOwners.ContainsKey(o)).ToList();
+        // ── Bucketed objects: one consistent N, and buckets 0..N-1 each exactly once ─
+        foreach (var (objectType, claims) in bucketOwners)
+        {
+            var counts = claims.Select(c => c.Of).Distinct().ToList();
+            if (counts.Count > 1)
+            {
+                problems.Add(
+                    $"Object type '{objectType}' declares inconsistent bucket counts: " +
+                    $"{string.Join(", ", counts.OrderBy(c => c))} (every '{objectType}#i/N' must use the same N).");
+                continue;  // per-bucket checks are meaningless with mixed N
+            }
+
+            var of = counts[0];
+            var duplicates = claims.GroupBy(c => c.Bucket).Where(g => g.Count() > 1).ToList();
+            foreach (var dup in duplicates.OrderBy(d => d.Key))
+            {
+                problems.Add(
+                    $"Bucket {objectType}#{dup.Key}/{of} is assigned to multiple shards: " +
+                    $"{string.Join(", ", dup.Select(c => c.ConnectionId))} (each bucket maps to exactly one shard).");
+            }
+
+            var present = claims.Select(c => c.Bucket).ToHashSet();
+            var missing = Enumerable.Range(0, of).Where(b => !present.Contains(b)).ToList();
+            if (missing.Count > 0)
+            {
+                problems.Add(
+                    $"Object type '{objectType}' is split into {of} buckets but " +
+                    $"{missing.Count} are unassigned: {string.Join(", ", missing.Select(b => $"#{b}/{of}"))} " +
+                    "(every bucket must map to exactly one shard — records in an unassigned bucket would never ingest).");
+            }
+        }
+
+        // Unassigned: schema objects no shard claimed (plain or bucketed). Schema order.
+        var unassigned = schemaObjects
+            .Where(o => !plainOwners.ContainsKey(o) && !bucketOwners.ContainsKey(o))
+            .ToList();
         if (unassigned.Count > 0)
         {
             problems.Add(
@@ -310,6 +448,54 @@ public static class ShardingConfig
         }
 
         shards = parsedShards;
+        return true;
+    }
+
+    /// <summary>
+    /// Parse one shard object-type entry: either a plain name (<c>"Case"</c>) or a
+    /// hash-bucket claim (<c>"Case#2/5"</c> — bucket 2 of 5). On success, <paramref name="bucket"/>
+    /// and <paramref name="of"/> are both <c>null</c> for a plain entry and both set for a
+    /// bucketed one. Object API names never contain <c>#</c>, so the delimiter is unambiguous.
+    /// </summary>
+    private static bool TryParseEntry(
+        string entry, out string typeName, out int? bucket, out int? of, out string? error)
+    {
+        typeName = entry;
+        bucket = null;
+        of = null;
+        error = null;
+
+        var hash = entry.IndexOf('#');
+        if (hash < 0)
+            return true;  // plain name
+
+        typeName = entry[..hash];
+        var spec = entry[(hash + 1)..];
+        var slash = spec.IndexOf('/');
+
+        if (string.IsNullOrWhiteSpace(typeName) || slash < 0 || spec.IndexOf('#') >= 0
+            || !int.TryParse(spec[..slash], out var b)
+            || !int.TryParse(spec[(slash + 1)..], out var n))
+        {
+            error = $"malformed bucket entry '{entry}' (expected 'ObjectType#bucket/of, e.g. Case#0/5').";
+            return false;
+        }
+
+        if (n < 2)
+        {
+            error = $"bucket entry '{entry}' has bucket count {n} — hash sharding needs at least 2 buckets " +
+                    "(use the plain object name for a single connection).";
+            return false;
+        }
+
+        if (b < 0 || b >= n)
+        {
+            error = $"bucket entry '{entry}' has bucket index {b} out of range [0, {n}).";
+            return false;
+        }
+
+        bucket = b;
+        of = n;
         return true;
     }
 
@@ -330,7 +516,7 @@ public static class ShardingConfig
     /// <returns>A clone bound to the shard's connection.</returns>
     public static AppConfig ForShard(AppConfig baseConfig, Shard shard)
     {
-        return CloneWith(baseConfig, shard.ConnectionId, null, shard.ObjectTypes);
+        return CloneWith(baseConfig, shard.ConnectionId, null, shard.ObjectTypes, shard.ObjectBuckets);
     }
 
     /// <summary>
@@ -359,7 +545,14 @@ public static class ShardingConfig
                 $"Object type '{objectType}' is not owned by shard '{shard.ConnectionId}'.",
                 nameof(objectType));
         }
-        return CloneWith(baseConfig, shard.ConnectionId, objectType, null);
+
+        // Carry the object's bucket subset (if hash-sharded) so the fetch filter still
+        // restricts the single-object run to this shard's records.
+        IReadOnlyDictionary<string, ShardBucketSpec>? buckets = null;
+        if (shard.ObjectBuckets is not null && shard.ObjectBuckets.TryGetValue(objectType, out var spec))
+            buckets = new Dictionary<string, ShardBucketSpec>(StringComparer.Ordinal) { [objectType] = spec };
+
+        return CloneWith(baseConfig, shard.ConnectionId, objectType, null, buckets);
     }
 
     /// <summary>
@@ -407,7 +600,8 @@ public static class ShardingConfig
         AppConfig baseConfig,
         string connectionId,
         string? debugObjectType,
-        IReadOnlyList<string>? shardObjectTypes)
+        IReadOnlyList<string>? shardObjectTypes,
+        IReadOnlyDictionary<string, ShardBucketSpec>? shardObjectBuckets = null)
     {
         var baseConnector = baseConfig.Connector;
         var shardConnector = new ConnectorSettings
@@ -438,6 +632,7 @@ public static class ShardingConfig
             DebugObjectType = debugObjectType ?? baseConfig.DebugObjectType,
             DebugItemId = baseConfig.DebugItemId,
             ShardObjectTypes = shardObjectTypes,
+            ShardObjectBuckets = shardObjectBuckets,
         };
     }
 }

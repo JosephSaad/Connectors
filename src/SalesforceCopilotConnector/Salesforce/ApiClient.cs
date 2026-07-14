@@ -250,8 +250,18 @@ public static class ApiClient
                 var resp = await SfGetAsync(url, headers, 30);
                 if (resp.Ok)
                 {
-                    counts[objCfg.ObjectType] =
-                        (JsonNode.Parse(resp.Text) as JsonObject)?["totalSize"]?.GetValue<int>() ?? 0;
+                    var total = (JsonNode.Parse(resp.Text) as JsonObject)?["totalSize"]?.GetValue<int>() ?? 0;
+
+                    // Intra-object hash sharding: SOQL cannot COUNT() a hash bucket, so
+                    // estimate this connection's share as total × ownedBuckets/bucketCount.
+                    // Feeds only the dashboard ETA — ingestion itself filters per record.
+                    if (config.ShardObjectBuckets is not null
+                        && config.ShardObjectBuckets.TryGetValue(objCfg.ObjectType, out var bucketSpec))
+                    {
+                        total = (int)Math.Round((double)total * bucketSpec.Buckets.Count / bucketSpec.BucketCount);
+                    }
+
+                    counts[objCfg.ObjectType] = total;
                     Logger.Info($"COUNT {objCfg.ObjectType}: {counts[objCfg.ObjectType]} records");
                 }
             }
@@ -500,6 +510,12 @@ public static class ApiClient
             var queryUrl = BuildQueryUrl(baseUrl, apiVersion, soql);
             Logger.Info($"Querying Salesforce {activeConfig.ObjectType}: {soql}");
 
+            // Hoisted out of the record loop: one dictionary lookup per fetch, not per record.
+            var bucketSpec = config.ShardObjectBuckets is not null
+                && config.ShardObjectBuckets.TryGetValue(activeConfig.ObjectType, out var spec)
+                    ? spec
+                    : null;
+
             var nextUrl = (string?)queryUrl;
             var fetchedCount = 0;
             var retryRequested = false;
@@ -557,6 +573,20 @@ public static class ApiClient
                             continue;
                         record["objectType"] = activeConfig.ObjectType;
                         fetchedCount++;
+
+                        // Intra-object hash sharding: this connection only owns records whose
+                        // id hashes into its bucket subset. Filtering at THIS choke point is
+                        // what keeps the whole feature coherent — the crawl, checkpoints,
+                        // ingest-item, the inventory and the deletion sweep all consume this
+                        // stream, so they inherit the same routing. (fetchedCount still counts
+                        // every fetched record: the INVALID_FIELD retry guard predates the
+                        // filter and must keep its exact semantics.)
+                        if (bucketSpec is not null)
+                        {
+                            var recordId = record["Id"]?.GetValue<string>();
+                            if (recordId is not null && !bucketSpec.Owns(recordId))
+                                continue;
+                        }
                         yield return record;
                     }
                 }
@@ -627,6 +657,14 @@ public static class ApiClient
         var queryUrl = BuildQueryUrl(baseUrl, apiVersion, soql);
         Logger.Info($"Querying Salesforce ids {objectConfig.ObjectType}: {soql}");
 
+        // Intra-object hash sharding: restrict to this connection's bucket subset, exactly
+        // like FetchSalesforceRecordsAsync — the deletion sweep diffs these ids against this
+        // connection's inventory, so both sides must see the same slice of the object.
+        var bucketSpec = config.ShardObjectBuckets is not null
+            && config.ShardObjectBuckets.TryGetValue(objectConfig.ObjectType, out var spec)
+                ? spec
+                : null;
+
         var nextUrl = (string?)queryUrl;
         while (nextUrl is not null)
         {
@@ -663,7 +701,7 @@ public static class ApiClient
                     if (node is not JsonObject record)
                         continue;
                     var id = record["Id"]?.GetValue<string>();
-                    if (!string.IsNullOrEmpty(id))
+                    if (!string.IsNullOrEmpty(id) && (bucketSpec is null || bucketSpec.Owns(id!)))
                         yield return id!;
                 }
             }
