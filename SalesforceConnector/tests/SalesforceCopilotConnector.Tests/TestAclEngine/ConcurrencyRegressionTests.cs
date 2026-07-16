@@ -22,8 +22,13 @@
 //   - AclResolver.WarnedNoParent warn-dedup path under concurrency (LOW-1)
 
 using System.Collections.Concurrent;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using SalesforceCopilotConnector.AclEngine;
+// Import only GraphClient by alias — a bare `using ...Graph;` would make
+// AclResolver ambiguous with SalesforceCopilotConnector.AclEngine.AclResolver.
+using GraphClient = SalesforceCopilotConnector.Graph.GraphClient;
 
 namespace SalesforceCopilotConnector.Tests.TestAclEngine;
 
@@ -318,6 +323,123 @@ public class QueueHandlerPrewarmTests
         Assert.Equal(new HashSet<string> { "005USERA" }, users);
         // 1 failed prewarm + 1 per-group fallback query
         Assert.Equal(2, sf.QueryAllCallCount);
+    }
+
+    // LOW-2: _groupMembers is written under _prewarmLock but read lock-free on the
+    // hot path, so the reference field must be volatile (mirrors
+    // AdaptiveConcurrency._current) to guarantee readers see the populated map.
+    [Fact]
+    public void GroupMembersFieldIsVolatile()
+    {
+        var field = typeof(QueueHandler)
+            .GetField("_groupMembers", BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(field);
+        Assert.Contains(typeof(IsVolatile), field!.GetRequiredCustomModifiers());
+    }
+
+    // LOW-2: the volatile marking is a memory-visibility hardening only — behaviour
+    // is unchanged. Concurrent prewarm + resolution still produces correct results.
+    [Fact]
+    public async Task ConcurrentPrewarmAndResolveIsCorrect()
+    {
+        var sf = new ConcurrencyFakeSfClient
+        {
+            QueryAllHandler = soql =>
+            {
+                Assert.StartsWith("SELECT GroupId, UserOrGroupId FROM GroupMember", soql);
+                return MemberRows(
+                    ("00Groot", "005USERA"),
+                    ("00Groot", "00Gnested"),
+                    ("00Gnested", "005USERB"));
+            },
+        };
+        var handler = new QueueHandler(sf);
+
+        var tasks = Enumerable.Range(0, 16).Select(_ => Task.Run(async () =>
+        {
+            await handler.PrewarmAsync();
+            return await handler.ResolveStaticGroupAsync("00Groot");
+        }));
+
+        var results = await Task.WhenAll(tasks);
+        Assert.All(results, r =>
+            Assert.Equal(new HashSet<string> { "005USERA", "005USERB" }, r));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LOW-3 — PrincipalMapper.ResolveIdentifierAsync collapses concurrent misses
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// GraphClient fake whose GetAsync blocks on a gate until released, so all
+/// concurrent lookups for the same identifier pile up simultaneously.  Counts
+/// the total number of Graph calls to prove in-flight dedup.
+/// </summary>
+file sealed class GatedGraphClient : GraphClient
+{
+    public const string Guid = "12345678-1234-1234-1234-123456789abc";
+    private int _getCallCount;
+    public int GetCallCount => Volatile.Read(ref _getCallCount);
+    private readonly TaskCompletionSource _gate =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public void Release() => _gate.TrySetResult();
+
+    public override async Task<JsonNode?> GetAsync(
+        string pathOrUrl, Dictionary<string, string>? headers = null)
+    {
+        Interlocked.Increment(ref _getCallCount);
+        await _gate.Task;
+        // Direct-path lookup returns a GUID → no follow-up filter call.
+        return new JsonObject { ["id"] = Guid };
+    }
+}
+
+public class PrincipalMapperDedupTests
+{
+    [Fact]
+    public async Task ConcurrentMissesForSameIdentifierCollapseToOneLookup()
+    {
+        var graph = new GatedGraphClient();
+        var mapper = new PrincipalMapper(new ConcurrencyFakeSfClient(), graphClient: graph);
+        const string identifier = "user@nokia.com";
+
+        // Fire many concurrent resolutions of the SAME identifier; they all miss
+        // the cache and must share a single in-flight Graph lookup.
+        var tasks = Enumerable.Range(0, 32)
+            .Select(_ => Task.Run(() => mapper.ResolveIdentifierAsync(identifier)))
+            .ToList();
+
+        // Let every caller reach (and block on) the gated Graph call.
+        while (graph.GetCallCount == 0)
+            await Task.Delay(5);
+        await Task.Delay(50);
+
+        graph.Release();
+        var results = await Task.WhenAll(tasks);
+
+        Assert.All(results, r => Assert.Equal(GatedGraphClient.Guid, r));
+        // Without dedup this would be up to 32; with dedup it is exactly 1.
+        Assert.Equal(1, graph.GetCallCount);
+        Assert.Equal(GatedGraphClient.Guid, mapper._principalCache[identifier]);
+    }
+
+    [Fact]
+    public async Task DistinctIdentifiersEachResolveIndependently()
+    {
+        var graph = new GatedGraphClient();
+        graph.Release();  // no blocking needed here
+        var mapper = new PrincipalMapper(new ConcurrencyFakeSfClient(), graphClient: graph);
+
+        var identifiers = Enumerable.Range(0, 10).Select(i => $"user{i}@nokia.com").ToList();
+        foreach (var id in identifiers)
+            Assert.Equal(GatedGraphClient.Guid, await mapper.ResolveIdentifierAsync(id));
+
+        // One lookup per distinct identifier; a repeat is served from the cache.
+        Assert.Equal(10, graph.GetCallCount);
+        Assert.Equal(GatedGraphClient.Guid, await mapper.ResolveIdentifierAsync(identifiers[0]));
+        Assert.Equal(10, graph.GetCallCount);
     }
 }
 

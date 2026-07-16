@@ -265,14 +265,26 @@ parallel object workers started by `Graph/Ingest.cs`):
   / owner / share-field caches in `ConcurrentDictionary`s so the slow
   (cache-miss) paths are safe under concurrent resolution; the once-per-type
   missing-parent warning in `Resolver.cs` is lock-guarded for the same reason.
+  `PrincipalMapper.ResolveIdentifierAsync` additionally collapses concurrent
+  cache misses for the *same* identifier onto a single in-flight Graph lookup.
+- `ShareFetcher.PrewarmChunkAsync()` pre-seeds an empty owner/share result for
+  every record so records with genuinely zero shares skip the per-record SOQL.
+  A **transient** (non-`INVALID_FIELD`) bulk-query failure drops those seeded
+  blanks for the affected batch, so `GetOwnerIdAsync` / `GetShareEntriesAsync`
+  fall back to the per-record slow path instead of silently indexing the batch
+  owner-less / deny-all. Successfully queried records keep the fast path.
 - `QueueHandler.PrewarmAsync()` bulk-loads all `GroupMember` rows once per run;
   static group/queue expansion is then a pure in-memory DFS with **zero
   per-group SOQL**. If the prewarm query fails, expansion falls back to one
-  SOQL per group node.
+  SOQL per group node. (`_groupMembers` is `volatile` — written once under the
+  prewarm lock, read lock-free on the hot path.)
 - Group expansion is cycle-safe in both engines: `QueueHandler.cs` and
   `Graph/LegacyAclResolver.cs` track visited groups, so cyclic memberships
   (A → B → A) terminate, with the cyclic reference contributing no extra
-  grants.
+  grants. In `LegacyAclResolver` only the nodes **strictly inside** a cycle are
+  left uncached; the back-edge target and any heavily-shared group above the
+  cycle still compute their full closure and are cached (no per-record
+  re-expansion).
 
 ---
 

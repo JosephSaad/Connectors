@@ -104,6 +104,60 @@ public class LegacyAclResolverCycleTests
     }
 
     [Fact]
+    public async Task HeavilySharedGroupAboveCycleIsStillCached()
+    {
+        // LOW-1: X → A, and A → B → C → A form a cycle below X.  The cycle taint
+        // must NOT propagate to X (or to the back-edge target A): X sits strictly
+        // above the cycle and computes the full closure, so it must be cached
+        // once rather than re-expanded for every record shared with X.
+        //   X → {UX, A}
+        //   A → {U1, B}   B → {U2, C}   C → {U3, A}   (cycle A→B→C→A)
+        var resolver = MakeResolver(
+            new Dictionary<string, Group>
+            {
+                ["00GX"] = RegularGroup("00GX"),
+                ["00GA"] = RegularGroup("00GA"),
+                ["00GB"] = RegularGroup("00GB"),
+                ["00GC"] = RegularGroup("00GC"),
+            },
+            new Dictionary<string, List<string>>
+            {
+                ["00GX"] = new() { "005USERX", "00GA" },
+                ["00GA"] = new() { "005USER1", "00GB" },
+                ["00GB"] = new() { "005USER2", "00GC" },
+                ["00GC"] = new() { "005USER3", "00GA" },
+            });
+
+        var (userIds, includesEveryone) = await resolver.ResolveGroupAsync("00GX");
+
+        Assert.Equal(
+            new HashSet<string> { "005USERX", "005USER1", "005USER2", "005USER3" },
+            userIds);
+        Assert.False(includesEveryone);
+
+        var groupCache = (Dictionary<string, (HashSet<string> UserIds, bool IncludesEveryone)>)
+            typeof(AclResolver)
+                .GetField("_groupCache", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .GetValue(resolver)!;
+
+        // X (above the cycle) and A (the back-edge target) compute the full closure
+        // and are cached; the strictly-interior nodes B and C are NOT cached.
+        Assert.True(groupCache.ContainsKey("00GX"));
+        Assert.True(groupCache.ContainsKey("00GA"));
+        Assert.False(groupCache.ContainsKey("00GB"));
+        Assert.False(groupCache.ContainsKey("00GC"));
+
+        // The back-edge target's cached membership is the full closure of the cycle.
+        Assert.Equal(
+            new HashSet<string> { "005USER1", "005USER2", "005USER3" },
+            groupCache["00GA"].UserIds);
+
+        // Re-resolving X is served straight from the cache (not re-expanded).
+        var (secondUserIds, _) = await resolver.ResolveGroupAsync("00GX");
+        Assert.Equal(userIds, secondUserIds);
+    }
+
+    [Fact]
     public async Task DiamondMembershipIsNotMisreportedAsCycle()
     {
         // A → {B, C}, B → {D}, C → {D}, D → {U1}: D is reached twice via

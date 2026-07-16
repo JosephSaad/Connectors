@@ -68,6 +68,12 @@ public class PrincipalMapper
     // object workers (Ingest launches up to N ToAclEntriesAsync tasks at once);
     // a plain Dictionary written concurrently can throw or return torn reads.
     internal readonly ConcurrentDictionary<string, string?> _principalCache = new();
+    // In-flight dedup: identifier → the single running resolution Task, so N
+    // concurrent misses for the same identifier collapse into ONE Graph lookup
+    // instead of each firing its own.  Entries are transient — removed once the
+    // lookup completes and its result has landed in _principalCache (which stays
+    // the authoritative resolved-value cache read by tests / identity_publisher).
+    private readonly ConcurrentDictionary<string, Lazy<Task<string?>>> _inFlightResolves = new();
     // user IDs already warned about missing M365 principal (suppress duplicates)
     // Protected by a lock because 3 parallel object workers share this instance.
     private readonly HashSet<string> _warnedMissingPrincipals = new();
@@ -337,28 +343,55 @@ public class PrincipalMapper
     /// </summary>
     internal virtual async Task<string?> ResolveIdentifierAsync(string identifier)
     {
-        // Cache hit
+        // Cache hit — resolved value already known.
         if (_principalCache.TryGetValue(identifier, out var cachedValue))
             return cachedValue;
 
-        // If it already looks like a GUID, use it directly
+        // Miss: collapse concurrent misses for the same identifier onto a single
+        // resolution Task so the (potentially expensive) Graph lookup runs once.
+        // Lazy<T> with the default ExecutionAndPublication mode guarantees the
+        // factory body runs exactly once even if several threads race on GetOrAdd.
+        var lazy = _inFlightResolves.GetOrAdd(
+            identifier,
+            key => new Lazy<Task<string?>>(() => ResolveUncachedAsync(key)));
+        try
+        {
+            return await lazy.Value.ConfigureAwait(false);
+        }
+        finally
+        {
+            // The result is now in _principalCache, so future callers hit the fast
+            // path; drop the in-flight entry to bound the map's size.
+            _inFlightResolves.TryRemove(identifier, out _);
+        }
+    }
+
+    /// <summary>
+    /// Perform the actual (uncached) resolution for <paramref name="identifier"/> and
+    /// record the result in <see cref="_principalCache"/>.  Only ever invoked once per
+    /// identifier at a time via the in-flight dedup in <see cref="ResolveIdentifierAsync"/>.
+    /// </summary>
+    private async Task<string?> ResolveUncachedAsync(string identifier)
+    {
+        string? resolved;
         if (LooksLikeGuid(identifier))
         {
-            _principalCache[identifier] = identifier;
-            return identifier;
+            // Already an AAD GUID — use it directly.
+            resolved = identifier;
         }
-
-        // No Graph client – use the raw identifier (UPN / email)
-        if (_graphClient is null)
+        else if (_graphClient is null)
         {
-            _principalCache[identifier] = identifier;
-            return identifier;
+            // No Graph client – use the raw identifier (UPN / email).
+            resolved = identifier;
+        }
+        else
+        {
+            // Attempt Graph lookup.
+            resolved = await LookupGraphUserIdAsync(identifier).ConfigureAwait(false);
         }
 
-        // Attempt Graph lookup
-        var aadId = await LookupGraphUserIdAsync(identifier);
-        _principalCache[identifier] = aadId;
-        return aadId;
+        _principalCache[identifier] = resolved;
+        return resolved;
     }
 
     /// <summary>

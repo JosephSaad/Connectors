@@ -541,18 +541,22 @@ public class AclResolver
     /// <paramref name="visited"/> holds the ancestor chain of the current DFS
     /// (a group already on the chain is a cycle — the newer AclEngine
     /// QueueHandler uses the same visited-set approach).  When a cycle is
-    /// detected the nested reference contributes nothing, and every group on
-    /// the cycle path is left uncached so a later top-level resolve of those
-    /// groups computes their full membership.
+    /// detected the nested reference contributes nothing, and only the groups
+    /// strictly *inside* the cycle (between the back-edge target, exclusive, and
+    /// the referencing node) are left uncached so a later top-level resolve of
+    /// those groups computes their full membership.  The back-edge target and
+    /// every ancestor above the cycle still compute the full closure and are
+    /// cached, so a heavily-shared group above a cycle is not re-expanded per
+    /// record.  See <see cref="CacheGroup"/> for the open-target bookkeeping.
     /// </summary>
-    private async Task<(HashSet<string> UserIds, bool IncludesEveryone, bool CycleDetected)> ResolveGroupAsync(
+    private async Task<(HashSet<string> UserIds, bool IncludesEveryone, HashSet<string> OpenCycleTargets)> ResolveGroupAsync(
         string groupId,
         HashSet<string> visited)
     {
         lock (_cacheLock)
         {
             if (_groupCache.TryGetValue(groupId, out var cached))
-                return (cached.UserIds, cached.IncludesEveryone, false);
+                return (cached.UserIds, cached.IncludesEveryone, new HashSet<string>());
         }
 
         // Cycle guard: this group is already an ancestor in the current DFS.
@@ -560,7 +564,11 @@ public class AclResolver
         {
             Logger.Warning(
                 $"[LegacyACL] Cyclic group membership detected at {groupId}; skipping nested reference");
-            return (new HashSet<string>(), false, true);
+            // Report the back-edge target so only the nodes strictly *inside* the
+            // cycle (between this target, exclusive, and the referencing node) are
+            // left uncached — the target itself and every ancestor above it still
+            // compute the full closure and remain cacheable.
+            return (new HashSet<string>(), false, new HashSet<string> { groupId });
         }
 
         try
@@ -597,7 +605,7 @@ public class AclResolver
                 var memberIds = _allGroupMembersByGroup?.GetValueOrDefault(groupId) ?? new List<string>();
                 var userIds = new HashSet<string>();
                 var includesEveryone = false;
-                var cycleDetected = false;
+                var openCycleTargets = new HashSet<string>();
                 foreach (var memberId in memberIds)
                 {
                     if (string.IsNullOrEmpty(memberId) || memberId == groupId)
@@ -607,13 +615,13 @@ public class AclResolver
                         userIds.Add(memberId);
                         continue;
                     }
-                    var (nestedUsers, nestedEveryone, nestedCycle) = await ResolveGroupAsync(memberId, visited);
+                    var (nestedUsers, nestedEveryone, nestedOpen) = await ResolveGroupAsync(memberId, visited);
                     userIds.UnionWith(nestedUsers);
                     includesEveryone = includesEveryone || nestedEveryone;
-                    cycleDetected = cycleDetected || nestedCycle;
+                    openCycleTargets.UnionWith(nestedOpen);
                 }
 
-                return CacheGroup(groupId, (userIds, includesEveryone), cycleDetected);
+                return CacheGroup(groupId, (userIds, includesEveryone), openCycleTargets);
             }
 
             // ── Fallback: per-group SOQL queries ──────────────────────────────
@@ -646,7 +654,7 @@ public class AclResolver
             var members = await _helper.GetGroupMembersAsync(BuildInFilter("GroupId", new List<string> { groupId }));
             var fallbackUserIds = new HashSet<string>();
             var fallbackIncludesEveryone = false;
-            var fallbackCycleDetected = false;
+            var fallbackOpenCycleTargets = new HashSet<string>();
 
             foreach (var member in members)
             {
@@ -658,13 +666,13 @@ public class AclResolver
                     fallbackUserIds.Add(memberId);
                     continue;
                 }
-                var (nestedUsers, nestedEveryone, nestedCycle) = await ResolveGroupAsync(memberId, visited);
+                var (nestedUsers, nestedEveryone, nestedOpen) = await ResolveGroupAsync(memberId, visited);
                 fallbackUserIds.UnionWith(nestedUsers);
                 fallbackIncludesEveryone = fallbackIncludesEveryone || nestedEveryone;
-                fallbackCycleDetected = fallbackCycleDetected || nestedCycle;
+                fallbackOpenCycleTargets.UnionWith(nestedOpen);
             }
 
-            return CacheGroup(groupId, (fallbackUserIds, fallbackIncludesEveryone), fallbackCycleDetected);
+            return CacheGroup(groupId, (fallbackUserIds, fallbackIncludesEveryone), fallbackOpenCycleTargets);
         }
         finally
         {
@@ -677,24 +685,41 @@ public class AclResolver
     /// <summary>
     /// Store a fully resolved group in the cache and return it.
     ///
-    /// When <paramref name="cycleDetected"/> is true the result is *partial*
-    /// (a nested reference back to an ancestor was skipped), so it is returned
-    /// without being cached — caching it could permanently under-grant records
-    /// shared directly with that group.
+    /// <paramref name="openCycleTargets"/> carries the back-edge targets of any
+    /// cycles discovered below this node that have not yet been "closed".  A node
+    /// is only *partial* (and therefore unsafe to cache) when an open target other
+    /// than itself remains below it — i.e. it sits strictly inside the cycle, so a
+    /// nested reference back up the chain contributed nothing.  The back-edge
+    /// target itself, and every ancestor above it, still compute the full closure
+    /// and are cached normally; only the nodes between the target (exclusive) and
+    /// the referencing node are skipped.  This node closes its own target (removes
+    /// <paramref name="groupId"/>) before propagating the remaining open targets up,
+    /// so a heavily-shared group above a cycle is cached once instead of being
+    /// re-expanded per record.
     /// </summary>
-    private (HashSet<string> UserIds, bool IncludesEveryone, bool CycleDetected) CacheGroup(
+    private (HashSet<string> UserIds, bool IncludesEveryone, HashSet<string> OpenCycleTargets) CacheGroup(
         string groupId,
         (HashSet<string> UserIds, bool IncludesEveryone) result,
-        bool cycleDetected = false)
+        HashSet<string>? openCycleTargets = null)
     {
-        if (!cycleDetected)
+        var open = openCycleTargets ?? new HashSet<string>();
+
+        // Strictly inside a cycle iff an open target *other than this node* is still
+        // below us; that node's expansion is missing whatever the cut back-edge
+        // would have contributed, so persisting it could permanently under-grant.
+        var incomplete = open.Any(target => target != groupId);
+        if (!incomplete)
         {
             lock (_cacheLock)
             {
                 _groupCache[groupId] = result;
             }
         }
-        return (result.UserIds, result.IncludesEveryone, cycleDetected);
+
+        // Close this node's own cycle (if it was the back-edge target) so the taint
+        // stops here and does not disable caching for ancestors above the cycle.
+        open.Remove(groupId);
+        return (result.UserIds, result.IncludesEveryone, open);
     }
 
     /// <summary>

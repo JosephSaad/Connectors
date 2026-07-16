@@ -168,6 +168,13 @@ public class ShareFetcher
                     {
                         Logger.Warning(
                             $"[ShareFetcher] Bulk owner fetch failed for {objectType} batch {i / batchSize + 1} (transient): {exc.Message}");
+                        // Transient failure: the pre-seeded `_ownerCache[rid]=null` blanks
+                        // for this batch would otherwise stay authoritative and cause the
+                        // GetOwnerIdAsync fast path to return null WITHOUT taking the
+                        // per-record slow path — silently indexing the batch owner-less.
+                        // Drop those seeded blanks so the slow path re-queries each record.
+                        foreach (var rid in batch)
+                            _ownerCache.TryRemove(rid, out _);
                     }
                 }
             }
@@ -206,6 +213,15 @@ public class ShareFetcher
             {
                 Logger.Warning(
                     $"[ShareFetcher] Bulk share fetch failed for {shareObject} batch {i / batchSize + 1}: {exc.Message}");
+                // Transient failure: the pre-seeded empty `_shareCache[rid]` lists for
+                // this batch would otherwise stay authoritative and make the
+                // GetShareEntriesAsync fast path return "no shares" WITHOUT taking the
+                // per-record slow path — silently indexing the batch deny-all.
+                // Drop those seeded blanks so the slow path re-queries each record.
+                // (Records successfully queried in earlier/later batches keep their
+                // cached shares, preserving the zero-share fast-path optimization.)
+                foreach (var rid in batch)
+                    _shareCache.TryRemove(rid, out _);
             }
         }
     }

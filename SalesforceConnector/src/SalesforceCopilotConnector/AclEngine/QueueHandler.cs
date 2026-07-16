@@ -55,8 +55,12 @@ public class QueueHandler
     private static readonly IAppLogger Logger = Logging.GetLogger("salesforce_connector.acl_engine");
 
     private readonly SalesforceClient _sf;
-    // Pre-warm cache: group_id → [member_ids] (null = not yet fetched)
-    private Dictionary<string, List<string>>? _groupMembers;
+    // Pre-warm cache: group_id → [member_ids] (null = not yet fetched).
+    // Written once under _prewarmLock in PrewarmAsync but read lock-free on the
+    // hot path (GetGroupMembersAsync), so the reference field is volatile to
+    // guarantee readers observe the fully populated map — mirrors
+    // AdaptiveConcurrency._current in Graph/Ingest.cs.
+    private volatile Dictionary<string, List<string>>? _groupMembers;
     private readonly object _prewarmLock = new();
 
     public QueueHandler(SalesforceClient sfClient)
