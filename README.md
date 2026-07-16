@@ -7,10 +7,10 @@ lives in its own top-level folder.
 
 | Connector | Source system | Highlights | Tests |
 |---|---|---|---|
-| [SalesforceConnector](SalesforceConnector/) | Salesforce CRM | Sharing-model ACLs, standard + custom objects, sovereign-cloud ready | 665 |
-| [ClarizenConnector](ClarizenConnector/) | Planview AdaptiveWork (Clarizen) | REST v2 + TDW bulk, financial-field governance, webhooks | 440 |
-| [SeismicConnector](SeismicConnector/) | Seismic (sales enablement) | Version-aware, No-MNE exclusion filter, usage ranking | 353 |
-| [AltrataConnector](AltrataConnector/) | Altrata (relationship & wealth intelligence) | Licensed feeds, seat-only entitlement, DSAR erasure | 353 |
+| [SalesforceConnector](SalesforceConnector/) | Salesforce CRM | Sharing-model ACLs, standard + custom objects, sovereign-cloud ready | 819 |
+| [ClarizenConnector](ClarizenConnector/) | Planview AdaptiveWork (Clarizen) | REST v2 + TDW bulk, financial-field governance, webhooks | 480 |
+| [SeismicConnector](SeismicConnector/) | Seismic (sales enablement) | Version-aware, No-MNE exclusion filter, usage ranking | 406 |
+| [AltrataConnector](AltrataConnector/) | Altrata (relationship & wealth intelligence) | Licensed feeds, seat-only entitlement, DSAR erasure | 375 |
 
 ## Shared chassis
 
