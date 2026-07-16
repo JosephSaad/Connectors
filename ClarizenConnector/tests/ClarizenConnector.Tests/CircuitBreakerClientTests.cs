@@ -162,4 +162,106 @@ public class ClarizenClientBreakerTests
         await Assert.ThrowsAsync<CircuitOpenException>(() => client.QueryAllAsync("SELECT x FROM Y"));
         Assert.Empty(handler.Requests);  // fail fast, no network
     }
+
+    /// <summary>Build a breaker on an injectable clock, trip it, then advance past
+    /// OpenDuration so it is in HalfOpen and ready to admit probes.</summary>
+    private static (CircuitBreaker Breaker, Action Advance) HalfOpenBreaker(int halfOpenTrials)
+    {
+        var clock = DateTime.UtcNow;
+        var breaker = new CircuitBreaker("clarizen", new CircuitBreakerOptions
+        {
+            Enabled = true,
+            FailureThreshold = 2,
+            OpenDuration = TimeSpan.FromSeconds(30),
+            Window = TimeSpan.FromSeconds(60),
+            HalfOpenTrials = halfOpenTrials,
+        }, () => clock);
+        breaker.TripForTests();                 // Open at 'clock'
+        clock = clock.AddSeconds(31);           // past OpenDuration → HalfOpen on next Refresh
+        return (breaker, () => clock = clock.AddSeconds(31));
+    }
+
+    private static ClarizenClient MakeWithBudget(
+        MockHttpHandler handler, CircuitBreaker breaker, ApiBudget budget)
+    {
+        var client = new ClarizenClient(TestConfig.Make(), budget, handler, breaker)
+        {
+            OverrideSessionId = "s",
+        };
+        client.DelayAsync = (_, _) => Task.CompletedTask;
+        return client;
+    }
+
+    // Regression (HIGH): a quota throw on a HalfOpen PROBE must release the probe
+    // slot. _budget.Consume() runs before the HTTP send and throws when the daily
+    // budget is exhausted; if that slot leaked, after HalfOpenTrials quota-hits
+    // TryAcquire would return false forever and the breaker would wedge open.
+    [Fact]
+    public async Task HalfOpenProbe_QuotaThrow_ReleasesSlot_AndCanStillClose()
+    {
+        var (breaker, _) = HalfOpenBreaker(halfOpenTrials: 1);
+        Assert.Equal(CircuitState.HalfOpen, breaker.State);
+
+        var budget = new ApiBudget(callsPerDay: 1, callsPerMinute: 6_000_000);
+        budget.Consume();  // exhaust the day's single call → the probe's Consume() throws
+
+        var handler = Status(HttpStatusCode.OK);
+        var client = MakeWithBudget(handler, breaker, budget);
+
+        await Assert.ThrowsAsync<ClarizenQuotaExceededException>(
+            () => client.QueryAllAsync("SELECT x FROM Y"));
+
+        // The probe never reached the network, and its slot was released.
+        Assert.Empty(handler.Requests);
+        Assert.Equal(CircuitState.HalfOpen, breaker.State);
+        Assert.True(breaker.TryAcquire());  // a fresh probe is admitted (slot not leaked)
+
+        // And a later success still closes the breaker — it is not wedged.
+        breaker.OnSuccess();
+        Assert.Equal(CircuitState.Closed, breaker.State);
+    }
+
+    [Fact]
+    public async Task HalfOpenProbe_QuotaThrow_ReleasesExactlyOneSlot_NoDoubleRelease()
+    {
+        var (breaker, _) = HalfOpenBreaker(halfOpenTrials: 2);
+        Assert.Equal(CircuitState.HalfOpen, breaker.State);
+
+        // Simulate one concurrent probe already in flight (slot 1 of 2 taken).
+        Assert.True(breaker.TryAcquire());
+
+        var budget = new ApiBudget(callsPerDay: 1, callsPerMinute: 6_000_000);
+        budget.Consume();
+        var client = MakeWithBudget(Status(HttpStatusCode.OK), breaker, budget);
+
+        await Assert.ThrowsAsync<ClarizenQuotaExceededException>(
+            () => client.QueryAllAsync("SELECT x FROM Y"));
+
+        // Exactly one slot (the probe's own) was released, so one slot remains
+        // held by the simulated concurrent probe: only ONE more acquire fits.
+        Assert.True(breaker.TryAcquire());   // now 2 of 2
+        Assert.False(breaker.TryAcquire());  // cap reached → no double-release happened
+    }
+
+    // Wedge regression: repeated quota throws on successive HalfOpen probes must
+    // never exhaust the probe slots. Before the fix, HalfOpenTrials quota-hits
+    // leaked every slot and the breaker admitted nothing forever.
+    [Fact]
+    public async Task RepeatedHalfOpenQuotaThrows_DoNotWedgeTheBreaker()
+    {
+        var (breaker, _) = HalfOpenBreaker(halfOpenTrials: 1);
+        var budget = new ApiBudget(callsPerDay: 1, callsPerMinute: 6_000_000);
+        budget.Consume();
+        var client = MakeWithBudget(Status(HttpStatusCode.OK), breaker, budget);
+
+        for (var i = 0; i < 5; i++)
+        {
+            await Assert.ThrowsAsync<ClarizenQuotaExceededException>(
+                () => client.QueryAllAsync("SELECT x FROM Y"));
+            Assert.Equal(CircuitState.HalfOpen, breaker.State);
+        }
+
+        breaker.OnSuccess();  // recovery still possible after many quota probes
+        Assert.Equal(CircuitState.Closed, breaker.State);
+    }
 }

@@ -48,8 +48,12 @@ and lists the object type in the crawl summary:
   misconfiguration and falls back to the default with a warning.
 - **Percentage guard** — `DELETION_SYNC_MAX_PERCENT` (default 25): when more
   than this percentage of an object type's inventory would be deleted in one
-  sweep — and the inventory holds at least 20 items — the sweep is skipped.
-  `0` or `100` disables the percent guard explicitly; values outside
+  sweep the sweep is skipped. The guard engages once the inventory holds at
+  least 20 items (a percentage is meaningless on a handful of rows) **or**,
+  at any size, whenever the full crawl's source returned **zero rows** for the
+  object type — an empty source is the classic outage / truncated-export
+  signature, so a tiny all-stale inventory can no longer be wiped 100 %
+  unguarded. `0` or `100` disables the percent guard explicitly; values outside
   `[0, 100]` are a misconfiguration and fall back to the default with a
   warning (a negative value never silently disables the guard).
 

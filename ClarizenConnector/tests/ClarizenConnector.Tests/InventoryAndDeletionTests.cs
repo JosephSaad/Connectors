@@ -331,6 +331,68 @@ public class DeletionSweepTests : IDisposable
         Assert.Contains("deletion_sweep_skipped", alert.Body);
     }
 
+    // Regression (MEDIUM-2): a tiny (< MinInventoryForSafetyGuard) inventory that
+    // goes ALL-stale because the full-crawl source returned zero rows (outage /
+    // truncated TDW export) must be refused — before the fix the percent guard's
+    // >= 20 floor let a 19-item connection be wiped 100% completely unguarded.
+    [Fact]
+    public async Task SmallAllStaleInventory_EmptySource_IsBlocked()
+    {
+        using (var inventory = InventoryFactory(Connector))
+        {
+            inventory.RecordSeen(
+                Enumerable.Range(1, 19).Select(n => ($"Task_{n}", "Task")), DateTime.UtcNow);
+        }
+        _sourceRecordNumbers.Clear();  // source returns zero rows
+
+        var summary = await Pipeline().RunAsync(fullCrawl: true);
+
+        Assert.Equal(0, summary.Deleted);
+        Assert.Equal(new[] { "Task" }, summary.SweepSkipped);
+        Assert.Equal(19, InventoryIds().Count);  // nothing wiped
+        Assert.DoesNotContain(_graph.Sent, s => s.Method == HttpMethod.Delete);
+    }
+
+    // The small-inventory guard still honours the explicit 100 = "disable"
+    // escape hatch, so an operator can force the wipe after confirming the drop.
+    [Fact]
+    public async Task SmallAllStaleInventory_EmptySource_CanBeWidened_ViaMaxPercent()
+    {
+        using (var inventory = InventoryFactory(Connector))
+        {
+            inventory.RecordSeen(
+                Enumerable.Range(1, 19).Select(n => ($"Task_{n}", "Task")), DateTime.UtcNow);
+        }
+        _sourceRecordNumbers.Clear();
+        using var scope = new EnvScope(("DELETION_SYNC_MAX_PERCENT", "100"));
+
+        var summary = await Pipeline().RunAsync(fullCrawl: true);
+
+        Assert.Equal(19, summary.Deleted);
+        Assert.Empty(summary.SweepSkipped);
+        Assert.Empty(InventoryIds());
+    }
+
+    // Guard rail: a NON-empty source with a high stale percentage on a small
+    // inventory is still allowed (the empty-source signal is what engages the
+    // guard below the size floor — a healthy source that simply shed items does
+    // not). Complements MultipleStaleItems_AreDeletedViaBatch.
+    [Fact]
+    public async Task SmallInventory_NonEmptySource_HighStalePercent_StillSweeps()
+    {
+        using (var inventory = InventoryFactory(Connector))
+        {
+            inventory.RecordSeen(
+                Enumerable.Range(1, 10).Select(n => ($"Task_{n}", "Task")), DateTime.UtcNow);
+        }
+        // Source still returns rows (1,2,3) → not an outage; 7 of 10 go stale.
+        var summary = await Pipeline().RunAsync(fullCrawl: true);
+
+        Assert.Equal(7, summary.Deleted);
+        Assert.Empty(summary.SweepSkipped);
+        Assert.Equal(new[] { "Task_1", "Task_2", "Task_3" }, InventoryIds());
+    }
+
     [Fact]
     public async Task SafetyGuard_CanBeWidened_ViaMaxPercent()
     {

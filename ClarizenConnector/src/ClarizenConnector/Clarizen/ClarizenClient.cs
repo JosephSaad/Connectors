@@ -370,87 +370,116 @@ public class ClarizenClient : IAttachmentDownloader
             };
         }
 
-        var url = $"{_config.ClarizenBaseUrl}/{path.TrimStart('/')}";
-        for (var attempt = 0; ; attempt++)
+        // Once TryAcquire() has (in HalfOpen) taken a probe slot, EVERY exit path
+        // from here on must settle that slot exactly once via OnSuccess/OnFailure/
+        // OnIgnored — otherwise a HalfOpen probe leaks its slot and, after
+        // HalfOpenTrials leaks, the breaker admits no more probes and wedges OPEN
+        // forever. The budget/quota check below runs inside this try so that a
+        // ClarizenQuotaExceededException (flow control, not an outage) releases
+        // the slot via OnIgnored() before it propagates. `settled` guards against
+        // a double-release: the normal terminal classification sets it, so the
+        // catch/finally only releases when no terminal outcome was recorded.
+        var settled = false;
+        void Settle(Action classify)
         {
-            var pace = _budget.Consume();
-            Metrics.IncClarizenApiCalls();
-            Metrics.SetApiBudgetRemaining(_budget.Remaining);
-            if (pace > TimeSpan.Zero)
-                await DelayAsync(pace, ct).ConfigureAwait(false);
+            if (settled)
+                return;
+            settled = true;
+            classify();
+        }
 
-            using var request = new HttpRequestMessage(HttpMethod.Post, url);
-            if (sessionId is not null)
-                request.Headers.TryAddWithoutValidation("Authorization", $"Session {sessionId}");
-            request.Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
+        try
+        {
+            var url = $"{_config.ClarizenBaseUrl}/{path.TrimStart('/')}";
+            for (var attempt = 0; ; attempt++)
+            {
+                var pace = _budget.Consume();
+                Metrics.IncClarizenApiCalls();
+                Metrics.SetApiBudgetRemaining(_budget.Remaining);
+                if (pace > TimeSpan.Zero)
+                    await DelayAsync(pace, ct).ConfigureAwait(false);
 
-            HttpResponseMessage response;
-            string raw;
-            try
-            {
-                response = await _http.SendAsync(request, ct).ConfigureAwait(false);
-                raw = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            }
-            catch (HttpRequestException exc) when (attempt < MaxRetries)
-            {
-                var delay = Math.Min(60, 2 * Math.Pow(2, attempt));
-                Logger.Warning(
-                    $"Clarizen request {path} failed ({exc.Message}); retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
-                await DelayAsync(TimeSpan.FromSeconds(delay), ct).ConfigureAwait(false);
-                continue;
-            }
-            catch (Exception)
-            {
-                _breaker.OnFailure();  // retries exhausted on a transport failure
-                throw;
-            }
+                using var request = new HttpRequestMessage(HttpMethod.Post, url);
+                if (sessionId is not null)
+                    request.Headers.TryAddWithoutValidation("Authorization", $"Session {sessionId}");
+                request.Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
 
-            using (response)
-            {
-                var status = response.StatusCode;
-                if (((int)status == 429 || (int)status >= 500) && attempt < MaxRetries)
+                HttpResponseMessage response;
+                string raw;
+                try
                 {
-                    var retryAfter = response.Headers.RetryAfter?.Delta?.TotalSeconds
-                        ?? (response.Headers.RetryAfter?.Date is { } date
-                            ? Math.Max(0, (date - DateTimeOffset.UtcNow).TotalSeconds)
-                            : (double?)null);
-                    // Same 429 hardening as the Graph client: every wait —
-                    // server Retry-After included — is clamped to 60 s.
-                    var delay = Math.Min(60, retryAfter ?? Math.Min(60, 2 * Math.Pow(2, attempt)));
+                    response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+                    raw = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                }
+                catch (HttpRequestException exc) when (attempt < MaxRetries)
+                {
+                    var delay = Math.Min(60, 2 * Math.Pow(2, attempt));
                     Logger.Warning(
-                        $"Clarizen {path} returned HTTP {(int)status}; retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
+                        $"Clarizen request {path} failed ({exc.Message}); retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
                     await DelayAsync(TimeSpan.FromSeconds(delay), ct).ConfigureAwait(false);
                     continue;
                 }
-
-                // Terminal outcome — classify for the breaker. 5xx = outage;
-                // 429/4xx ignored; 2xx clears the window.
-                if ((int)status >= 500)
-                    _breaker.OnFailure();
-                else if ((int)status == 429 || (int)status is >= 400 and < 500)
-                    _breaker.OnIgnored();
-                else
-                    _breaker.OnSuccess();
-
-                JsonNode? parsed = null;
-                if (!string.IsNullOrWhiteSpace(raw))
+                catch (Exception)
                 {
-                    try
-                    {
-                        parsed = JsonNode.Parse(raw);
-                    }
-                    catch
-                    {
-                        // non-JSON body
-                    }
+                    Settle(_breaker.OnFailure);  // retries exhausted on a transport failure
+                    throw;
                 }
-                return new GraphLikeResponse
+
+                using (response)
                 {
-                    StatusCode = status,
-                    Body = parsed,
-                    RawBody = raw,
-                };
+                    var status = response.StatusCode;
+                    if (((int)status == 429 || (int)status >= 500) && attempt < MaxRetries)
+                    {
+                        var retryAfter = response.Headers.RetryAfter?.Delta?.TotalSeconds
+                            ?? (response.Headers.RetryAfter?.Date is { } date
+                                ? Math.Max(0, (date - DateTimeOffset.UtcNow).TotalSeconds)
+                                : (double?)null);
+                        // Same 429 hardening as the Graph client: every wait —
+                        // server Retry-After included — is clamped to 60 s.
+                        var delay = Math.Min(60, retryAfter ?? Math.Min(60, 2 * Math.Pow(2, attempt)));
+                        Logger.Warning(
+                            $"Clarizen {path} returned HTTP {(int)status}; retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
+                        await DelayAsync(TimeSpan.FromSeconds(delay), ct).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    // Terminal outcome — classify for the breaker. 5xx = outage;
+                    // 429/4xx ignored; 2xx clears the window.
+                    if ((int)status >= 500)
+                        Settle(_breaker.OnFailure);
+                    else if ((int)status == 429 || (int)status is >= 400 and < 500)
+                        Settle(_breaker.OnIgnored);
+                    else
+                        Settle(_breaker.OnSuccess);
+
+                    JsonNode? parsed = null;
+                    if (!string.IsNullOrWhiteSpace(raw))
+                    {
+                        try
+                        {
+                            parsed = JsonNode.Parse(raw);
+                        }
+                        catch
+                        {
+                            // non-JSON body
+                        }
+                    }
+                    return new GraphLikeResponse
+                    {
+                        StatusCode = status,
+                        Body = parsed,
+                        RawBody = raw,
+                    };
+                }
             }
+        }
+        finally
+        {
+            // Any escape without a terminal classification — most notably the
+            // quota-exhaustion throw from _budget.Consume(), but also cancellation
+            // — releases the probe slot as an IGNORED outcome (quota/cancel is
+            // flow control, not an outage), so a wedged HalfOpen can never happen.
+            Settle(_breaker.OnIgnored);
         }
     }
 }

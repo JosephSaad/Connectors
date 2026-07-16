@@ -249,25 +249,79 @@ public sealed class ContentExtractor : IContentExtractor
             IgnoreComments = true,
             IgnoreProcessingInstructions = true,
             XmlResolver = null,
+            // Hard backstop: a document whose total character count exceeds this
+            // ceiling is rejected (the caller catches the XmlException and skips)
+            // rather than parsed. Set well above the accumulation cap so a
+            // legitimate multi-run part is never rejected — the incremental,
+            // chunked read below is what normally bounds a single hostile node.
+            MaxCharactersInDocument = 8L * MaxInflatedBytes,
         };
         var sb = new StringBuilder();
+        var chunk = new char[8192];
         using var reader = XmlReader.Create(xml, settings);
         while (reader.Read())
         {
             if (sb.Length >= MaxInflatedBytes)
                 break;  // accumulation ceiling — stop pulling from the (possibly huge) part
             if (reader.NodeType == XmlNodeType.Element
-                && string.Equals(reader.LocalName, localName, StringComparison.Ordinal))
+                && string.Equals(reader.LocalName, localName, StringComparison.Ordinal)
+                && !reader.IsEmptyElement)
             {
-                var value = reader.ReadElementContentAsString();
-                if (value.Length > 0)
-                {
-                    sb.Append(value);
-                    sb.Append(' ');
-                }
+                AppendElementText(reader, localName, sb, chunk);
             }
         }
         return sb.ToString();
+    }
+
+    /// <summary>Append the text of the element the reader is currently positioned
+    /// on, reading Text/CDATA content in fixed-size chunks (never materializing a
+    /// whole node) and stopping the instant the accumulation cap is hit. This is
+    /// what keeps a crafted single &lt;t&gt;/&lt;w:t&gt; node that inflates to GBs
+    /// from OOMing: <see cref="XmlReader.ReadElementContentAsString"/> would buffer
+    /// the entire node before the between-<c>Read()</c> cap check could bite.</summary>
+    private static void AppendElementText(
+        XmlReader reader, string localName, StringBuilder sb, char[] chunk)
+    {
+        var depth = reader.Depth;
+        while (reader.Read())
+        {
+            if (sb.Length >= MaxInflatedBytes)
+                return;  // cap reached mid-node — abandon the rest of this element
+            switch (reader.NodeType)
+            {
+                case XmlNodeType.Text:
+                case XmlNodeType.CDATA:
+                case XmlNodeType.SignificantWhitespace:
+                case XmlNodeType.Whitespace:
+                    if (reader.CanReadValueChunk)
+                    {
+                        int read;
+                        while (sb.Length < MaxInflatedBytes
+                               && (read = reader.ReadValueChunk(chunk, 0, chunk.Length)) > 0)
+                        {
+                            var take = (int)Math.Min(read, MaxInflatedBytes - sb.Length);
+                            sb.Append(chunk, 0, take);
+                        }
+                    }
+                    else
+                    {
+                        // Fallback for readers without chunked value support.
+                        var value = reader.Value;
+                        var take = (int)Math.Min(value.Length, MaxInflatedBytes - sb.Length);
+                        sb.Append(value, 0, take);
+                    }
+                    break;
+
+                case XmlNodeType.EndElement:
+                    if (reader.Depth == depth
+                        && string.Equals(reader.LocalName, localName, StringComparison.Ordinal))
+                    {
+                        sb.Append(' ');  // separate runs, matching the old behaviour
+                        return;
+                    }
+                    break;
+            }
+        }
     }
 
     // ── PDF (best-effort text layer) ─────────────────────────────────────────

@@ -575,7 +575,9 @@ public sealed class IngestPipeline
     /// export): an absolute per-sweep cap (DELETION_SYNC_MAX_ITEMS, default
     /// 1000, engaged at any inventory size) and a percentage guard
     /// (DELETION_SYNC_MAX_PERCENT, default 25, engaged once the inventory
-    /// holds at least MinInventoryForSafetyGuard items).
+    /// holds at least MinInventoryForSafetyGuard items — OR, at any size, when
+    /// the full-crawl source returned zero rows, so a tiny all-stale inventory
+    /// can no longer be wiped 100% unguarded).
     /// </summary>
     internal async Task SweepDeletionsAsync(
         AppConfig cfg,
@@ -623,8 +625,18 @@ public sealed class IngestPipeline
             return;
         }
 
+        // Percent guard. It engages when the inventory is large enough for a
+        // percentage to be meaningful (>= MinInventoryForSafetyGuard) OR whenever
+        // the source returned NO rows for this object on a FULL crawl — an empty
+        // source is the classic outage / truncated-TDW-export signature and would
+        // otherwise wipe a small (< MinInventoryForSafetyGuard) inventory 100%
+        // completely unguarded, since the absolute cap only trips above
+        // DELETION_SYNC_MAX_ITEMS. 0 and 100 stay the explicit "disable the
+        // percent guard" values.
         var maxPercent = DeletionSyncMaxPercent();
-        if (indexed.Count >= MinInventoryForSafetyGuard && maxPercent > 0 && maxPercent < 100)
+        var sourceReturnedNothing = sourceRecords.Count == 0;
+        if (maxPercent is > 0 and < 100
+            && (indexed.Count >= MinInventoryForSafetyGuard || sourceReturnedNothing))
         {
             var stalePercent = 100.0 * stale.Count / indexed.Count;
             if (stalePercent > maxPercent)

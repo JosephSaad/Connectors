@@ -134,6 +134,71 @@ public class ContentExtractorTests
         Assert.Equal("no-text", result.Reason);
     }
 
+    // Regression (MEDIUM-1): a crafted docx with ONE gigantic <w:t> text node
+    // must stay bounded. The zip compresses the repeated char to a few KB (a
+    // decompression-bomb shape), but the inflated node is far larger than the
+    // accumulation ceiling; the chunked reader must truncate instead of
+    // materializing the whole node (which ReadElementContentAsString would).
+    [Fact]
+    public void Docx_SingleGiantTextNode_StaysBounded()
+    {
+        // > MaxInflatedBytes (accumulation cap) but < the MaxCharactersInDocument
+        // backstop, so parsing proceeds and the chunked read is what bounds it.
+        var giant = new string('A', 3_000_000);
+        var docx = BuildOoxml(("word/document.xml",
+            "<?xml version=\"1.0\"?><w:document xmlns:w=\"http://x\"><w:body>"
+            + $"<w:p><w:r><w:t>{giant}</w:t></w:r></w:p></w:body></w:document>"));
+
+        var result = _extractor.Extract(docx, "bomb.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+
+        Assert.True(result.Extracted);
+        // Final text is capped at MaxExtractedChars — proof the walk never ran
+        // unbounded on the single node.
+        Assert.True(result.Text.Length <= ContentExtractor.MaxExtractedChars,
+            $"expected <= {ContentExtractor.MaxExtractedChars}, got {result.Text.Length}");
+        Assert.StartsWith("AAAA", result.Text);
+    }
+
+    // A document whose TOTAL character count blows past the hard backstop is
+    // rejected (caught → skipped) rather than parsed — defence in depth over the
+    // chunked read.
+    [Fact]
+    public void Docx_OverMaxCharactersBackstop_SkippedNotThrown()
+    {
+        var huge = new string('B', 8 * ContentExtractor.MaxInflatedBytes + 1_000_000);
+        var docx = BuildOoxml(("word/document.xml",
+            "<?xml version=\"1.0\"?><w:document xmlns:w=\"http://x\"><w:body>"
+            + $"<w:p><w:r><w:t>{huge}</w:t></w:r></w:p></w:body></w:document>"));
+
+        var result = _extractor.Extract(docx, "huge.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+
+        Assert.False(result.Extracted);
+        Assert.StartsWith("extract-error", result.Reason);
+    }
+
+    // The chunked/incremental read must not drop content from legitimate docs
+    // with many small runs — every run is still captured.
+    [Fact]
+    public void Docx_ManySmallRuns_AllExtracted()
+    {
+        var runs = new StringBuilder();
+        for (var i = 0; i < 60; i++)
+            runs.Append($"<w:p><w:r><w:t>run{i}=value{i}</w:t></w:r></w:p>");
+        var docx = BuildOoxml(("word/document.xml",
+            "<?xml version=\"1.0\"?><w:document xmlns:w=\"http://x\"><w:body>"
+            + runs + "</w:body></w:document>"));
+
+        var result = _extractor.Extract(docx, "multi.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+
+        Assert.True(result.Extracted);
+        Assert.Contains("run0=value0", result.Text);
+        Assert.Contains("run30=value30", result.Text);
+        Assert.Contains("run59=value59", result.Text);
+    }
+
     // ── PDF (uncompressed + FlateDecode) ─────────────────────────────────────
 
     private static byte[] BuildPdf(string content, bool flate)
