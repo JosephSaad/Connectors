@@ -1,0 +1,36 @@
+{
+  "connector": "AltrataConnector",
+  "description": "Dataset catalogue for the Altrata bulk feeds. Each delivery's manifest.json references these dataset names; FeedReader/ItemTransformer map the listed key fields onto externalItem properties.",
+  "datasets": {
+    "PersonProfile": {
+      "idFields": ["id", "altrata_id", "person_id"],
+      "keyFields": ["person_name", "email", "employer", "country", "updated_utc"],
+      "piiBaseline": "Personal"
+    },
+    "Organization": {
+      "idFields": ["id", "org_id"],
+      "keyFields": ["organization_name", "country", "updated_utc"],
+      "piiBaseline": "None"
+    },
+    "BoardMembership": {
+      "idFields": ["id"],
+      "keyFields": ["person_id", "person_name", "org_name", "role", "start_date", "end_date"],
+      "piiBaseline": "Personal"
+    },
+    "RelationshipPath": {
+      "idFields": ["id", "relationship_id"],
+      "keyFields": ["from_person_id", "to_person_id", "path_strength", "path_description"],
+      "piiBaseline": "Personal"
+    },
+    "WealthIndicator": {
+      "idFields": ["id"],
+      "keyFields": ["person_id", "person_name", "net_worth_usd", "liquidity_usd", "as_of_date"],
+      "piiBaseline": "Sensitive"
+    },
+    "CareerHistory": {
+      "idFields": ["id"],
+      "keyFields": ["person_id", "person_name", "employer", "title", "start_date", "end_date"],
+      "piiBaseline": "Personal"
+    }
+  }
+}

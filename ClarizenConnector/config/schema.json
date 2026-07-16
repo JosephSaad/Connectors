@@ -1,0 +1,187 @@
+{
+  "_comment": "Clarizen object list. Keys of selectedFields = Clarizen field names (drive the CZQL SELECT). Values = Graph property name, or a _cz_<name> placeholder when the field is consumed by the searchable content body instead of becoming a Graph property. financialFields must be a subset of selectedFields keys and are governed by FINANCIAL_DATA_MODE (tag | filter | acl). aclMode: projectMembers (owner fields + parent-project team), ownerOnly (owner fields only), public (everyone except guests). projectField names the reference field holding the parent project/work item; empty means the record itself is the project. The generic WorkItem entity is covered through its concrete subtypes (Project, Task, Milestone).",
+  "objectList": [
+    {
+      "objectName": "Project",
+      "displayName": "Project",
+      "aclMode": "projectMembers",
+      "projectField": "",
+      "selectedFields": {
+        "Name": "Title",
+        "Description": "_cz_Description",
+        "State": "State",
+        "TrackStatus": "TrackStatus",
+        "Manager": "Manager",
+        "CreatedBy": "CreatedBy",
+        "StartDate": "StartDate",
+        "DueDate": "DueDate",
+        "PercentCompleted": "PercentCompleted",
+        "LastUpdatedOn": "LastUpdatedOn",
+        "PlannedCost": "PlannedCost",
+        "ActualCost": "ActualCost",
+        "PlannedRevenue": "PlannedRevenue",
+        "ActualRevenue": "ActualRevenue"
+      },
+      "financialFields": ["PlannedCost", "ActualCost", "PlannedRevenue", "ActualRevenue"],
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Task",
+      "displayName": "Task",
+      "aclMode": "projectMembers",
+      "projectField": "Project",
+      "selectedFields": {
+        "Name": "Title",
+        "Description": "_cz_Description",
+        "State": "State",
+        "Project": "ProjectName",
+        "Owner": "Owner",
+        "StartDate": "StartDate",
+        "DueDate": "DueDate",
+        "PercentCompleted": "PercentCompleted",
+        "Priority": "Priority",
+        "Work": "Work",
+        "ActualEffort": "ActualEffort",
+        "ActualCost": "ActualCost",
+        "LastUpdatedOn": "LastUpdatedOn"
+      },
+      "financialFields": ["ActualCost"],
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Milestone",
+      "displayName": "Milestone",
+      "aclMode": "projectMembers",
+      "projectField": "Project",
+      "selectedFields": {
+        "Name": "Title",
+        "Description": "_cz_Description",
+        "State": "State",
+        "TrackStatus": "TrackStatus",
+        "Project": "ProjectName",
+        "DueDate": "DueDate",
+        "PercentCompleted": "PercentCompleted",
+        "ActualCost": "ActualCost",
+        "LastUpdatedOn": "LastUpdatedOn"
+      },
+      "financialFields": ["ActualCost"],
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Issue",
+      "displayName": "Issue",
+      "aclMode": "projectMembers",
+      "projectField": "Project",
+      "selectedFields": {
+        "Name": "Title",
+        "Description": "_cz_Description",
+        "State": "State",
+        "Severity": "Severity",
+        "Priority": "Priority",
+        "Project": "ProjectName",
+        "ReportedBy": "ReportedBy",
+        "DueDate": "DueDate",
+        "LastUpdatedOn": "LastUpdatedOn"
+      },
+      "financialFields": [],
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Risk",
+      "displayName": "Risk",
+      "aclMode": "projectMembers",
+      "projectField": "Project",
+      "selectedFields": {
+        "Name": "Title",
+        "Description": "_cz_Description",
+        "State": "State",
+        "Probability": "Probability",
+        "Impact": "Impact",
+        "MitigationPlan": "_cz_MitigationPlan",
+        "Project": "ProjectName",
+        "LastUpdatedOn": "LastUpdatedOn"
+      },
+      "financialFields": [],
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Timesheet",
+      "displayName": "Timesheet",
+      "aclMode": "ownerOnly",
+      "projectField": "WorkItem",
+      "selectedFields": {
+        "ReportedDate": "ReportedDate",
+        "Duration": "Duration",
+        "State": "State",
+        "WorkItem": "WorkItemName",
+        "ReportedBy": "ReportedBy",
+        "Comment": "_cz_Comment",
+        "BillingRate": "BillingRate",
+        "LastUpdatedOn": "LastUpdatedOn"
+      },
+      "financialFields": ["BillingRate"],
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "RegularResourceLink",
+      "displayName": "Resource Assignment",
+      "aclMode": "projectMembers",
+      "projectField": "WorkItem",
+      "selectedFields": {
+        "WorkItem": "WorkItemName",
+        "Resource": "ResourceName",
+        "Work": "Work",
+        "Units": "Units",
+        "LastUpdatedOn": "LastUpdatedOn"
+      },
+      "financialFields": [],
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Discussion",
+      "displayName": "Discussion",
+      "aclMode": "projectMembers",
+      "projectField": "RelatedWork",
+      "selectedFields": {
+        "Topic": "Title",
+        "Body": "_cz_Body",
+        "PostedBy": "PostedBy",
+        "PostedOn": "PostedOn",
+        "RelatedWork": "ProjectName",
+        "LastUpdatedOn": "LastUpdatedOn"
+      },
+      "financialFields": [],
+      "filterCondition": "",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Attachment",
+      "displayName": "Attachment",
+      "aclMode": "projectMembers",
+      "projectField": "AttachedTo",
+      "attachmentUrlField": "DownloadUrl",
+      "attachmentNameField": "Name",
+      "attachmentContentTypeField": "FileType",
+      "attachmentSizeField": "FileSize",
+      "selectedFields": {
+        "Name": "Title",
+        "FileSize": "FileSize",
+        "FileType": "FileType",
+        "DownloadUrl": "_cz_DownloadUrl",
+        "CreatedBy": "CreatedBy",
+        "AttachedTo": "ProjectName",
+        "LastUpdatedOn": "LastUpdatedOn"
+      },
+      "financialFields": [],
+      "filterCondition": "",
+      "iconUrl": ""
+    }
+  ]
+}

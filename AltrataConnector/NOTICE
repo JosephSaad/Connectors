@@ -1,0 +1,60 @@
+NOTICES AND INFORMATION
+
+This product incorporates the third-party packages listed below. The original
+copyright notices and the licenses under which they were received are set
+forth for informational purposes.
+
+---
+
+## Azure.Identity / Azure.Security.KeyVault.Secrets / Azure.Core
+
+License: MIT License
+Project: https://github.com/Azure/azure-sdk-for-net
+Copyright (c) Microsoft Corporation.
+
+## Microsoft.Data.SqlClient
+
+License: MIT License
+Project: https://github.com/dotnet/SqlClient
+Copyright (c) Microsoft Corporation.
+
+## Microsoft.Data.Sqlite
+
+License: MIT License
+Project: https://github.com/dotnet/efcore
+Copyright (c) .NET Foundation and Contributors.
+
+## SQLitePCLRaw (bundle_e_sqlite3)
+
+License: Apache License 2.0
+Project: https://github.com/ericsink/SQLitePCL.raw
+Copyright 2014-2024 SourceGear, LLC
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this file except in compliance with the License. You may obtain a copy
+of the License at https://www.apache.org/licenses/LICENSE-2.0
+
+## Microsoft.Extensions.Hosting.WindowsServices
+
+License: MIT License
+Project: https://github.com/dotnet/runtime
+Copyright (c) .NET Foundation and Contributors.
+
+## Spectre.Console
+
+License: MIT License
+Project: https://github.com/spectreconsole/spectre.console
+Copyright (c) Patrik Svensson, Phil Scott, Nils Andresen, Cédric Luthi,
+Frank Ray.
+
+## SQLite
+
+License: Public Domain
+Project: https://sqlite.org
+
+---
+
+Test-only dependencies (not distributed with release bundles): xunit (Apache
+2.0), Microsoft.NET.Test.Sdk (MIT), coverlet.collector (MIT),
+Microsoft.SqlServer.DacFx and Microsoft.SqlServer.TransactSql.ScriptDom
+(Microsoft — MICROSOFT SOFTWARE LICENSE TERMS).

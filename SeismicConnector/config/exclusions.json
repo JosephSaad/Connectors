@@ -1,0 +1,25 @@
+{
+  "excludedFlags": [
+    "MNE",
+    "MaterialNonpublicEvent",
+    "Material Non-Public Event",
+    "MNPI"
+  ],
+  "flagProperties": [
+    "classification",
+    "complianceFlags",
+    "eventType"
+  ],
+  "restrictedLibraries": [
+    "Restricted",
+    "M&A Deal Room"
+  ],
+  "restrictedTeamsiteIds": [],
+  "excludeRestrictedTeamsites": true,
+  "propertyRules": [
+    {
+      "name": "confidentiality",
+      "equals": "mnpi"
+    }
+  ]
+}

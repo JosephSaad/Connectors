@@ -1,0 +1,413 @@
+// Seismic/ContentExtractor.cs
+// ---------------------------
+// Pluggable text-extraction pipeline used to index document payloads.
+//
+// Deliberate scope (documented in README): no external parsing library is
+// pulled in. Instead:
+//
+//   * plain text / markdown / csv / json / html — decoded directly (html tags
+//     stripped);
+//   * DOCX / PPTX / XLSX — Office Open XML packages are ZIP archives; the
+//     extractor reads word/document.xml, ppt/slides/slide*.xml (+ notes),
+//     xl/sharedStrings.xml and xl/worksheets/sheet*.xml with XmlReader and
+//     collects the w:t / a:t / s:t text nodes. This covers the text layer of
+//     real Office documents without a dependency;
+//   * PDF — best-effort text-layer extraction: FlateDecode streams are
+//     inflated (System.IO.Compression) and the show-text operators are
+//     parsed — Tj, ', ", and TJ arrays, with literal strings (octal + symbol
+//     escapes, line continuations) AND hex strings, including UTF-16BE
+//     (BOM-prefixed) payloads. Scanned or exotically-encoded PDFs yield
+//     little or nothing; the pipeline then falls back to metadata-only
+//     indexing.
+//
+// Every extraction attempt is recorded per format in the metrics registry
+// (seismic_connector_extraction_*_total{format="..."} — docs/OBSERVABILITY.md).
+//
+// Extraction failures NEVER fail an item: the transformer falls back to
+// name + description. Swap in a richer implementation by registering another
+// IContentExtractor in CompositeExtractor.
+
+using System.IO.Compression;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Xml;
+
+namespace SeismicConnector.Seismic;
+
+public interface IContentExtractor
+{
+    /// <summary>True when this extractor understands the Seismic format label / file extension.</summary>
+    bool CanExtract(string format);
+
+    /// <summary>Extract plain text; return empty string when nothing could be extracted.</summary>
+    string Extract(byte[] payload);
+}
+
+/// <summary>Plain text and text-adjacent formats (txt, md, csv, json, html).</summary>
+public sealed class PlainTextExtractor : IContentExtractor
+{
+    private static readonly HashSet<string> Formats = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "txt", "text", "md", "markdown", "csv", "json", "html", "htm", "xml",
+    };
+
+    public bool CanExtract(string format) => Formats.Contains(Normalize(format));
+
+    public string Extract(byte[] payload)
+    {
+        var text = DecodeUtf8(payload);
+        // Strip tags for markup formats; harmless for the rest.
+        text = Regex.Replace(text, "<script[^>]*>.*?</script>", " ",
+            RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        text = Regex.Replace(text, "<style[^>]*>.*?</style>", " ",
+            RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        text = Regex.Replace(text, "<[^>]+>", " ");
+        return NormalizeWhitespace(text);
+    }
+
+    internal static string Normalize(string format) => format.Trim().TrimStart('.').ToLowerInvariant();
+
+    internal static string DecodeUtf8(byte[] payload)
+    {
+        try
+        {
+            return new UTF8Encoding(false, throwOnInvalidBytes: false).GetString(payload);
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    internal static string NormalizeWhitespace(string text) =>
+        Regex.Replace(text, @"\s+", " ").Trim();
+}
+
+/// <summary>DOCX / PPTX / XLSX text via ZipArchive + XmlReader (w:t, a:t and s:t nodes).</summary>
+public sealed class OpenXmlTextExtractor : IContentExtractor
+{
+    private static readonly HashSet<string> Formats = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "doc", "docx", "word", "ppt", "pptx", "presentation", "livedoc",
+        "xls", "xlsx", "excel", "spreadsheet",
+    };
+
+    public bool CanExtract(string format) => Formats.Contains(PlainTextExtractor.Normalize(format));
+
+    public string Extract(byte[] payload)
+    {
+        try
+        {
+            using var zip = new ZipArchive(new MemoryStream(payload), ZipArchiveMode.Read);
+            var sb = new StringBuilder();
+            foreach (var entry in zip.Entries
+                .Where(IsTextPart)
+                .OrderBy(e => e.FullName, StringComparer.Ordinal))
+            {
+                using var stream = entry.Open();
+                AppendTextNodes(stream, sb);
+            }
+            return PlainTextExtractor.NormalizeWhitespace(sb.ToString());
+        }
+        catch
+        {
+            return string.Empty;  // not a zip / corrupted — metadata-only fallback
+        }
+    }
+
+    private static bool IsTextPart(ZipArchiveEntry entry) =>
+        entry.FullName is "word/document.xml" or "xl/sharedStrings.xml"
+        || (entry.FullName.StartsWith("ppt/slides/slide", StringComparison.Ordinal)
+            && entry.FullName.EndsWith(".xml", StringComparison.Ordinal))
+        || (entry.FullName.StartsWith("ppt/notesSlides/notesSlide", StringComparison.Ordinal)
+            && entry.FullName.EndsWith(".xml", StringComparison.Ordinal))
+        // XLSX inline strings (cells not routed through sharedStrings).
+        || (entry.FullName.StartsWith("xl/worksheets/sheet", StringComparison.Ordinal)
+            && entry.FullName.EndsWith(".xml", StringComparison.Ordinal));
+
+    private static void AppendTextNodes(Stream stream, StringBuilder sb)
+    {
+        var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit };
+        using var reader = XmlReader.Create(stream, settings);
+        var inTextNode = false;
+        while (reader.Read())
+        {
+            if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "t")
+            {
+                inTextNode = true;
+            }
+            else if (reader.NodeType == XmlNodeType.EndElement && reader.LocalName == "t")
+            {
+                inTextNode = false;
+                sb.Append(' ');
+            }
+            else if (inTextNode && reader.NodeType is XmlNodeType.Text or XmlNodeType.CDATA)
+            {
+                sb.Append(reader.Value);
+            }
+        }
+    }
+}
+
+/// <summary>Best-effort PDF text-layer extraction (FlateDecode + Tj/TJ operators).</summary>
+public sealed class PdfTextExtractor : IContentExtractor
+{
+    public bool CanExtract(string format) => PlainTextExtractor.Normalize(format) == "pdf";
+
+    public string Extract(byte[] payload)
+    {
+        try
+        {
+            var sb = new StringBuilder();
+            foreach (var stream in EnumerateStreams(payload))
+            {
+                var inflated = TryInflate(stream) ?? stream;
+                var text = Encoding.Latin1.GetString(inflated);
+                ExtractShowTextOperators(text, sb);
+            }
+            return PlainTextExtractor.NormalizeWhitespace(sb.ToString());
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    /// <summary>Slice out every <c>stream ... endstream</c> body in the file.</summary>
+    private static IEnumerable<byte[]> EnumerateStreams(byte[] payload)
+    {
+        var haystack = payload;
+        var start = 0;
+        while (true)
+        {
+            var streamIdx = IndexOf(haystack, "stream", start);
+            if (streamIdx < 0)
+                yield break;
+            var bodyStart = streamIdx + "stream".Length;
+            // Skip the EOL after the keyword.
+            if (bodyStart < haystack.Length && haystack[bodyStart] == (byte)'\r')
+                bodyStart++;
+            if (bodyStart < haystack.Length && haystack[bodyStart] == (byte)'\n')
+                bodyStart++;
+            var endIdx = IndexOf(haystack, "endstream", bodyStart);
+            if (endIdx < 0)
+                yield break;
+            yield return haystack[bodyStart..endIdx];
+            start = endIdx + "endstream".Length;
+        }
+    }
+
+    private static int IndexOf(byte[] haystack, string needle, int from)
+    {
+        var bytes = Encoding.ASCII.GetBytes(needle);
+        for (var i = from; i <= haystack.Length - bytes.Length; i++)
+        {
+            var match = true;
+            for (var j = 0; j < bytes.Length; j++)
+            {
+                if (haystack[i + j] != bytes[j])
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match)
+                return i;
+        }
+        return -1;
+    }
+
+    private static byte[]? TryInflate(byte[] data)
+    {
+        try
+        {
+            using var input = new MemoryStream(data);
+            using var zlib = new ZLibStream(input, CompressionMode.Decompress);
+            using var output = new MemoryStream();
+            zlib.CopyTo(output);
+            return output.ToArray();
+        }
+        catch
+        {
+            return null;  // not FlateDecode (or already plain)
+        }
+    }
+
+    /// <summary>
+    /// Pull strings out of every show-text operator: <c>Tj</c>, <c>'</c>,
+    /// <c>"</c> and <c>TJ</c> arrays — literal <c>(...)</c> strings (with
+    /// octal/symbol escapes and line continuations) and hex <c>&lt;...&gt;</c>
+    /// strings, including UTF-16BE (BOM FE FF) payloads.
+    /// </summary>
+    internal static void ExtractShowTextOperators(string content, StringBuilder sb)
+    {
+        // (text) Tj | (text) ' | aw ac (text) "  — string sits right before the operator.
+        foreach (Match match in Regex.Matches(
+                     content, @"\(((?:[^()\\]|\\.)*)\)\s*(?:Tj|'|"")", RegexOptions.Singleline))
+        {
+            sb.Append(DecodeLiteralString(match.Groups[1].Value)).Append(' ');
+        }
+        // <48656C6C6F> Tj — hex-string form of the same operators.
+        foreach (Match match in Regex.Matches(
+                     content, @"<([0-9A-Fa-f\s]*)>\s*(?:Tj|'|"")", RegexOptions.Singleline))
+        {
+            sb.Append(DecodeHexString(match.Groups[1].Value)).Append(' ');
+        }
+        // [ (a) -120 (b) <686921> ] TJ — mixed literal/hex elements.
+        foreach (Match match in Regex.Matches(content, @"\[(.*?)\]\s*TJ", RegexOptions.Singleline))
+        {
+            foreach (Match inner in Regex.Matches(
+                         match.Groups[1].Value,
+                         @"\(((?:[^()\\]|\\.)*)\)|<([0-9A-Fa-f\s]*)>",
+                         RegexOptions.Singleline))
+            {
+                sb.Append(inner.Groups[1].Success
+                    ? DecodeLiteralString(inner.Groups[1].Value)
+                    : DecodeHexString(inner.Groups[2].Value));
+            }
+            sb.Append(' ');
+        }
+    }
+
+    /// <summary>
+    /// Decode a PDF literal string body: symbol escapes (\n \r \t \b \f \( \) \\),
+    /// 1-3 digit octal escapes (\101 → 'A'), backslash-newline line
+    /// continuations, then UTF-16BE when the bytes carry a FE FF BOM.
+    /// </summary>
+    internal static string DecodeLiteralString(string s)
+    {
+        var bytes = new List<byte>(s.Length);
+        for (var i = 0; i < s.Length; i++)
+        {
+            var ch = s[i];
+            if (ch != '\\')
+            {
+                bytes.Add((byte)ch);  // content was read as Latin1: char == byte
+                continue;
+            }
+            if (++i >= s.Length)
+                break;
+            var esc = s[i];
+            switch (esc)
+            {
+                case 'n':
+                    bytes.Add((byte)'\n');
+                    break;
+                case 'r':
+                    bytes.Add((byte)'\r');
+                    break;
+                case 't':
+                    bytes.Add((byte)'\t');
+                    break;
+                case 'b':
+                    bytes.Add((byte)'\b');
+                    break;
+                case 'f':
+                    bytes.Add((byte)'\f');
+                    break;
+                case '\n':
+                    break;  // line continuation — nothing emitted
+                case '\r':
+                    if (i + 1 < s.Length && s[i + 1] == '\n')
+                        i++;  // \<CRLF> continuation
+                    break;
+                case >= '0' and <= '7':
+                {
+                    // 1-3 octal digits.
+                    var value = esc - '0';
+                    for (var d = 0; d < 2 && i + 1 < s.Length && s[i + 1] is >= '0' and <= '7'; d++)
+                        value = value * 8 + (s[++i] - '0');
+                    bytes.Add((byte)(value & 0xFF));
+                    break;
+                }
+                default:
+                    bytes.Add((byte)esc);  // \( \) \\ and any unknown escape → literal
+                    break;
+            }
+        }
+        return DecodeTextBytes(bytes.ToArray());
+    }
+
+    /// <summary>Decode a PDF hex string body (whitespace ignored; odd length padded with 0).</summary>
+    internal static string DecodeHexString(string hex)
+    {
+        var digits = new StringBuilder(hex.Length);
+        foreach (var ch in hex)
+        {
+            if (Uri.IsHexDigit(ch))
+                digits.Append(ch);
+        }
+        if (digits.Length % 2 == 1)
+            digits.Append('0');
+        var bytes = new byte[digits.Length / 2];
+        for (var i = 0; i < bytes.Length; i++)
+            bytes[i] = Convert.ToByte(digits.ToString(i * 2, 2), 16);
+        return DecodeTextBytes(bytes);
+    }
+
+    /// <summary>UTF-16BE when BOM-prefixed (the PDF text-string convention), else Latin1 ≈ PDFDocEncoding.</summary>
+    private static string DecodeTextBytes(byte[] bytes)
+    {
+        if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+            return Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
+        return Encoding.Latin1.GetString(bytes);
+    }
+}
+
+/// <summary>Routes to the first extractor that understands the format.</summary>
+public sealed class CompositeExtractor : IContentExtractor
+{
+    private readonly IReadOnlyList<IContentExtractor> _extractors;
+
+    public CompositeExtractor(params IContentExtractor[] extractors)
+    {
+        _extractors = extractors.Length > 0
+            ? extractors
+            : new IContentExtractor[]
+            {
+                new PlainTextExtractor(),
+                new OpenXmlTextExtractor(),
+                new PdfTextExtractor(),
+            };
+    }
+
+    public static CompositeExtractor Default { get; } = new();
+
+    public bool CanExtract(string format) => _extractors.Any(e => e.CanExtract(format));
+
+    public string Extract(byte[] payload) => throw new NotSupportedException(
+        "Use ExtractFor(format, payload) on the composite.");
+
+    /// <summary>
+    /// Extract text for <paramref name="format"/>; empty string when
+    /// unsupported or failed. Every attempt is recorded in the per-format
+    /// metrics (success = non-empty text), so /metrics exposes extraction
+    /// health per payload type.
+    /// </summary>
+    public string ExtractFor(string format, byte[] payload)
+    {
+        var attempted = false;
+        foreach (var extractor in _extractors)
+        {
+            if (!extractor.CanExtract(format))
+                continue;
+            attempted = true;
+            try
+            {
+                var text = extractor.Extract(payload);
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    Infrastructure.Metrics.RecordExtraction(format, success: true);
+                    return text;
+                }
+            }
+            catch
+            {
+                // extraction must never fail an item — fall through
+            }
+        }
+        if (attempted)
+            Infrastructure.Metrics.RecordExtraction(format, success: false);
+        return string.Empty;
+    }
+}

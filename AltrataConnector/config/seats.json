@@ -1,0 +1,9 @@
+{
+  "_comment": "EXAMPLE seat list. Replace with the UPNs and/or Entra object IDs covered by your Altrata license, or set SEAT_GROUP_ID instead. Every ingested item is visible ONLY to these principals.",
+  "users": [
+    "first.analyst@contoso.com",
+    "second.analyst@contoso.com",
+    "3f2a1b7c-9d4e-4f6a-8b2c-1d5e7f9a0b3c"
+  ],
+  "groups": []
+}

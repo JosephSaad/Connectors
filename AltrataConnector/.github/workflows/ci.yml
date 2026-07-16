@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Core build + unit tests (no external services). Everything is hermetic:
+  # feeds are temp dirs, Graph/Altrata APIs are scripted handlers, the identity
+  # store is SQLite. This is the gating job.
+  # ---------------------------------------------------------------------------
+  build-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-latest is not a nicety: Windows Server is the primary
+        # deployment target (Windows service mode), so the suite must pass
+        # there, not only on the linux CI/dev machines.
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build -c Release --no-restore
+
+      - name: Test
+        run: >-
+          dotnet test -c Release --no-build
+          --logger "trx;LogFileName=test-results.trx"
+          --collect:"XPlat Code Coverage"
+          --results-directory ./TestResults
+
+      - name: Upload test results (trx)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-trx-${{ matrix.os }}
+          path: "**/TestResults/**/*.trx"
+          if-no-files-found: warn
+
+      - name: Upload code coverage
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: code-coverage-${{ matrix.os }}
+          path: "**/TestResults/**/coverage.cobertura.xml"
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # SQL Server provisioning: spin up SQL Server 2022 and run
+  # scripts/sql/create-database.sql TWICE — the second pass proves the
+  # documented idempotent re-run/upgrade path against a live engine, not just
+  # via the offline ScriptDom/DacFx suite. Separate job on purpose: if SQL
+  # Server fails to come up, only this job goes red.
+  # ---------------------------------------------------------------------------
+  sql-provision:
+    name: SQL Server Schema Provisioning (idempotency)
+    runs-on: ubuntu-latest
+    env:
+      # Workflow-local throwaway SA password; only exists for this job's
+      # service container. No repo secret needed.
+      SA_PASSWORD: "Your_strong!Passw0rd1"
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Your_strong!Passw0rd1"
+          MSSQL_PID: "Developer"
+        ports:
+          - 1433:1433
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Wait for SQL Server to accept connections
+        run: |
+          echo "Waiting for SQL Server on 127.0.0.1:1433 ..."
+          for i in $(seq 1 40); do
+            if docker run --rm --network host \
+                 mcr.microsoft.com/mssql-tools:latest \
+                 /opt/mssql-tools/bin/sqlcmd -S 127.0.0.1 -U sa -P "$SA_PASSWORD" -Q "SELECT 1" >/dev/null 2>&1; then
+              echo "SQL Server is up (attempt $i)."
+              exit 0
+            fi
+            echo "  not ready yet (attempt $i/40); sleeping 5s"
+            sleep 5
+          done
+          echo "::error::SQL Server did not become ready in time."
+          exit 1
+
+      - name: Provision database schema (twice)
+        run: |
+          for pass in 1 2; do
+            echo "Running scripts/sql/create-database.sql via sqlcmd (pass $pass) ..."
+            docker run --rm --network host \
+              -v "${{ github.workspace }}/scripts/sql:/scripts:ro" \
+              mcr.microsoft.com/mssql-tools:latest \
+              /opt/mssql-tools/bin/sqlcmd -S 127.0.0.1 -U sa -P "$SA_PASSWORD" -b -i /scripts/create-database.sql
+          done
+
+  # ---------------------------------------------------------------------------
+  # Build the container image (no push) to validate the Dockerfile builds end
+  # to end. Load into the local daemon so a failure in the runtime stage is
+  # caught too.
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker Build (validate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: altrata-connector:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

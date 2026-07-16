@@ -1,0 +1,36 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{7028123E-FD89-45B9-8899-3B761C91765B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AltrataConnector", "src\AltrataConnector\AltrataConnector.csproj", "{AC7C9B4C-7C19-475E-94D4-2DF5D4AB64FE}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{A234DFE3-29BB-4045-B500-0AFE9CF50F5B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AltrataConnector.Tests", "tests\AltrataConnector.Tests\AltrataConnector.Tests.csproj", "{C58BCBCE-8A31-4E91-A353-4DE399F0B3A2}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{AC7C9B4C-7C19-475E-94D4-2DF5D4AB64FE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AC7C9B4C-7C19-475E-94D4-2DF5D4AB64FE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AC7C9B4C-7C19-475E-94D4-2DF5D4AB64FE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AC7C9B4C-7C19-475E-94D4-2DF5D4AB64FE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C58BCBCE-8A31-4E91-A353-4DE399F0B3A2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C58BCBCE-8A31-4E91-A353-4DE399F0B3A2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C58BCBCE-8A31-4E91-A353-4DE399F0B3A2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C58BCBCE-8A31-4E91-A353-4DE399F0B3A2}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{AC7C9B4C-7C19-475E-94D4-2DF5D4AB64FE} = {7028123E-FD89-45B9-8899-3B761C91765B}
+		{C58BCBCE-8A31-4E91-A353-4DE399F0B3A2} = {A234DFE3-29BB-4045-B500-0AFE9CF50F5B}
+	EndGlobalSection
+EndGlobal

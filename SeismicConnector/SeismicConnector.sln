@@ -1,0 +1,36 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{CB05258C-E604-471A-8C4E-B81209AF1121}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SeismicConnector", "src\SeismicConnector\SeismicConnector.csproj", "{CDC8CCBB-FC95-42D8-A7B1-02B6C1E29DDD}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{25E74CC9-3BAF-48F4-91F8-CF9369BC181F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SeismicConnector.Tests", "tests\SeismicConnector.Tests\SeismicConnector.Tests.csproj", "{4DAF5BF4-CEB9-4E6D-9801-4F0959E437F6}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{CDC8CCBB-FC95-42D8-A7B1-02B6C1E29DDD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CDC8CCBB-FC95-42D8-A7B1-02B6C1E29DDD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CDC8CCBB-FC95-42D8-A7B1-02B6C1E29DDD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CDC8CCBB-FC95-42D8-A7B1-02B6C1E29DDD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4DAF5BF4-CEB9-4E6D-9801-4F0959E437F6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4DAF5BF4-CEB9-4E6D-9801-4F0959E437F6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4DAF5BF4-CEB9-4E6D-9801-4F0959E437F6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4DAF5BF4-CEB9-4E6D-9801-4F0959E437F6}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{CDC8CCBB-FC95-42D8-A7B1-02B6C1E29DDD} = {CB05258C-E604-471A-8C4E-B81209AF1121}
+		{4DAF5BF4-CEB9-4E6D-9801-4F0959E437F6} = {25E74CC9-3BAF-48F4-91F8-CF9369BC181F}
+	EndGlobalSection
+EndGlobal

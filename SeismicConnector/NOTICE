@@ -1,0 +1,18 @@
+NOTICES AND INFORMATION
+
+Seismic Copilot Connector
+Copyright (c) 2026 Clouds Connected Ltd. Licensed under the MIT License (see LICENSE).
+
+This project's architecture and operational patterns (CLI shape, crawl
+checkpointing, dead-letter queue, retry/backoff contract, SQL state backend,
+HA coordination, observability surface) are adapted from the MIT-licensed
+Salesforce Copilot Connector reference implementation:
+
+    Salesforce Custom Copilot Connector
+    Copyright (c) Microsoft Corporation.
+    Licensed under the MIT License.
+    https://github.com/microsoft/Salesforce-Custom-Copilot-Connector
+
+No source code is shared between the two projects at build time; each carries
+its own implementation. Third-party NuGet dependencies are licensed under
+their respective licenses (see each package's license metadata).

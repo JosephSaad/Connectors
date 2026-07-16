@@ -1,0 +1,134 @@
+# =============================================================================
+# Altrata Copilot Connector — LOCAL / DEV topology
+# =============================================================================
+# Brings up a SQL Server 2022 instance and the connector wired to use it as the
+# shared state backend (identity store, checkpoints, sync timestamps, dead-letter
+# queue, leases). Convenience topology for local development and testing ONLY:
+#   * The SA password below is a throwaway dev credential — do NOT use in prod.
+#   * Real deployments point SQL_CONNECTION_STRING at a hardened SQL Server /
+#     Always On AG listener, not a container. See docs/HA.md and docs/SQL_CONTRACT.md.
+#
+# Prerequisites (not created by this file):
+#   * env/.env.local — your Altrata + Entra credentials (see env/README.md).
+#   * A feed drop directory bind-mounted to /app/feeds (FEED_PATH).
+#   * The database schema is provisioned by the `mssql-init` service, which
+#     runs scripts/sql/create-database.sql once SQL Server is up.
+#
+# Usage:
+#   docker compose up --build          # start SQL + connector (continuous crawl)
+#   docker compose logs -f connector   # follow the connector
+#   docker compose down                # stop; add -v to also drop the DB volume
+# =============================================================================
+
+services:
+  # ---- SQL Server state backend --------------------------------------------
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      # Dev-only SA password (meets SQL Server complexity rules).
+      # Override from the shell: export MSSQL_SA_PASSWORD before `docker compose up`.
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Your_strong!Passw0rd}"
+      MSSQL_PID: "Developer"
+    ports:
+      # Loopback-only: a dev SQL with a known SA password must not listen on the LAN.
+      - "127.0.0.1:1433:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ---- One-shot schema provisioning ----------------------------------------
+  # Runs create-database.sql against the healthy SQL Server, then exits. Keeps
+  # the connector image free of SQL client tooling.
+  mssql-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      mssql:
+        condition: service_healthy
+    environment:
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-Your_strong!Passw0rd}"
+    volumes:
+      - ./scripts/sql:/scripts:ro
+    entrypoint:
+      [
+        "/opt/mssql-tools18/bin/sqlcmd",
+        "-S", "mssql",
+        "-U", "sa",
+        "-P", "Your_strong!Passw0rd",
+        "-C",
+        "-b",
+        "-i", "/scripts/create-database.sql",
+      ]
+    restart: "no"
+
+  # ---- Connector (primary node) --------------------------------------------
+  connector:
+    build: .
+    depends_on:
+      mssql:
+        condition: service_healthy
+      mssql-init:
+        condition: service_completed_successfully
+    # Altrata + Entra credentials come from your local env file.
+    env_file:
+      - ./env/.env.local
+    environment:
+      ALTRATA_CONNECTOR_HOME: /app
+      FEED_PATH: /app/feeds
+      # Switch the state backend from file/SQLite to shared SQL Server.
+      USE_SQL_SERVER: "true"
+      SQL_CONNECTION_STRING: "Server=mssql,1433;Database=AltrataConnector;User Id=sa;Password=${MSSQL_SA_PASSWORD:-Your_strong!Passw0rd};TrustServerCertificate=true;Encrypt=true"
+    command: ["full-deployment", "--continuous"]
+    volumes:
+      - ./config:/app/config
+      - ./env:/app/env
+      - ./logs:/app/logs
+      - ./data:/app/data
+      # Point at your real SFTP drop directory:
+      - ./feeds:/app/feeds
+    restart: unless-stopped
+
+  # ---- Connector (second node — HA active-active) --------------------------
+  # Uncomment to run a two-node active-active cluster against the SAME database
+  # and the SAME feed mount. Both nodes run the same --continuous command; they
+  # coordinate through the dbo.altrata_leases table (one lease per delivery,
+  # one winner per crawl close). Add HA_MODE: "true" to the primary node too.
+  # See docs/HA.md.
+  #
+  # connector2:
+  #   build: .
+  #   depends_on:
+  #     mssql:
+  #       condition: service_healthy
+  #     mssql-init:
+  #       condition: service_completed_successfully
+  #   env_file:
+  #     - ./env/.env.local
+  #   environment:
+  #     ALTRATA_CONNECTOR_HOME: /app
+  #     FEED_PATH: /app/feeds
+  #     USE_SQL_SERVER: "true"
+  #     HA_MODE: "true"
+  #     HA_NODE_ID: "node-2"
+  #     GRAPH_RETRY_JITTER: "true"
+  #     SQL_CONNECTION_STRING: "Server=mssql,1433;Database=AltrataConnector;User Id=sa;Password=${MSSQL_SA_PASSWORD:-Your_strong!Passw0rd};TrustServerCertificate=true;Encrypt=true"
+  #   command: ["full-deployment", "--continuous"]
+  #   volumes:
+  #     - ./config:/app/config
+  #     - ./env:/app/env
+  #     - ./logs:/app/logs
+  #     - ./data:/app/data
+  #     - ./feeds:/app/feeds
+  #   restart: unless-stopped
+
+volumes:
+  mssql-data:

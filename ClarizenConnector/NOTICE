@@ -1,0 +1,29 @@
+NOTICES AND INFORMATION
+
+This product's architecture and operational chassis (CLI shape, checkpointed
+crawl pipeline, dead-letter/retry model, SQL/HA state backends, observability
+surface, Windows-service host) are modeled on Microsoft's
+Salesforce-Custom-Copilot-Connector template (MIT License, (c) Microsoft
+Corporation, https://github.com/microsoft/Salesforce-Custom-Copilot-Connector),
+re-implemented independently for Clarizen (Planview AdaptiveWork). Each
+connector carries its own copy of the chassis by design — no code is shared.
+
+This product incorporates the following NuGet packages under their respective
+licenses (all MIT unless noted):
+
+  - Azure.Identity, Azure.Security.KeyVault.Secrets   (c) Microsoft Corporation
+  - Microsoft.Data.SqlClient                          (c) Microsoft Corporation
+  - Microsoft.Data.Sqlite                             (c) Microsoft Corporation
+  - Microsoft.Extensions.Hosting.WindowsServices      (c) Microsoft Corporation
+  - SQLitePCLRaw.bundle_e_sqlite3                     (c) Eric Sink (Apache-2.0)
+  - Spectre.Console                                   (c) Patrik Svensson, Phil Scott, Nils Andresen
+
+Test-only components:
+
+  - xunit, xunit.runner.visualstudio (Apache-2.0)
+  - coverlet.collector (MIT)
+  - Microsoft.NET.Test.Sdk, Microsoft.SqlServer.DacFx,
+    Microsoft.SqlServer.TransactSql.ScriptDom (c) Microsoft Corporation
+
+The licenses above are provided for informational purposes; the packages are
+consumed unmodified from nuget.org.

@@ -1,0 +1,148 @@
+{
+  "baseType": "microsoft.graph.externalItem",
+  "properties": [
+    {
+      "name": "title",
+      "type": "String",
+      "isSearchable": true,
+      "isRetrievable": true,
+      "labels": ["title"]
+    },
+    {
+      "name": "contentId",
+      "type": "String",
+      "isQueryable": true,
+      "isRetrievable": true
+    },
+    {
+      "name": "teamsiteId",
+      "type": "String",
+      "isQueryable": true,
+      "isRetrievable": true
+    },
+    {
+      "name": "teamsiteName",
+      "type": "String",
+      "isSearchable": true,
+      "isRetrievable": true,
+      "isRefinable": false
+    },
+    {
+      "name": "format",
+      "type": "String",
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true
+    },
+    {
+      "name": "versionId",
+      "type": "String",
+      "isRetrievable": true
+    },
+    {
+      "name": "distribution",
+      "type": "String",
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true
+    },
+    {
+      "name": "url",
+      "type": "String",
+      "isRetrievable": true,
+      "labels": ["url"]
+    },
+    {
+      "name": "ownerEmail",
+      "type": "String",
+      "isQueryable": true,
+      "isRetrievable": true
+    },
+    {
+      "name": "lastModifiedDateTime",
+      "type": "DateTime",
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true,
+      "labels": ["lastModifiedDateTime"]
+    },
+    {
+      "name": "publishedDateTime",
+      "type": "DateTime",
+      "isQueryable": true,
+      "isRetrievable": true
+    },
+    {
+      "name": "expiresDateTime",
+      "type": "DateTime",
+      "isQueryable": true,
+      "isRetrievable": true
+    },
+    {
+      "name": "viewCount",
+      "type": "Int64",
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true
+    },
+    {
+      "name": "downloadCount",
+      "type": "Int64",
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true
+    },
+    {
+      "name": "shareCount",
+      "type": "Int64",
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true
+    },
+    {
+      "name": "popularityScore",
+      "type": "Int64",
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true
+    },
+    {
+      "name": "isLiveDoc",
+      "type": "Boolean",
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true
+    },
+    {
+      "name": "liveDocFieldNames",
+      "type": "StringCollection",
+      "isSearchable": true,
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true
+    },
+    {
+      "name": "liveDocFieldCount",
+      "type": "Int64",
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true
+    },
+    {
+      "name": "sensitivityLabel",
+      "type": "String",
+      "isSearchable": true,
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true
+    },
+    {
+      "name": "detectedCategories",
+      "type": "StringCollection",
+      "isSearchable": true,
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true
+    }
+  ]
+}

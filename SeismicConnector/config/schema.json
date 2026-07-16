@@ -1,0 +1,13 @@
+{
+  "objects": [
+    {
+      "name": "ContentItem",
+      "enabled": true,
+      "expiryProperty": "expiresAt"
+    },
+    {
+      "name": "Library",
+      "enabled": true
+    }
+  ]
+}

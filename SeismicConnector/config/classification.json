@@ -1,0 +1,33 @@
+{
+  "defaultLabel": "Internal",
+  "patterns": [
+    {
+      "category": "PII.Email",
+      "regex": "\\b[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}\\b"
+    },
+    {
+      "category": "PII.Phone",
+      "regex": "\\b(?:\\+?\\d{1,3}[\\s.\\-]?)?\\(?\\d{3}\\)?[\\s.\\-]?\\d{3}[\\s.\\-]?\\d{4}\\b"
+    },
+    {
+      "category": "PII.NationalId",
+      "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+    },
+    {
+      "category": "Secret.ApiKey",
+      "regex": "\\b(?:AKIA[0-9A-Z]{16}|(?:sk|pk|api|key|token|secret)[_\\-][A-Za-z0-9]{16,})\\b"
+    }
+  ],
+  "luhn": {
+    "category": "PCI.CardNumber",
+    "candidateRegex": "\\d(?:[ \\-]?\\d){12,18}"
+  },
+  "mneAdjacentKeywords": [
+    "material non-public",
+    "material nonpublic",
+    "MNPI",
+    "insider information",
+    "embargoed",
+    "under embargo"
+  ]
+}
