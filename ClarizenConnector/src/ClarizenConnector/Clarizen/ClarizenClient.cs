@@ -194,7 +194,10 @@ public class ClarizenClient : IAttachmentDownloader
         }
     }
 
-    /// <summary>Fetch a single entity by Clarizen id (e.g. "/Task/1234" or bare local id).</summary>
+    /// <summary>Fetch a single entity by Clarizen id (e.g. "/Task/1234" or bare local id).
+    /// The id is interpolated into a CZQL WHERE clause, so it must be a plain
+    /// [A-Za-z0-9._-] token — anything else is rejected (returns null) rather
+    /// than concatenated into the query.</summary>
     public async Task<JsonObject?> RetrieveAsync(
         ObjectConfig objectConfig, string id, CancellationToken ct = default)
     {
@@ -203,10 +206,35 @@ public class ClarizenClient : IAttachmentDownloader
         if (slash >= 0)
             localId = localId[(slash + 1)..];
 
+        if (!IsSafeSysId(localId))
+        {
+            Logger.Warning(
+                $"RetrieveAsync: rejecting unsafe entity id for {objectConfig.ObjectName} "
+                + "(not a plain [A-Za-z0-9._-] token) — refusing to build the CZQL query.");
+            return null;
+        }
+
         var fields = string.Join(", ", objectConfig.SelectedFields.Keys);
         var czql = $"SELECT {fields} FROM {objectConfig.ObjectName} WHERE SYSID = {localId}";
         var rows = await QueryAllAsync(czql, rowLimit: 1, ct).ConfigureAwait(false);
         return rows.Count > 0 ? rows[0] : null;
+    }
+
+    /// <summary>True when every char is in [A-Za-z0-9._-] with at least one
+    /// letter/digit (safe to embed in CZQL/URLs; "." and ".." are not ids).</summary>
+    internal static bool IsSafeSysId(string localId)
+    {
+        if (string.IsNullOrEmpty(localId))
+            return false;
+        var hasAlphanumeric = false;
+        foreach (var ch in localId)
+        {
+            if (char.IsAsciiLetterOrDigit(ch))
+                hasAlphanumeric = true;
+            else if (ch is not ('.' or '_' or '-'))
+                return false;
+        }
+        return hasAlphanumeric;
     }
 
     /// <summary>Server-time ping used by validate-config (GET /utils/getServerTime analog via echo).</summary>

@@ -34,15 +34,27 @@ proves nothing. Metrics: `clarizen_connector_items_deleted_total`.
 `DELETION_SYNC=false` disables the sweep entirely (the inventory is still
 maintained so `reconcile` keeps working).
 
-### Mass-deletion safety guard
+### Mass-deletion safety guards
 
 A source outage, a truncated TDW export or a wrong `filterCondition` could make
-the entire index look stale. When more than `DELETION_SYNC_MAX_PERCENT`
-(default 25) of an object type's inventory would be deleted in one sweep — and
-the inventory holds at least 20 items — the sweep is **skipped**, a warning is
-logged, a `deletion_sweep_skipped` webhook alert fires, and the crawl summary
-lists the object type. If the drop is real, raise the threshold (or set it to
-`0`/`100` to disable the guard) and re-run, or use `reconcile --fix`.
+the entire index look stale. Two guards protect the sweep; tripping either one
+**skips** it, logs a warning, fires a `deletion_sweep_skipped` webhook alert,
+and lists the object type in the crawl summary:
+
+- **Absolute cap** — `DELETION_SYNC_MAX_ITEMS` (default 1000): never
+  auto-delete more than this many items of one object type in a single sweep,
+  regardless of inventory size. This is the guard that also covers small
+  object types. Set it to `0` to disable explicitly; a negative value is a
+  misconfiguration and falls back to the default with a warning.
+- **Percentage guard** — `DELETION_SYNC_MAX_PERCENT` (default 25): when more
+  than this percentage of an object type's inventory would be deleted in one
+  sweep — and the inventory holds at least 20 items — the sweep is skipped.
+  `0` or `100` disables the percent guard explicitly; values outside
+  `[0, 100]` are a misconfiguration and fall back to the default with a
+  warning (a negative value never silently disables the guard).
+
+If the drop is real, raise the threshold/cap (or disable them as above) and
+re-run, or use `reconcile --fix`.
 
 ## `reconcile [--type X] [--fix]`
 

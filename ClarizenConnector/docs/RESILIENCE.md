@@ -27,9 +27,11 @@ dependency:
 
 Only **real failures** count: `5xx`, timeouts, and connection failures. `4xx`
 /validation and honoured `429`-with-`Retry-After` are **ignored** — a 429 is
-flow control, not an outage, so it never trips the breaker. The breaker is
-clock-injectable (deterministic tests) and thread-safe (crawls run concurrent
-object/batch workers).
+flow control, not an outage, so it never trips the breaker. An ignored outcome
+still releases its half-open probe slot (it just doesn't count toward closing
+or re-opening), so a run of 429/4xx probes can never wedge the breaker open.
+The breaker is clock-injectable (deterministic tests) and thread-safe (crawls
+run concurrent object/batch workers).
 
 ## Which dependencies are breakered
 

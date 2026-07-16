@@ -93,9 +93,9 @@ Every confirmed put is tracked in an ingested-item inventory
 (`data/{CONNECTOR_ID}_inventory.db`, or `dbo.ItemInventory` on SQL Server).
 Full crawls then run an existence sweep: inventory ids missing from the source
 are DELETEd from the Graph connection (tombstone sync — Clarizen has no
-deletion feed). A mass-deletion safety guard (`DELETION_SYNC_MAX_PERCENT`,
-default 25%) skips implausible sweeps and raises a `deletion_sweep_skipped`
-alert. `reconcile [--type X] [--fix]` audits index-vs-source drift on demand —
+deletion feed). Two mass-deletion safety guards (`DELETION_SYNC_MAX_ITEMS`,
+default 1000 absolute; `DELETION_SYNC_MAX_PERCENT`, default 25%) skip
+implausible sweeps and raise a `deletion_sweep_skipped` alert. `reconcile [--type X] [--fix]` audits index-vs-source drift on demand —
 reporting missing items and (with `--fix`) deleting stale ones. Details:
 `docs/DELETION_SYNC.md`.
 
@@ -183,7 +183,7 @@ grant a default group instead.
 | `GRAPH_BATCH_WORKERS` / `GRAPH_CONCURRENT_BATCHES` | Concurrent Graph `$batch` workers (default 8); adaptive — 429s dial it toward 1, clean windows dial it back. `GRAPH_CONCURRENT_BATCHES` wins if both set. | `docs/RETRY.md` |
 | `GRAPH_BATCH_SIZE` / `INGEST_GRAPH_BATCH_SIZE` | Requests per `$batch` POST (≤ 20, API cap). | |
 | `GRAPH_CONNECTION_SHARDS={...}` | Shard object types across N Graph connections — the throughput lever. | `docs/SHARDING.md` |
-| `DELETION_SYNC` (default **true**) + `DELETION_SYNC_MAX_PERCENT=25` | Full-crawl existence sweep withdraws items deleted in Clarizen; the percent knob is the mass-deletion safety guard. | `docs/DELETION_SYNC.md` |
+| `DELETION_SYNC` (default **true**) + `DELETION_SYNC_MAX_PERCENT=25` + `DELETION_SYNC_MAX_ITEMS=1000` | Full-crawl existence sweep withdraws items deleted in Clarizen; the percent and absolute-cap knobs are the mass-deletion safety guards. | `docs/DELETION_SYNC.md` |
 | `ATTACHMENT_INGESTION=true` (+ `ATTACHMENT_MAX_BYTES`, `ATTACHMENT_ALLOWED_TYPES`) | Download + extract attachment text (dependency-free) into the attachment item's content. | `docs/ATTACHMENTS.md` |
 | `GRAPH_BASE_URL` (+ `GRAPH_SCOPE`, `AAD_APP_OAUTH_AUTHORITY_HOST`) | Sovereign-cloud Graph endpoint (e.g. `https://graph.microsoft.us`); scope defaults to `<base>/.default`; authority host moves the token endpoint. | |
 | `USE_SQL_SERVER=true` + `SQL_CONNECTION_STRING` | Move state (identity store, checkpoints, sync ts, dead-letter) to SQL Server. | `docs/SQL_CONTRACT.md` |

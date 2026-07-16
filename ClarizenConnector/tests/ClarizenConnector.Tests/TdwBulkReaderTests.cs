@@ -1,4 +1,8 @@
+using System.Net;
+using System.Text.Json.Nodes;
 using ClarizenConnector.Clarizen;
+using ClarizenConnector.Config;
+using ClarizenConnector.Graph;
 
 namespace ClarizenConnector.Tests;
 
@@ -104,5 +108,104 @@ public class TdwBulkReaderTests
         using var dir = new TempDir();
         var reader = new TdwBulkReader(dir.Path);
         Assert.Throws<FileNotFoundException>(() => reader.ReadObject("Ghost"));
+    }
+}
+
+/// <summary>
+/// Regression: a TDW export with no recognized id column used to collapse
+/// every row to the single item id "{Object}_" (each row overwriting the same
+/// Graph item, and the deletion sweep seeing every real id as stale). Such an
+/// export must be rejected with a hard error; individual id-less rows are
+/// dropped and logged, never ingested.
+/// </summary>
+public class SourceRecordIdValidationTests
+{
+    private static ClarizenRecord Record(string objectType, string? id, string name = "n")
+    {
+        var fields = new JsonObject { ["Name"] = name };
+        if (id is not null)
+            fields["id"] = id;
+        return new ClarizenRecord(objectType, fields);
+    }
+
+    [Fact]
+    public void AllRecordsMissingId_RejectedWithHardError()
+    {
+        var records = new List<ClarizenRecord> { Record("Task", null), Record("Task", null) };
+        var exc = Assert.Throws<InvalidDataException>(
+            () => IngestPipeline.ValidateSourceRecordIds("Task", records, "TDW export"));
+        Assert.Contains("no recognized id column", exc.Message);
+    }
+
+    [Fact]
+    public void RecordsWithEmptyId_Dropped_OthersKept()
+    {
+        var records = new List<ClarizenRecord>
+        {
+            Record("Task", "/Task/1"),
+            Record("Task", null),          // no id property at all
+            Record("Task", "/Task/2"),
+        };
+        var kept = IngestPipeline.ValidateSourceRecordIds("Task", records, "TDW export");
+        Assert.Equal(new[] { "Task_1", "Task_2" }, kept.Select(r => r.ItemId));
+    }
+
+    [Fact]
+    public void EmptyBatch_PassesThrough()
+    {
+        var kept = IngestPipeline.ValidateSourceRecordIds(
+            "Task", new List<ClarizenRecord>(), "TDW export");
+        Assert.Empty(kept);
+    }
+
+    [Fact]
+    public async Task TdwExport_WithoutIdColumn_RejectedBeforeIngest()
+    {
+        // End-to-end through the TDW fetch path: a CSV whose header has no
+        // id/Id column must be rejected, not ingested as one collapsed item.
+        using var dir = new TempDir();
+        File.WriteAllText(
+            Path.Combine(dir.Path, "Task.csv"),
+            "Name,State\nAlpha,Active\nBeta,Draft\n");
+
+        var config = TestConfig.Make(tdwExportPath: dir.Path);
+        var handler = new MockHttpHandler((_, _) =>
+            MockHttpHandler.Json(HttpStatusCode.OK, """{"sessionId": "s"}"""));
+        var clarizen = new ClarizenClient(
+            config, new ApiBudget(100_000, callsPerMinute: 6_000_000), handler);
+        var objectConfig = new ObjectConfig
+        {
+            ObjectName = "Task",
+            SelectedFields = new Dictionary<string, string> { ["Name"] = "Title" },
+        };
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            IngestPipeline.FetchSourceRecordsAsync(
+                config, clarizen, objectConfig, fullCrawl: true, since: null, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task TdwExport_WithIdColumn_PartialRows_DropsOnlyIdless()
+    {
+        using var dir = new TempDir();
+        File.WriteAllText(
+            Path.Combine(dir.Path, "Task.csv"),
+            "id,Name\n/Task/1,Alpha\n,NoIdRow\n/Task/2,Beta\n");
+
+        var config = TestConfig.Make(tdwExportPath: dir.Path);
+        var handler = new MockHttpHandler((_, _) =>
+            MockHttpHandler.Json(HttpStatusCode.OK, """{"sessionId": "s"}"""));
+        var clarizen = new ClarizenClient(
+            config, new ApiBudget(100_000, callsPerMinute: 6_000_000), handler);
+        var objectConfig = new ObjectConfig
+        {
+            ObjectName = "Task",
+            SelectedFields = new Dictionary<string, string> { ["Name"] = "Title" },
+        };
+
+        var records = await IngestPipeline.FetchSourceRecordsAsync(
+            config, clarizen, objectConfig, fullCrawl: true, since: null, CancellationToken.None);
+
+        Assert.Equal(new[] { "Task_1", "Task_2" }, records.Select(r => r.ItemId));
     }
 }

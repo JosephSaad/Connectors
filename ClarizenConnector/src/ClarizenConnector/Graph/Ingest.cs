@@ -126,9 +126,16 @@ public sealed class IngestPipeline
     private readonly object _statsLock = new();
     private readonly object _inventoryLock = new();
 
-    /// <summary>Safety guard floor: the mass-deletion guard only engages once
-    /// the inventory holds at least this many items for the connection.</summary>
+    /// <summary>Safety guard floor: the percent-based mass-deletion guard only
+    /// engages once the inventory holds at least this many items for the
+    /// connection (percentages are meaningless on tiny inventories — the
+    /// absolute DELETION_SYNC_MAX_ITEMS cap covers those).</summary>
     internal const int MinInventoryForSafetyGuard = 20;
+
+    /// <summary>Default absolute cap for one deletion sweep (DELETION_SYNC_MAX_ITEMS):
+    /// never auto-delete more than this many items in one sweep, regardless of
+    /// inventory size or the percent guard. 0 disables the cap explicitly.</summary>
+    internal const int DefaultDeletionSyncMaxItems = 1000;
 
     /// <summary>Progress callback (objectType, done, total) for the dashboard.</summary>
     public Action<string, int, int>? OnProgress { get; set; }
@@ -505,9 +512,10 @@ public sealed class IngestPipeline
             if (reader.HasExport(objectConfig.ObjectName))
             {
                 using var tdwSpan = Tracing.StartSourceFetch(objectConfig.ObjectName, "tdw");
-                return reader.ReadObject(objectConfig.ObjectName)
+                var tdwRecords = reader.ReadObject(objectConfig.ObjectName)
                     .Select(row => new ClarizenRecord(objectConfig.ObjectName, row))
                     .ToList();
+                return ValidateSourceRecordIds(objectConfig.ObjectName, tdwRecords, "TDW export");
             }
             Logger.Info(
                 $"{objectConfig.ObjectName}: no TDW export found; falling back to the REST API.");
@@ -517,7 +525,43 @@ public sealed class IngestPipeline
         var czql = ClarizenClient.BuildQuery(objectConfig, since);
         var rows = await clarizen.QueryAllAsync(czql, config.ClarizenQueryLimit, ct)
             .ConfigureAwait(false);
-        return rows.Select(row => new ClarizenRecord(objectConfig.ObjectName, row)).ToList();
+        return ValidateSourceRecordIds(
+            objectConfig.ObjectName,
+            rows.Select(row => new ClarizenRecord(objectConfig.ObjectName, row)).ToList(),
+            "REST result");
+    }
+
+    /// <summary>
+    /// Reject records with no recognizable id. An empty <see cref="ClarizenRecord.RawId"/>
+    /// would collapse to the shared ItemId "{ObjectType}_", so every such row
+    /// overwrites the same Graph item AND poisons the deletion sweep (the real
+    /// ids all look stale). If NO record carries an id — a TDW export whose id
+    /// column is missing or renamed — the whole batch is rejected with a hard
+    /// error instead of being silently collapsed to a single item.
+    /// </summary>
+    internal static List<ClarizenRecord> ValidateSourceRecordIds(
+        string objectName, List<ClarizenRecord> records, string source)
+    {
+        if (records.Count == 0)
+            return records;
+
+        var withIds = records.Where(r => !string.IsNullOrEmpty(r.RawId)).ToList();
+        if (withIds.Count == 0)
+        {
+            throw new InvalidDataException(
+                $"{objectName}: {source} has no recognized id column — none of the "
+                + $"{records.Count} record(s) carry an 'id'/'Id' value. Refusing to ingest: "
+                + "every row would collapse to one external item and corrupt deletion sync. "
+                + "Fix the export to include the entity id column and re-run.");
+        }
+        if (withIds.Count < records.Count)
+        {
+            Logger.Error(
+                $"{objectName}: dropping {records.Count - withIds.Count} of {records.Count} "
+                + $"{source} record(s) with an empty id — each would collapse to the shared "
+                + $"item id '{objectName}_'. Fix the export/source rows to include ids.");
+        }
+        return withIds;
     }
 
     // ── Deletion/tombstone sweep ─────────────────────────────────────────────
@@ -525,11 +569,13 @@ public sealed class IngestPipeline
     /// <summary>
     /// Existence sweep for one object type after a full crawl: inventory ids
     /// absent from the source are DELETEd from the Graph connection and
-    /// dropped from the inventory. A mass-deletion safety guard
-    /// (DELETION_SYNC_MAX_PERCENT, default 25) skips the sweep — with a
-    /// warning and a webhook alert — when an implausible fraction of the
-    /// inventory would vanish at once (source outage / truncated TDW export),
-    /// once the inventory holds at least MinInventoryForSafetyGuard items.
+    /// dropped from the inventory. Two mass-deletion safety guards skip the
+    /// sweep — with a warning and a webhook alert — when an implausible amount
+    /// of the inventory would vanish at once (source outage / truncated TDW
+    /// export): an absolute per-sweep cap (DELETION_SYNC_MAX_ITEMS, default
+    /// 1000, engaged at any inventory size) and a percentage guard
+    /// (DELETION_SYNC_MAX_PERCENT, default 25, engaged once the inventory
+    /// holds at least MinInventoryForSafetyGuard items).
     /// </summary>
     internal async Task SweepDeletionsAsync(
         AppConfig cfg,
@@ -552,7 +598,32 @@ public sealed class IngestPipeline
         using var sweepSpan = Tracing.StartDeletionSweep(objectConfig.ObjectName);
         sweepSpan?.SetTag("clarizen.stale_count", stale.Count);
 
-        var maxPercent = EnvFlags.GetInt("DELETION_SYNC_MAX_PERCENT", 25);
+        // Absolute cap first: never auto-delete more than DELETION_SYNC_MAX_ITEMS
+        // in one sweep, regardless of inventory size — this also guards small
+        // inventories where the percent check below does not engage.
+        var maxItems = DeletionSyncMaxItems();
+        if (maxItems > 0 && stale.Count > maxItems)
+        {
+            Logger.Warning(
+                $"{objectConfig.ObjectName}: deletion sweep SKIPPED — {stale.Count} item(s) would "
+                + $"be deleted, above the DELETION_SYNC_MAX_ITEMS={maxItems} absolute safety cap. "
+                + "If this drop is real, raise the cap (or set it to 0 to disable) and re-run.");
+            summary.SweepSkipped.Add(objectConfig.ObjectName);
+            await Alerting.RaiseAsync(
+                "deletion_sweep_skipped",
+                $"Deletion sweep for '{objectConfig.ObjectName}' skipped: {stale.Count} stale item(s) "
+                + $"exceed the absolute cap ({maxItems}) on connector '{cfg.ConnectorId}'",
+                new Dictionary<string, object?>
+                {
+                    ["objectType"] = objectConfig.ObjectName,
+                    ["stale"] = stale.Count,
+                    ["inventory"] = indexed.Count,
+                    ["maxItems"] = maxItems,
+                }).ConfigureAwait(false);
+            return;
+        }
+
+        var maxPercent = DeletionSyncMaxPercent();
         if (indexed.Count >= MinInventoryForSafetyGuard && maxPercent > 0 && maxPercent < 100)
         {
             var stalePercent = 100.0 * stale.Count / indexed.Count;
@@ -599,6 +670,39 @@ public sealed class IngestPipeline
                 Logger.Warning($"Delete failed for {itemId} (will retry next sweep): {error}");
             }
         }
+    }
+
+    /// <summary>DELETION_SYNC_MAX_PERCENT (default 25). A value outside [0, 100]
+    /// is a misconfiguration and falls back to the default with a warning —
+    /// a negative value must NOT silently disable the guard. 0 and 100 remain
+    /// the explicit, documented "disable the percent guard" values.</summary>
+    internal static int DeletionSyncMaxPercent()
+    {
+        var value = EnvFlags.GetInt("DELETION_SYNC_MAX_PERCENT", 25);
+        if (value is < 0 or > 100)
+        {
+            Logger.Warning(
+                $"DELETION_SYNC_MAX_PERCENT={value} is outside [0, 100]; "
+                + "using the default (25) instead.");
+            return 25;
+        }
+        return value;
+    }
+
+    /// <summary>DELETION_SYNC_MAX_ITEMS (default 1000): absolute per-sweep cap.
+    /// 0 disables the cap explicitly; a negative value is a misconfiguration
+    /// and falls back to the default with a warning.</summary>
+    internal static int DeletionSyncMaxItems()
+    {
+        var value = EnvFlags.GetInt("DELETION_SYNC_MAX_ITEMS", DefaultDeletionSyncMaxItems);
+        if (value < 0)
+        {
+            Logger.Warning(
+                $"DELETION_SYNC_MAX_ITEMS={value} is negative; "
+                + $"using the default ({DefaultDeletionSyncMaxItems}) instead.");
+            return DefaultDeletionSyncMaxItems;
+        }
+        return value;
     }
 
     /// <summary>

@@ -236,6 +236,66 @@ public class ContentExtractorTests
         Assert.StartsWith("extract-error", result.Reason);
     }
 
+    // ── Decompression bombs (bounded inflation) ──────────────────────────────
+
+    [Fact]
+    public void Pdf_FlateDecodeBomb_TruncatedAtCeiling_NotInflatedUnbounded()
+    {
+        // ~11MB of text-showing operators (well above the 2MB inflation
+        // ceiling) compresses to a tiny FlateDecode stream (high-ratio bomb).
+        // Extraction must stop at the ceiling instead of buffering the whole
+        // inflated payload.
+        var run = string.Concat(Enumerable.Repeat("(AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA) Tj ", 300_000));
+        var bomb = BuildPdf("BT " + run + " ET", flate: true);
+        Assert.True(bomb.Length < 1024 * 1024, "the compressed fixture itself must be small");
+
+        var result = _extractor.Extract(bomb, "bomb.pdf", "application/pdf");
+
+        Assert.True(result.Extracted);
+        Assert.True(result.Text.Length <= ContentExtractor.MaxExtractedChars);
+    }
+
+    [Fact]
+    public void ReadBounded_StopsAtCeiling_ForHighRatioStream()
+    {
+        // 64MB of zeros deflates to ~64KB; the bounded reader must return at
+        // most MaxInflatedBytes rather than materializing all 64MB.
+        using var compressed = new MemoryStream();
+        using (var zlib = new ZLibStream(compressed, CompressionLevel.Optimal, leaveOpen: true))
+        {
+            var chunk = new byte[64 * 1024];
+            for (var i = 0; i < 1024; i++)
+                zlib.Write(chunk, 0, chunk.Length);
+        }
+        compressed.Position = 0;
+
+        using var inflater = new ZLibStream(compressed, CompressionMode.Decompress);
+        var inflated = ContentExtractor.ReadBounded(inflater, ContentExtractor.MaxInflatedBytes);
+
+        Assert.Equal(ContentExtractor.MaxInflatedBytes, inflated.Length);
+    }
+
+    [Fact]
+    public void Docx_HugeTextBody_TruncatedAtCeiling()
+    {
+        // A docx whose document.xml carries far more text than the ceiling
+        // (zip-compressed to a small upload). The OOXML walk must stop
+        // accumulating at the ceiling; the final cap still applies.
+        var text = new string('z', 1024);
+        var runs = string.Concat(Enumerable.Repeat($"<w:t>{text}</w:t>", 6_000));  // ~6M chars
+        var docx = BuildOoxml(("word/document.xml",
+            $"<?xml version=\"1.0\"?><w:document xmlns:w=\"http://x\"><w:body>{runs}</w:body></w:document>"));
+        Assert.True(docx.Length < 1024 * 1024, "the compressed fixture itself must be small");
+
+        var result = _extractor.Extract(docx, "bomb.docx", null);
+
+        Assert.True(result.Extracted);
+        Assert.InRange(
+            result.Text.Length,
+            ContentExtractor.MaxExtractedChars - 1,  // final Trim may drop a boundary space
+            ContentExtractor.MaxExtractedChars);
+    }
+
     [Fact]
     public void Normalize_CollapsesWhitespace_AndCaps()
     {

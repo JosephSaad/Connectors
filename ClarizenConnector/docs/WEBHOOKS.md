@@ -77,6 +77,13 @@ Accepted body shapes (tolerant, field aliases case-insensitive):
   never exposed. `validate-config` reports this as an error.
 - Only `POST {path}` is accepted (405 otherwise); bodies over 1 MiB are
   rejected (413).
+- **Entity-id sanitization.** After normalization ("/Task/123" → "123") the
+  local id must be a plain `[A-Za-z0-9._-]` token containing at least one
+  letter/digit — anything else (spaces, quotes, `OR 1=1`, `..`, encoded
+  traversal) is dropped at parse time with a warning, because the id flows
+  into a CZQL `WHERE SYSID = {id}` lookup and a Graph DELETE URL. The
+  Clarizen client independently refuses to build a `RetrieveAsync` query for
+  a non-token id (defense in depth).
 - Terminate TLS at your ingress/reverse proxy; the receiver speaks plain HTTP
   on loopback/behind the proxy, like the health endpoint.
 

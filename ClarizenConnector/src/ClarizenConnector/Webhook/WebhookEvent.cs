@@ -18,6 +18,8 @@
 
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+using ClarizenConnector.Infrastructure;
 
 namespace ClarizenConnector.Webhook;
 
@@ -40,6 +42,25 @@ public sealed record WebhookEvent(string ObjectType, string LocalId, ChangeKind 
 
 public static class WebhookEventParser
 {
+    private static readonly IAppLogger Logger = Logging.GetLogger("clarizen_connector.webhook");
+
+    /// <summary>
+    /// Shape a normalized local id must have before it is allowed anywhere near
+    /// a CZQL WHERE clause or a Graph item URL. Clarizen SYSIDs are plain
+    /// tokens; anything else (spaces, quotes, path traversal, "OR 1=1") is a
+    /// forged/garbled payload and the event is dropped.
+    /// </summary>
+    private static readonly Regex ValidLocalId =
+        new("^[A-Za-z0-9._-]+$", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    /// <summary>True when <paramref name="localId"/> is a safe bare id token.
+    /// At least one letter/digit is required so punctuation-only tokens
+    /// (".", "..") never masquerade as ids.</summary>
+    internal static bool IsValidLocalId(string localId) =>
+        !string.IsNullOrEmpty(localId)
+        && ValidLocalId.IsMatch(localId)
+        && localId.Any(char.IsAsciiLetterOrDigit);
+
     /// <summary>
     /// Parse a raw JSON body into events. Returns an empty list for anything
     /// unparseable or empty — the receiver treats "no events" as a malformed
@@ -100,7 +121,18 @@ public static class WebhookEventParser
         if (kind is null)
             return null;
 
-        return new WebhookEvent(objectType!.Trim(), NormalizeLocalId(rawId!), kind.Value);
+        var localId = NormalizeLocalId(rawId!);
+        if (!IsValidLocalId(localId))
+        {
+            // The id flows into a CZQL WHERE clause and a Graph DELETE URL —
+            // reject anything that is not a plain token (post-auth injection).
+            Logger.Warning(
+                $"Webhook: dropping event with invalid entity id (object type "
+                + $"'{objectType!.Trim()}') — id is not a plain [A-Za-z0-9._-] token.");
+            return null;
+        }
+
+        return new WebhookEvent(objectType!.Trim(), localId, kind.Value);
     }
 
     /// <summary>Map a Clarizen operation word to a change kind; null when unknown.</summary>

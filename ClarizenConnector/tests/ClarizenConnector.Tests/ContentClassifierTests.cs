@@ -130,4 +130,52 @@ public class ContentClassifierTests
         Assert.Contains("PCI", classifier.Detect("4111111111111111"));
         Assert.DoesNotContain("PCI", classifier.Detect("4111111111111112"));
     }
+
+    // ── ReDoS resilience (bounded match timeout) ─────────────────────────────
+
+    [Fact]
+    public void PathologicalPattern_TimesOut_InsteadOfHanging()
+    {
+        // (a+)+$ against a long run of 'a' with a non-matching tail is the
+        // classic catastrophic-backtracking pair (exponential without a
+        // timeout). Detect must finish quickly — the timeout turns the
+        // pathological pattern into a no-match instead of hanging the crawl.
+        var classifier = ContentClassifier.FromJson("""
+            {"categories": [
+                {"name": "Evil", "patterns": [{"name":"redos","regex":"(a+)+$"}]},
+                {"name": "PII", "patterns": [{"name":"email","regex":"\\S+@\\S+\\.\\S+"}]}
+            ]}
+            """);
+        var input = new string('a', 10_000) + "! a@b.com " + new string('a', 10_000) + "!";
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var found = classifier.Detect(input);
+        sw.Stop();
+
+        Assert.DoesNotContain("Evil", found);  // timed out → treated as no-match
+        Assert.Contains("PII", found);         // other categories still evaluated
+        Assert.True(
+            sw.Elapsed < TimeSpan.FromSeconds(30),
+            $"Detect took {sw.Elapsed} — the match timeout did not engage");
+    }
+
+    [Fact]
+    public void PathologicalLuhnPattern_TimesOut_InsteadOfHanging()
+    {
+        var classifier = ContentClassifier.FromJson("""
+            {"categories": [
+                {"name": "PCI", "luhn": true, "patterns": [{"name":"redos","regex":"(\\d+)+$"}]}
+            ]}
+            """);
+        var input = new string('1', 10_000) + "x";
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var found = classifier.Detect(input);
+        sw.Stop();
+
+        Assert.Empty(found);
+        Assert.True(
+            sw.Elapsed < TimeSpan.FromSeconds(30),
+            $"Detect took {sw.Elapsed} — the match timeout did not engage");
+    }
 }

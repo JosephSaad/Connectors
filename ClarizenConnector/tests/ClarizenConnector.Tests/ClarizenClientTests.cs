@@ -170,6 +170,48 @@ public class ClarizenClientTests
         Assert.Contains("WHERE SYSID = 77", lastBody);
     }
 
+    [Theory]
+    [InlineData("77 OR 1=1")]
+    [InlineData("/Task/77 OR 1=1")]
+    [InlineData("..")]
+    [InlineData("77' AND SLEEP(9)--")]
+    public async Task Retrieve_InjectionShapedId_Rejected_NoQuerySent(string badId)
+    {
+        // Regression: the id is string-interpolated into "WHERE SYSID = {id}",
+        // so an unsafe token must be rejected BEFORE any query is built.
+        var queryCalls = 0;
+        var handler = new MockHttpHandler((request, _) =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/authentication/login"))
+                return MockHttpHandler.Json(HttpStatusCode.OK, """{"sessionId": "s"}""");
+            queryCalls++;
+            return MockHttpHandler.Json(HttpStatusCode.OK,
+                """{"entities": [], "paging": {"hasMore": false}}""");
+        });
+        var client = Make(handler);
+        var config = new ClarizenConnector.Config.ObjectConfig
+        {
+            ObjectName = "Task",
+            SelectedFields = new Dictionary<string, string> { ["Name"] = "Title" },
+        };
+
+        var row = await client.RetrieveAsync(config, badId);
+
+        Assert.Null(row);
+        Assert.Equal(0, queryCalls);  // no CZQL query ever left the client
+    }
+
+    [Fact]
+    public void IsSafeSysId_TokenRules()
+    {
+        Assert.True(ClarizenClient.IsSafeSysId("1234567"));
+        Assert.True(ClarizenClient.IsSafeSysId("ab_1.2-3"));
+        Assert.False(ClarizenClient.IsSafeSysId(""));
+        Assert.False(ClarizenClient.IsSafeSysId(".."));
+        Assert.False(ClarizenClient.IsSafeSysId("1 OR 1=1"));
+        Assert.False(ClarizenClient.IsSafeSysId("1;2"));
+    }
+
     [Fact]
     public void IsSessionExpired_Detection()
     {

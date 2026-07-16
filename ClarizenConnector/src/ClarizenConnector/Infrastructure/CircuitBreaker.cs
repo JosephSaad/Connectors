@@ -212,11 +212,21 @@ public sealed class CircuitBreaker
         }
     }
 
-    /// <summary>Record an outcome that must NOT affect the breaker: 4xx/validation
-    /// and honoured 429-with-Retry-After (flow control, not an outage).</summary>
+    /// <summary>Record an outcome that must NOT affect the breaker's failure
+    /// accounting: 4xx/validation and honoured 429-with-Retry-After (flow
+    /// control, not an outage). In HalfOpen the probe slot acquired by
+    /// <see cref="TryAcquire"/> is still released — otherwise ignored probes
+    /// would leak slots until the breaker could never close or re-open.</summary>
     public void OnIgnored()
     {
-        // Intentionally a no-op — documented seam so call sites are explicit.
+        if (!_options.Enabled)
+            return;
+        lock (_lock)
+        {
+            Refresh();
+            if (_state == CircuitState.HalfOpen)
+                _halfOpenInFlight = Math.Max(0, _halfOpenInFlight - 1);
+        }
     }
 
     /// <summary>Test seam: force the breaker Open immediately.</summary>

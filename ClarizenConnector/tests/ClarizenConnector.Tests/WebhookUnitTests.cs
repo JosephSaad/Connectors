@@ -155,6 +155,56 @@ public class WebhookEventParserTests
         Assert.Equal("55", WebhookEventParser.NormalizeLocalId("55"));
         Assert.Equal("9", WebhookEventParser.NormalizeLocalId("/Project/9/"));
     }
+
+    // ── Id sanitization (post-auth injection) ────────────────────────────────
+    // The local id flows into a CZQL "WHERE SYSID = {id}" clause and a Graph
+    // DELETE URL, so anything that is not a plain token must be dropped.
+
+    [Theory]
+    [InlineData("123 OR 1=1")]
+    [InlineData("1; DROP TABLE Tasks")]
+    [InlineData("..")]
+    [InlineData("../")]
+    [InlineData("..%2f..%2fadmin")]
+    [InlineData("1'or'1'='1")]
+    [InlineData("a b")]
+    public void Parse_InjectionShapedIds_Rejected(string badId)
+    {
+        var body = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            entityType = "Task",
+            id = badId,
+            operation = "update",
+        });
+        Assert.Empty(WebhookEventParser.Parse(body));
+    }
+
+    [Theory]
+    [InlineData("123", "123")]
+    [InlineData("/Task/123", "123")]
+    [InlineData("abc_1.2-3", "abc_1.2-3")]
+    public void Parse_PlainTokenIds_Accepted(string rawId, string expectedLocalId)
+    {
+        var body = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            entityType = "Task",
+            id = rawId,
+            operation = "update",
+        });
+        var evt = Assert.Single(WebhookEventParser.Parse(body));
+        Assert.Equal(expectedLocalId, evt.LocalId);
+    }
+
+    [Fact]
+    public void IsValidLocalId_TokenRules()
+    {
+        Assert.True(WebhookEventParser.IsValidLocalId("1234567"));
+        Assert.True(WebhookEventParser.IsValidLocalId("T-9.b_c"));
+        Assert.False(WebhookEventParser.IsValidLocalId(""));
+        Assert.False(WebhookEventParser.IsValidLocalId(".."));
+        Assert.False(WebhookEventParser.IsValidLocalId("1 OR 1=1"));
+        Assert.False(WebhookEventParser.IsValidLocalId("x/y"));
+    }
 }
 
 public class EventDebouncerTests

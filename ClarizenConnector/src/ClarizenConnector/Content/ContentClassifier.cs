@@ -13,6 +13,7 @@
 
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using ClarizenConnector.Infrastructure;
 
 namespace ClarizenConnector.Content;
 
@@ -28,6 +29,14 @@ public sealed class ContentClassifier
     /// <summary>Max characters scanned per item — keeps classification bounded
     /// regardless of attachment size (the extracted text is already capped too).</summary>
     public const int MaxScanChars = 1 * 1024 * 1024;
+
+    /// <summary>Bounded regex match time — config patterns run against
+    /// attacker-influenced text (fields + attachment content), so a
+    /// catastrophic-backtracking pattern must time out, not hang the crawl.
+    /// (Same guard as the Seismic connector's classifier.)</summary>
+    internal static readonly TimeSpan MatchTimeout = TimeSpan.FromSeconds(2);
+
+    private static readonly IAppLogger Logger = Logging.GetLogger("clarizen_connector.classifier");
 
     private static readonly RegexOptions Options =
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled;
@@ -73,7 +82,7 @@ public sealed class ContentClassifier
                             continue;
                         try
                         {
-                            patterns.Add((pName ?? "pattern", new Regex(regex, Options)));
+                            patterns.Add((pName ?? "pattern", new Regex(regex, Options, MatchTimeout)));
                         }
                         catch (ArgumentException)
                         {
@@ -104,7 +113,7 @@ public sealed class ContentClassifier
             {
                 if (!category.Luhn)
                 {
-                    if (pattern.IsMatch(scan))
+                    if (SafeIsMatch(pattern, scan, category.Name))
                     {
                         found.Add(category.Name);
                         break;  // one hit is enough for the category
@@ -113,16 +122,7 @@ public sealed class ContentClassifier
                 }
 
                 // Luhn category: a regex hit is only a candidate; validate it.
-                var matched = false;
-                foreach (Match m in pattern.Matches(scan))
-                {
-                    if (IsLuhnValid(m.Value))
-                    {
-                        matched = true;
-                        break;
-                    }
-                }
-                if (matched)
+                if (HasLuhnValidMatch(pattern, scan, category.Name))
                 {
                     found.Add(category.Name);
                     break;
@@ -130,6 +130,43 @@ public sealed class ContentClassifier
             }
         }
         return found;
+    }
+
+    /// <summary>IsMatch with the timeout treated as "no match" — a pathological
+    /// pattern/input pair logs a warning instead of hanging the crawl.</summary>
+    private static bool SafeIsMatch(Regex pattern, string scan, string categoryName)
+    {
+        try
+        {
+            return pattern.IsMatch(scan);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            Logger.Warning(
+                $"Classifier pattern for category '{categoryName}' timed out after "
+                + $"{MatchTimeout.TotalSeconds:0.#}s — treated as no-match.");
+            return false;
+        }
+    }
+
+    /// <summary>Enumerate Luhn candidates with the same timeout guard.</summary>
+    private static bool HasLuhnValidMatch(Regex pattern, string scan, string categoryName)
+    {
+        try
+        {
+            foreach (Match m in pattern.Matches(scan))
+            {
+                if (IsLuhnValid(m.Value))
+                    return true;
+            }
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            Logger.Warning(
+                $"Classifier pattern for category '{categoryName}' timed out after "
+                + $"{MatchTimeout.TotalSeconds:0.#}s — treated as no-match.");
+        }
+        return false;
     }
 
     /// <summary>Luhn checksum over the digits of <paramref name="candidate"/>

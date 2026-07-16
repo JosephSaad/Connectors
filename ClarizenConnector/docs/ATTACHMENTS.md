@@ -71,6 +71,13 @@ Extraction **never** throws — a parse failure is a skip with a reason, never a
 failed crawl. Extracted text is whitespace-normalised and capped at 512 KiB per
 file to keep the Graph payload bounded.
 
+Decompression is bounded too: `ATTACHMENT_MAX_BYTES` caps the *download*, and a
+separate inflation ceiling (4x the extracted-text cap) bounds what a compressed
+payload may expand to *during* extraction — PDF FlateDecode streams are
+truncated at the ceiling and OOXML text accumulation stops there. A
+decompression bomb (a ~1 MB upload inflating to gigabytes) is truncated, never
+buffered whole.
+
 ## What you see
 
 Every attachment item gets an `AttachmentExtractionStatus` property:

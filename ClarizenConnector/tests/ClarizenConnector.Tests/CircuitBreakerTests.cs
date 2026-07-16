@@ -136,6 +136,49 @@ public class CircuitBreakerTests
     }
 
     [Fact]
+    public void HalfOpen_IgnoredProbes_DoNotLeakSlots()
+    {
+        // Regression: probes ending in an ignored outcome (429/4xx) must
+        // release their half-open slot. Before the fix, HalfOpenTrials+1
+        // ignored probes wedged the breaker OPEN permanently (no probe could
+        // ever be admitted again, so it could never close or re-open).
+        var b = Make(threshold: 1, openSeconds: 10, halfOpenTrials: 2);
+        b.OnFailure();
+        _now = _now.AddSeconds(11);
+        Assert.Equal(CircuitState.HalfOpen, b.State);
+
+        for (var i = 0; i < 3; i++)  // HalfOpenTrials + 1 ignored probes
+        {
+            Assert.True(b.TryAcquire());  // a slot must still be admitted
+            b.OnIgnored();                // 429/4xx probe outcome — releases it
+        }
+
+        // The breaker still admits probes and can close on real successes.
+        Assert.True(b.TryAcquire());
+        b.OnSuccess();
+        Assert.True(b.TryAcquire());
+        b.OnSuccess();
+        Assert.Equal(CircuitState.Closed, b.State);
+        Assert.Equal(1, b.Resets);
+    }
+
+    [Fact]
+    public void HalfOpen_IgnoredThenFailure_StillReopens()
+    {
+        // An ignored probe must not mask a subsequent real failure.
+        var b = Make(threshold: 1, openSeconds: 10, halfOpenTrials: 2);
+        b.OnFailure();
+        _now = _now.AddSeconds(11);
+        Assert.Equal(CircuitState.HalfOpen, b.State);
+
+        Assert.True(b.TryAcquire());
+        b.OnIgnored();
+        Assert.True(b.TryAcquire());
+        b.OnFailure();
+        Assert.Equal(CircuitState.Open, b.State);
+    }
+
+    [Fact]
     public void Disabled_IsPurePassthrough()
     {
         var b = new CircuitBreaker("off", CircuitBreakerOptions.Disabled, () => _now);

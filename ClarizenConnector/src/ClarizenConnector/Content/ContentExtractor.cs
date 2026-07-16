@@ -39,6 +39,16 @@ public sealed class ContentExtractor : IContentExtractor
     /// content payload bounded regardless of file size).</summary>
     public const int MaxExtractedChars = 512 * 1024;
 
+    /// <summary>
+    /// Ceiling on bytes produced when inflating a compressed stream (PDF
+    /// FlateDecode) and on characters accumulated while walking OOXML parts.
+    /// A small multiple of <see cref="MaxExtractedChars"/> — enough that the
+    /// post-extraction char cap is what normally bites, while a decompression
+    /// bomb (a ~1MB upload inflating to GBs) is truncated here instead of
+    /// exhausting memory.
+    /// </summary>
+    internal const int MaxInflatedBytes = 4 * MaxExtractedChars;
+
     public bool CanExtract(string fileName, string? contentType)
     {
         var ext = ExtensionOf(fileName);
@@ -183,6 +193,8 @@ public sealed class ContentExtractor : IContentExtractor
         var sb = new StringBuilder();
         foreach (var slide in slides)
         {
+            if (sb.Length >= MaxInflatedBytes)
+                break;  // accumulation ceiling — later slides cannot contribute
             using var entryStream = slide.Open();
             var text = ReadElementText(entryStream, "t");
             if (text.Length > 0)
@@ -216,6 +228,8 @@ public sealed class ContentExtractor : IContentExtractor
                      e.FullName.StartsWith("xl/worksheets/sheet", StringComparison.OrdinalIgnoreCase)
                      && e.FullName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)))
         {
+            if (sb.Length >= MaxInflatedBytes)
+                break;  // accumulation ceiling — later sheets cannot contribute
             using var entryStream = sheet.Open();
             // Inline strings (t="inlineStr") also serialize as <t>.
             var inline = ReadElementText(entryStream, "t");
@@ -240,6 +254,8 @@ public sealed class ContentExtractor : IContentExtractor
         using var reader = XmlReader.Create(xml, settings);
         while (reader.Read())
         {
+            if (sb.Length >= MaxInflatedBytes)
+                break;  // accumulation ceiling — stop pulling from the (possibly huge) part
             if (reader.NodeType == XmlNodeType.Element
                 && string.Equals(reader.LocalName, localName, StringComparison.Ordinal))
             {
@@ -267,6 +283,8 @@ public sealed class ContentExtractor : IContentExtractor
         var sb = new StringBuilder();
         foreach (var streamBytes in EnumeratePdfStreams(content))
         {
+            if (sb.Length >= MaxInflatedBytes)
+                break;  // accumulation ceiling — enough text gathered already
             var text = DecodeText(streamBytes);
             ExtractPdfTextOperators(text, sb);
         }
@@ -326,9 +344,7 @@ public sealed class ContentExtractor : IContentExtractor
         {
             using var input = new MemoryStream(raw);
             using var zlib = new ZLibStream(input, CompressionMode.Decompress);
-            using var output = new MemoryStream();
-            zlib.CopyTo(output);
-            return output.ToArray();
+            return ReadBounded(zlib, MaxInflatedBytes);
         }
         catch
         {
@@ -337,15 +353,31 @@ public sealed class ContentExtractor : IContentExtractor
             {
                 using var input = new MemoryStream(raw);
                 using var deflate = new DeflateStream(input, CompressionMode.Decompress);
-                using var output = new MemoryStream();
-                deflate.CopyTo(output);
-                return output.ToArray();
+                return ReadBounded(deflate, MaxInflatedBytes);
             }
             catch
             {
                 return null;
             }
         }
+    }
+
+    /// <summary>Read at most <paramref name="maxBytes"/> from a decompression
+    /// stream — never buffers more, so a high-ratio "bomb" stream is truncated
+    /// at the ceiling instead of inflating unbounded into memory.</summary>
+    internal static byte[] ReadBounded(Stream stream, int maxBytes)
+    {
+        using var output = new MemoryStream();
+        var buffer = new byte[64 * 1024];
+        while (output.Length < maxBytes)
+        {
+            var want = (int)Math.Min(buffer.Length, maxBytes - output.Length);
+            var read = stream.Read(buffer, 0, want);
+            if (read <= 0)
+                break;
+            output.Write(buffer, 0, read);
+        }
+        return output.ToArray();
     }
 
     /// <summary>Pull literal strings from PDF text-showing operators in a

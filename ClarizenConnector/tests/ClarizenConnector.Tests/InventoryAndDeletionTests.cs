@@ -358,4 +358,71 @@ public class DeletionSweepTests : IDisposable
         Assert.Equal(0, summary.Deleted);
         Assert.Contains("Task_3", InventoryIds());  // retried on the next sweep
     }
+
+    [Fact]
+    public async Task AbsoluteCap_GuardsSmallInventories_BelowPercentGuardFloor()
+    {
+        // Regression: with an inventory below MinInventoryForSafetyGuard (20)
+        // the percent guard never engaged, so ANY fraction — including 100% —
+        // of a small object type could be mass-deleted. The absolute
+        // DELETION_SYNC_MAX_ITEMS cap must engage at any inventory size.
+        using (var inventory = InventoryFactory(Connector))
+        {
+            inventory.RecordSeen(
+                Enumerable.Range(100, 10).Select(n => ($"Task_{n}", "Task")), DateTime.UtcNow);
+        }
+        using var scope = new EnvScope(("DELETION_SYNC_MAX_ITEMS", "5"));
+
+        var summary = await Pipeline().RunAsync(fullCrawl: true);  // 10 stale > cap of 5
+
+        Assert.Equal(0, summary.Deleted);
+        Assert.Equal(new[] { "Task" }, summary.SweepSkipped);
+        Assert.DoesNotContain(_graph.Sent, s => s.Method == HttpMethod.Delete);
+        Assert.Equal(13, InventoryIds().Count);  // 10 seeded + 3 ingested, untouched
+    }
+
+    [Fact]
+    public async Task NegativeMaxPercent_DoesNotDisableGuard()
+    {
+        // Regression: DELETION_SYNC_MAX_PERCENT=-1 used to silently disable
+        // the percent guard. It must fall back to the default (25) instead.
+        using (var inventory = InventoryFactory(Connector))
+        {
+            inventory.RecordSeen(
+                Enumerable.Range(100, 30).Select(n => ($"Task_{n}", "Task")), DateTime.UtcNow);
+        }
+        using var scope = new EnvScope(("DELETION_SYNC_MAX_PERCENT", "-1"));
+
+        var summary = await Pipeline().RunAsync(fullCrawl: true);  // 30/33 stale ≫ 25%
+
+        Assert.Equal(0, summary.Deleted);
+        Assert.Equal(new[] { "Task" }, summary.SweepSkipped);
+        Assert.DoesNotContain(_graph.Sent, s => s.Method == HttpMethod.Delete);
+    }
+
+    [Fact]
+    public void GuardEnvParsing_ClampsAndDefaults()
+    {
+        using (new EnvScope(("DELETION_SYNC_MAX_PERCENT", "-1")))
+            Assert.Equal(25, IngestPipeline.DeletionSyncMaxPercent());
+        using (new EnvScope(("DELETION_SYNC_MAX_PERCENT", "150")))
+            Assert.Equal(25, IngestPipeline.DeletionSyncMaxPercent());
+        using (new EnvScope(("DELETION_SYNC_MAX_PERCENT", "0")))
+            Assert.Equal(0, IngestPipeline.DeletionSyncMaxPercent());   // explicit disable
+        using (new EnvScope(("DELETION_SYNC_MAX_PERCENT", "40")))
+            Assert.Equal(40, IngestPipeline.DeletionSyncMaxPercent());
+        using (new EnvScope(("DELETION_SYNC_MAX_PERCENT", null)))
+            Assert.Equal(25, IngestPipeline.DeletionSyncMaxPercent());
+
+        using (new EnvScope(("DELETION_SYNC_MAX_ITEMS", "-5")))
+            Assert.Equal(
+                IngestPipeline.DefaultDeletionSyncMaxItems, IngestPipeline.DeletionSyncMaxItems());
+        using (new EnvScope(("DELETION_SYNC_MAX_ITEMS", "0")))
+            Assert.Equal(0, IngestPipeline.DeletionSyncMaxItems());     // explicit disable
+        using (new EnvScope(("DELETION_SYNC_MAX_ITEMS", "42")))
+            Assert.Equal(42, IngestPipeline.DeletionSyncMaxItems());
+        using (new EnvScope(("DELETION_SYNC_MAX_ITEMS", null)))
+            Assert.Equal(
+                IngestPipeline.DefaultDeletionSyncMaxItems, IngestPipeline.DeletionSyncMaxItems());
+    }
 }
