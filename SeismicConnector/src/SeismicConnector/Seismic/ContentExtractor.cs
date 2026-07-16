@@ -61,6 +61,54 @@ internal static class ExtractionLimits
 
     /// <summary>Max characters accumulated into an extractor's text buffer (final cap is MaxContentChars).</summary>
     internal const int MaxAccumulatedChars = 1_000_000;
+
+    /// <summary>
+    /// AGGREGATE ceiling on bytes inflated across ALL streams/parts of a single
+    /// document. The per-stream / per-part caps above bound one unit, but a
+    /// crafted payload can pack many high-ratio units that each emit NO text
+    /// (so the text-buffer cap never trips) — inflating and scanning every one
+    /// stalls the serial crawl worker. Once the cumulative inflated size crosses
+    /// this ceiling the extractor stops opening further units (keeping the text
+    /// gathered so far). Sits above the per-unit caps so a normal multi-part
+    /// document is never truncated.
+    /// </summary>
+    internal const long MaxAggregateInflatedBytes = 64L * 1024 * 1024;
+}
+
+/// <summary>
+/// Read-only stream wrapper that counts the bytes pulled from the inner stream.
+/// Wraps a zip entry's decompression stream so the OOXML extractor can bound the
+/// CUMULATIVE inflated size across all parts (a per-part XmlReader cap alone lets
+/// many no-text parts each inflate to the per-part ceiling).
+/// </summary>
+internal sealed class CountingReadStream : Stream
+{
+    private readonly Stream _inner;
+
+    public CountingReadStream(Stream inner) => _inner = inner;
+
+    public long BytesRead { get; private set; }
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        var n = _inner.Read(buffer, offset, count);
+        BytesRead += n;
+        return n;
+    }
+
+    public override bool CanRead => true;
+    public override bool CanSeek => false;
+    public override bool CanWrite => false;
+    public override long Length => throw new NotSupportedException();
+    public override long Position
+    {
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+    public override void Flush() { }
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override void SetLength(long value) => throw new NotSupportedException();
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
 
 /// <summary>Plain text and text-adjacent formats (txt, md, csv, json, html).</summary>
@@ -120,6 +168,7 @@ public sealed class OpenXmlTextExtractor : IContentExtractor
         {
             using var zip = new ZipArchive(new MemoryStream(payload), ZipArchiveMode.Read);
             var sb = new StringBuilder();
+            var aggregateInflated = 0L;
             foreach (var entry in zip.Entries
                 .Where(IsTextPart)
                 .OrderBy(e => e.FullName, StringComparer.Ordinal))
@@ -127,16 +176,24 @@ public sealed class OpenXmlTextExtractor : IContentExtractor
                 // Decompression-bomb guard: stop once enough text is in hand.
                 if (sb.Length >= ExtractionLimits.MaxAccumulatedChars)
                     break;
+                // Aggregate-bomb guard: stop once cumulative inflation across all
+                // parts crosses the ceiling — bounds a payload packed with many
+                // no-text parts that never trip the text-buffer cap.
+                if (aggregateInflated >= ExtractionLimits.MaxAggregateInflatedBytes)
+                    break;
+                // Count decompressed bytes even if the part aborts mid-read, so
+                // the aggregate reflects the work actually done.
+                using var counting = new CountingReadStream(entry.Open());
                 try
                 {
-                    using var stream = entry.Open();
-                    AppendTextNodes(stream, sb);
+                    AppendTextNodes(counting, sb, aggregateInflated);
                 }
                 catch (XmlException)
                 {
                     // Oversized (MaxXmlCharsPerPart tripped) or malformed part —
                     // keep whatever text was accumulated before the abort.
                 }
+                aggregateInflated += counting.BytesRead;
             }
             return PlainTextExtractor.NormalizeWhitespace(sb.ToString());
         }
@@ -156,7 +213,7 @@ public sealed class OpenXmlTextExtractor : IContentExtractor
         || (entry.FullName.StartsWith("xl/worksheets/sheet", StringComparison.Ordinal)
             && entry.FullName.EndsWith(".xml", StringComparison.Ordinal));
 
-    private static void AppendTextNodes(Stream stream, StringBuilder sb)
+    private static void AppendTextNodes(CountingReadStream stream, StringBuilder sb, long aggregateBefore)
     {
         var settings = new XmlReaderSettings
         {
@@ -172,6 +229,11 @@ public sealed class OpenXmlTextExtractor : IContentExtractor
         {
             if (sb.Length >= ExtractionLimits.MaxAccumulatedChars)
                 return;  // enough text extracted — stop inflating this part
+            // Aggregate-bomb guard mid-part: stop inflating this no-text part once
+            // cumulative inflation crosses the ceiling, so one giant part can't
+            // blow the aggregate on its own.
+            if (aggregateBefore + stream.BytesRead >= ExtractionLimits.MaxAggregateInflatedBytes)
+                return;
             if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "t")
             {
                 inTextNode = true;
@@ -192,6 +254,18 @@ public sealed class OpenXmlTextExtractor : IContentExtractor
 /// <summary>Best-effort PDF text-layer extraction (FlateDecode + Tj/TJ operators).</summary>
 public sealed class PdfTextExtractor : IContentExtractor
 {
+    /// <summary>Default per-operator-scan regex timeout (test seam mirrors ContentClassifier).</summary>
+    private static readonly TimeSpan DefaultMatchTimeout = TimeSpan.FromSeconds(2);
+
+    private readonly TimeSpan _matchTimeout;
+
+    public PdfTextExtractor() : this(null) { }
+
+    /// <param name="matchTimeout">Per-scan regex match timeout (test seam; default 2s). Bounds a
+    /// hostile show-text operator stream whose regex scan would otherwise run for minutes.</param>
+    public PdfTextExtractor(TimeSpan? matchTimeout) =>
+        _matchTimeout = matchTimeout ?? DefaultMatchTimeout;
+
     public bool CanExtract(string format) => PlainTextExtractor.Normalize(format) == "pdf";
 
     public string Extract(byte[] payload)
@@ -199,14 +273,22 @@ public sealed class PdfTextExtractor : IContentExtractor
         try
         {
             var sb = new StringBuilder();
+            var aggregateInflated = 0L;
             foreach (var stream in EnumerateStreams(payload))
             {
                 // Decompression-bomb guard: stop once enough text is in hand.
                 if (sb.Length >= ExtractionLimits.MaxAccumulatedChars)
                     break;
+                // Aggregate-bomb guard: stop once cumulative inflation across all
+                // streams crosses the ceiling — bounds a payload packed with many
+                // high-ratio streams that emit no text (so the buffer cap never
+                // trips) yet each inflate + regex-scan up to the per-stream cap.
+                if (aggregateInflated >= ExtractionLimits.MaxAggregateInflatedBytes)
+                    break;
                 var inflated = TryInflate(stream) ?? stream;
+                aggregateInflated += inflated.Length;
                 var text = Encoding.Latin1.GetString(inflated);
-                ExtractShowTextOperators(text, sb);
+                ExtractShowTextOperators(text, sb, _matchTimeout);
             }
             return PlainTextExtractor.NormalizeWhitespace(sb.ToString());
         }
@@ -299,33 +381,48 @@ public sealed class PdfTextExtractor : IContentExtractor
     /// octal/symbol escapes and line continuations) and hex <c>&lt;...&gt;</c>
     /// strings, including UTF-16BE (BOM FE FF) payloads.
     /// </summary>
-    internal static void ExtractShowTextOperators(string content, StringBuilder sb)
+    internal static void ExtractShowTextOperators(string content, StringBuilder sb, TimeSpan? matchTimeout = null)
     {
-        // (text) Tj | (text) ' | aw ac (text) "  — string sits right before the operator.
-        foreach (Match match in Regex.Matches(
-                     content, @"\(((?:[^()\\]|\\.)*)\)\s*(?:Tj|'|"")", RegexOptions.Singleline))
+        // A hostile stream (e.g. thousands of unterminated '[' before a huge body)
+        // drives these scans quadratic — minutes on the SERIAL crawl worker. Bound
+        // every scan with a match timeout; on timeout keep the text gathered so far
+        // and move on (extraction is best-effort). InfiniteMatchTimeout preserves the
+        // old unbounded behaviour when a caller passes null (the static test seam).
+        var timeout = matchTimeout ?? Regex.InfiniteMatchTimeout;
+        const RegexOptions opts = RegexOptions.Singleline;
+        try
         {
-            sb.Append(DecodeLiteralString(match.Groups[1].Value)).Append(' ');
-        }
-        // <48656C6C6F> Tj — hex-string form of the same operators.
-        foreach (Match match in Regex.Matches(
-                     content, @"<([0-9A-Fa-f\s]*)>\s*(?:Tj|'|"")", RegexOptions.Singleline))
-        {
-            sb.Append(DecodeHexString(match.Groups[1].Value)).Append(' ');
-        }
-        // [ (a) -120 (b) <686921> ] TJ — mixed literal/hex elements.
-        foreach (Match match in Regex.Matches(content, @"\[(.*?)\]\s*TJ", RegexOptions.Singleline))
-        {
-            foreach (Match inner in Regex.Matches(
-                         match.Groups[1].Value,
-                         @"\(((?:[^()\\]|\\.)*)\)|<([0-9A-Fa-f\s]*)>",
-                         RegexOptions.Singleline))
+            // (text) Tj | (text) ' | aw ac (text) "  — string sits right before the operator.
+            foreach (Match match in Regex.Matches(
+                         content, @"\(((?:[^()\\]|\\.)*)\)\s*(?:Tj|'|"")", opts, timeout))
             {
-                sb.Append(inner.Groups[1].Success
-                    ? DecodeLiteralString(inner.Groups[1].Value)
-                    : DecodeHexString(inner.Groups[2].Value));
+                sb.Append(DecodeLiteralString(match.Groups[1].Value)).Append(' ');
             }
-            sb.Append(' ');
+            // <48656C6C6F> Tj — hex-string form of the same operators.
+            foreach (Match match in Regex.Matches(
+                         content, @"<([0-9A-Fa-f\s]*)>\s*(?:Tj|'|"")", opts, timeout))
+            {
+                sb.Append(DecodeHexString(match.Groups[1].Value)).Append(' ');
+            }
+            // [ (a) -120 (b) <686921> ] TJ — mixed literal/hex elements.
+            foreach (Match match in Regex.Matches(content, @"\[(.*?)\]\s*TJ", opts, timeout))
+            {
+                foreach (Match inner in Regex.Matches(
+                             match.Groups[1].Value,
+                             @"\(((?:[^()\\]|\\.)*)\)|<([0-9A-Fa-f\s]*)>",
+                             opts, timeout))
+                {
+                    sb.Append(inner.Groups[1].Success
+                        ? DecodeLiteralString(inner.Groups[1].Value)
+                        : DecodeHexString(inner.Groups[2].Value));
+                }
+                sb.Append(' ');
+            }
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // Pathological stream — abandon operator scanning for it (memory stays
+            // bounded, the worker is not stalled); text already appended is kept.
         }
     }
 

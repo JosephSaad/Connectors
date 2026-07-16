@@ -553,6 +553,20 @@ public sealed class IngestPipeline
                     Logger.Info($"Library '{teamsite.Name}': no mappable principals; skipped (fallback=skip).");
                     continue;
                 }
+                // Transient identity gap (LOW-1): the teamsite HAS principals but
+                // none currently maps, so a fallback=tenant everyone-entry here is
+                // not a real resolution. Never (re-)PUT the library item with the
+                // everyone-ACL during an identity gap — a later crawl re-resolves.
+                // (A teamsite with genuinely no principals is NOT Unresolved and
+                // still follows the documented tenant fallback.)
+                if (acl.Unresolved)
+                {
+                    Stats.AddAclSkipped();
+                    Logger.Info(
+                        $"Library '{teamsite.Name}': principals unresolved (stale identity store) — "
+                        + "not granting everyone; leaving it unchanged this crawl.");
+                    continue;
+                }
                 batchItems.Add(($"lib-{teamsite.Id}", new JsonObject
                 {
                     ["id"] = $"lib-{teamsite.Id}",
@@ -755,8 +769,36 @@ public sealed class IngestPipeline
         // 5. Resolve ACL (item permissions win; empty item permissions inherit
         // the teamsite's — everyone with access to the library sees its content).
         var acl = _aclMapper.Resolve(content.Permissions, teamsite?.Permissions);
+
+        // Transient identity gap FIRST — before the genuine-skip branch below.
+        // The source HAS principals but none currently maps (stale/partial
+        // identity store), so any fallback here is NOT a real resolution:
+        //   * fallback=tenant → the entries are the tenant-everyone fallback;
+        //     PUTting/re-ACLing to it would widen a restricted item tenant-wide
+        //     (LOW-1: this must hold for a brand-NEW or LIBRARY item too, not
+        //     only an already-ingested one);
+        //   * fallback=skip → the genuine-skip branch would WITHDRAW an
+        //     already-ingested item, then re-ingest it when identity recovers
+        //     (LOW-2: needless withdraw/re-ingest churn).
+        // Either way: leave a tracked item exactly as-is and do NOT ingest a new
+        // one. A later crawl re-resolves once the identity store recovers.
+        // (Genuinely-no-principals content is NOT Unresolved — it falls through
+        // to the documented fallback policy below.)
+        if (acl.Unresolved)
+        {
+            Stats.AddAclSkipped();
+            Logger.Warning(
+                $"Item {content.Id} ('{content.Name}'): principals unresolved (stale identity store) — "
+                + "leaving it unchanged (no widening, no withdrawal; the source's principals are not "
+                + "currently mappable to Entra). A later crawl re-resolves once identity recovers.");
+            if (tracked is { Status: "ingested" })
+                _store.UpsertTrackedItem(tracked with { LastSeenUtc = nowUtc });
+            return null;
+        }
+
         if (acl.Skipped)
         {
+            // Genuinely no mappable principals AND fallback=skip: not indexable.
             Stats.AddAclSkipped();
             Logger.Warning(
                 $"Item {content.Id} ('{content.Name}'): no Seismic principal mapped to Entra; "
@@ -767,23 +809,6 @@ public sealed class IngestPipeline
                     "no principal could be mapped to Entra ID", ct).ConfigureAwait(false);
                 _store.RemoveTrackedItem(content.Id);
             }
-            return null;
-        }
-
-        // Never widen on a transient identity gap: the source HAS principals
-        // but none currently maps (stale identity store), so any entries above
-        // are the tenant-everyone fallback — NOT a real resolution. Replacing a
-        // previously applied (restricted) ACL with it would re-ACL the item
-        // tenant-wide. Keep the indexed item and its ACL untouched; a later
-        // crawl re-resolves once the identity store recovers.
-        if (acl.Unresolved && tracked is { Status: "ingested" })
-        {
-            Stats.AddAclSkipped();
-            Logger.Warning(
-                $"Item {content.Id} ('{content.Name}'): principals unresolved (stale identity store) — "
-                + "leaving the indexed item and its ACL unchanged (no widening; SEISMIC_FALLBACK_ACL=tenant "
-                + "is not applied over a previously applied ACL).");
-            _store.UpsertTrackedItem(tracked with { LastSeenUtc = nowUtc });
             return null;
         }
 

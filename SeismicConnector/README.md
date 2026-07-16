@@ -106,7 +106,10 @@ always captures everything.
    downloads) — so a compliance flag applied *without* bumping `modifiedAt`
    is withdrawn on the next incremental, not deferred to the next full crawl.
 3. **Webhook events** (`SEISMIC_WEBHOOK_PORT` > 0): near-real-time targeted
-   ingest/withdrawal between cycles; polling remains the safety net.
+   ingest/withdrawal between cycles; polling remains the safety net. The
+   HMAC-authenticated receiver caps the in-memory event queue (drop-oldest at
+   10,000 undrained events), so a signed burst can't grow memory unbounded
+   until the ~15 s drain — any shed event is healed by the next crawl.
 4. Chunks are checkpointed — a crash or graceful stop resumes at the first
    incomplete chunk (`logs/checkpoint_{CONNECTOR_ID}.json`).
 
@@ -128,9 +131,15 @@ continuations) and hex strings, including UTF-16BE payloads. Scanned PDFs and
 exotic encodings fall back to metadata-only indexing (name + description).
 Payloads above `SEISMIC_MAX_EXTRACT_MB` (default 10 MB) are metadata-only.
 Decompression is bounded **during** extraction (32 MB per inflated
-PDF/OOXML stream, 1M chars of accumulated text), so a high-ratio
-decompression bomb inside an allowed-size download is truncated instead of
-inflating unboundedly into memory.
+PDF/OOXML stream, a 64 MB *aggregate* ceiling across all streams/parts of one
+document, and 1M chars of accumulated text), so a high-ratio decompression
+bomb inside an allowed-size download is truncated instead of inflating
+unboundedly into memory — including a payload packed with many high-ratio
+units that each emit no text (the aggregate ceiling stops it once cumulative
+inflation crosses 64 MB). The PDF show-text operator scans additionally carry
+a per-scan regex match timeout (default 2 s), so a hostile operator stream
+cannot stall the serial crawl worker; on timeout the text gathered so far is
+kept and extraction moves on (best-effort).
 Per-format success/attempt counters are exported on `/metrics`
 (`docs/OBSERVABILITY.md`). Swap in a richer library by adding an extractor to
 `CompositeExtractor`.
@@ -201,11 +210,17 @@ as a refinable `distribution` property, not as ACLs. When nothing maps,
 `SEISMIC_FALLBACK_ACL` decides: `skip` (default, compliance-safe) or
 `tenant`. The `tenant` fallback only ever applies to content that is
 **genuinely without principals**: when the source *has* principals but none
-currently maps (a stale/partial identity store), a previously indexed item's
-ACL and content are left untouched — the connector never widens an existing
-ACL to tenant-everyone on a transient identity gap, neither on re-ACL nor on
-a version-change re-ingest. Run `identity-dry-run` to audit the mapping
-before deploying.
+currently maps (a stale/partial identity store), the item is **left unchanged
+for that crawl** and re-resolved once identity recovers. This holds
+regardless of the item's state — a previously indexed item keeps its ACL and
+content, and a **brand-new or Library item is not ingested with the
+everyone-ACL** (it is not "genuinely public", so the tenant fallback must not
+stand in for a real resolution). Under `skip` the same guard means an
+already-ingested item that transiently goes unresolved is **left in place**
+rather than withdrawn-and-re-ingested when identity recovers (no churn). The
+connector never widens an existing ACL to tenant-everyone on a transient
+identity gap, neither on re-ACL nor on a version-change re-ingest. Run
+`identity-dry-run` to audit the mapping before deploying.
 
 ## Running as a Windows service
 

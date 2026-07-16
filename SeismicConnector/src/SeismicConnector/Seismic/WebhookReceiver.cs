@@ -32,6 +32,16 @@ public sealed class WebhookReceiver : IDisposable
     /// <summary>Hard cap on an accepted request body (defends against unbounded reads).</summary>
     internal const int MaxBodyBytes = 1 * 1024 * 1024;
 
+    /// <summary>
+    /// Cap on queued (undrained) events. A signed burst can enqueue faster than
+    /// the ~15s drain cadence; without a bound the queue grows in memory until the
+    /// next drain. Past this depth the OLDEST queued events are dropped (drop-
+    /// oldest back-pressure) — dedup already happens at drain, and any dropped
+    /// event is always healed by the next reconciling crawl (polling is the
+    /// safety net), so shedding load here never loses data permanently.
+    /// </summary>
+    internal const int MaxQueuedEvents = 10_000;
+
     private readonly HttpListener _listener;
     private readonly SignatureValidator _validator;
     private readonly Thread _thread;
@@ -217,10 +227,31 @@ public sealed class WebhookReceiver : IDisposable
 
         var body = (request.ContentEncoding ?? Encoding.UTF8).GetString(raw);
         var events = ParseBody(body);
+        var dropped = 0;
         foreach (var evt in events)
-            _events.Enqueue(evt);
+            dropped += Enqueue(evt);
+        if (dropped > 0)
+            Logger.Warning(
+                $"Webhook receiver: queue at capacity ({MaxQueuedEvents}); dropped {dropped} oldest "
+                + "event(s) under load — the next crawl reconciles them.");
         Logger.Info($"Webhook receiver: queued {events.Count} event(s)");
         Respond(context, 202, "Accepted");
+    }
+
+    /// <summary>Enqueue one event, bounding the queue to <see cref="MaxQueuedEvents"/>
+    /// (drop-oldest). Returns how many events were shed.</summary>
+    private int Enqueue(ContentEvent evt) => EnqueueCapped(_events, evt, MaxQueuedEvents);
+
+    /// <summary>Append <paramref name="evt"/> then trim the queue to <paramref name="cap"/> by
+    /// dropping the oldest entries. Returns the number dropped. (Static so the cap is unit-testable
+    /// without binding an HttpListener.)</summary>
+    internal static int EnqueueCapped(ConcurrentQueue<ContentEvent> queue, ContentEvent evt, int cap)
+    {
+        queue.Enqueue(evt);
+        var dropped = 0;
+        while (queue.Count > cap && queue.TryDequeue(out _))
+            dropped++;
+        return dropped;
     }
 
     /// <summary>Read the request body into memory, aborting past <see cref="MaxBodyBytes"/>
