@@ -59,6 +59,23 @@ connector:
 The same applies at library scope: marking a whole teamsite restricted
 withdraws everything ever ingested from it.
 
+**Incremental crawls withdraw late flags too.** An incremental only re-lists
+content with `modifiedAt` ≥ the last sync, so a flag applied *without*
+bumping `modifiedAt` would never be re-listed. Every incremental therefore
+ends with a **late-exclusion pass**: tracked `ingested` items the crawl did
+not visit are re-checked against the current rules (a metadata-only re-list
+per affected teamsite — nothing is downloaded) and withdrawn if now excluded.
+Items missing from the source listing are deliberately left to the full
+crawl's not-in-source reaper (an incremental sees a partial world and must
+not over-withdraw).
+
+**The single-item path enforces teamsite rules and fails closed.** Webhook
+events and `ingest-item` resolve the item's teamsite and run
+`IsTeamsiteExcluded` before anything is downloaded: a restricted teamsite
+(by id, name, or Seismic `isRestricted`) blocks the ingest and withdraws a
+previously ingested copy. If the teamsite cannot be resolved at all, the
+ingest is refused (fail closed) rather than indexed with unverifiable rules.
+
 ## Reconciliation report (auditable skip list)
 
 Each crawl writes `reconciliation_{CONNECTOR_ID}_{timestamp}.jsonl` into the

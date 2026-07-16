@@ -82,6 +82,14 @@ public sealed class ClassificationRules
     /// <summary>Category name attached to MNE-adjacent hits.</summary>
     public const string MneAdjacentCategory = "MNE.Adjacent";
 
+    /// <summary>
+    /// Category attached when a detection pattern TIMED OUT instead of
+    /// completing — the scan is incomplete, so the item fails safe: the
+    /// category escalates the label to Restricted rather than letting a
+    /// pathological document evade PII/secret detection with a lower label.
+    /// </summary>
+    public const string ClassificationIncompleteCategory = "Classification.Incomplete";
+
     /// <summary>Load rules from <paramref name="path"/>, falling back to the built-in default set.</summary>
     public static ClassificationRules LoadFile(string path)
     {
@@ -122,15 +130,18 @@ public readonly record struct ClassificationResult(
 /// </summary>
 public sealed class ContentClassifier
 {
-    private static readonly TimeSpan MatchTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan DefaultMatchTimeout = TimeSpan.FromSeconds(2);
 
+    private readonly TimeSpan _matchTimeout;
     private readonly List<(string Category, Regex Regex)> _patterns = new();
     private readonly (string Category, Regex Regex)? _luhn;
     private readonly List<string> _mneKeywords;
     private readonly SensitivityLabel _defaultLabel;
 
-    public ContentClassifier(ClassificationRules rules)
+    /// <param name="matchTimeout">Per-pattern regex match timeout override (test seam; default 2s).</param>
+    public ContentClassifier(ClassificationRules rules, TimeSpan? matchTimeout = null)
     {
+        _matchTimeout = matchTimeout ?? DefaultMatchTimeout;
         foreach (var pattern in rules.Patterns)
         {
             if (string.IsNullOrWhiteSpace(pattern.Category) || string.IsNullOrWhiteSpace(pattern.Regex))
@@ -154,11 +165,11 @@ public sealed class ContentClassifier
         _defaultLabel = ParseLabel(rules.DefaultLabel, SensitivityLabel.Internal);
     }
 
-    private static bool TryCompile(string pattern, out Regex? regex)
+    private bool TryCompile(string pattern, out Regex? regex)
     {
         try
         {
-            regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, MatchTimeout);
+            regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, _matchTimeout);
             return true;
         }
         catch (ArgumentException)
@@ -177,8 +188,12 @@ public sealed class ContentClassifier
     /// <summary>
     /// Detect sensitive categories in <paramref name="text"/>. Returns the
     /// distinct, stably ordered category list (including <c>MNE.Adjacent</c>
-    /// when a keyword hits). Never throws — a regex timeout is treated as "no
-    /// match" for that pattern.
+    /// when a keyword hits). Never throws — but a regex timeout FAILS SAFE: a
+    /// pattern that cannot complete attaches
+    /// <see cref="ClassificationRules.ClassificationIncompleteCategory"/>, which
+    /// escalates the label, instead of being silently treated as "no match"
+    /// (a crafted document must not evade PII/secret detection by tripping
+    /// the timeout).
     /// </summary>
     public IReadOnlyList<string> Detect(string? text)
     {
@@ -186,18 +201,39 @@ public sealed class ContentClassifier
             return Array.Empty<string>();
 
         var categories = new SortedSet<string>(StringComparer.Ordinal);
+        var incomplete = false;
 
         foreach (var (category, regex) in _patterns)
         {
-            if (SafeIsMatch(regex, text))
-                categories.Add(category);
+            switch (SafeIsMatch(regex, text))
+            {
+                case true:
+                    categories.Add(category);
+                    break;
+                case null:
+                    incomplete = true;  // timed out — scan incomplete
+                    break;
+            }
         }
 
-        if (_luhn is { } luhn && HasLuhnValidNumber(luhn.Regex, text))
-            categories.Add(luhn.Category);
+        if (_luhn is { } luhn)
+        {
+            switch (HasLuhnValidNumber(luhn.Regex, text))
+            {
+                case true:
+                    categories.Add(luhn.Category);
+                    break;
+                case null:
+                    incomplete = true;
+                    break;
+            }
+        }
 
         if (IsMneAdjacent(text))
             categories.Add(ClassificationRules.MneAdjacentCategory);
+
+        if (incomplete)
+            categories.Add(ClassificationRules.ClassificationIncompleteCategory);
 
         return categories.ToList();
     }
@@ -215,7 +251,8 @@ public sealed class ContentClassifier
         return false;
     }
 
-    private static bool SafeIsMatch(Regex regex, string text)
+    /// <summary>True/false = match result; null = the pattern TIMED OUT (scan incomplete).</summary>
+    private static bool? SafeIsMatch(Regex regex, string text)
     {
         try
         {
@@ -223,11 +260,12 @@ public sealed class ContentClassifier
         }
         catch (RegexMatchTimeoutException)
         {
-            return false;
+            return null;
         }
     }
 
-    private static bool HasLuhnValidNumber(Regex candidateRegex, string text)
+    /// <summary>True/false = detection result; null = the candidate scan TIMED OUT (incomplete).</summary>
+    private static bool? HasLuhnValidNumber(Regex candidateRegex, string text)
     {
         try
         {
@@ -240,6 +278,7 @@ public sealed class ContentClassifier
         }
         catch (RegexMatchTimeoutException)
         {
+            return null;
         }
         return false;
     }

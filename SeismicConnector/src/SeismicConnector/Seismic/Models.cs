@@ -21,6 +21,14 @@ public sealed class SeismicTeamsite
 
     [JsonPropertyName("isRestricted")]
     public bool IsRestricted { get; init; }
+
+    /// <summary>
+    /// Library-level permissions from the teamsites listing. Items with no
+    /// item-level permissions inherit these (everyone with access to the
+    /// library sees its content) — see AclMapper.Resolve.
+    /// </summary>
+    [JsonPropertyName("permissions")]
+    public List<SeismicPermission> Permissions { get; init; } = new();
 }
 
 /// <summary>A permission entry on a teamsite or content item.</summary>

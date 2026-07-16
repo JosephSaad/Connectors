@@ -67,13 +67,16 @@ public sealed class PipelineHarness : IDisposable
         Pipeline = new IngestPipeline(Config, Seismic, Graph, Store);
     }
 
-    public void AddTeamsite(string id, string name = "", bool restricted = false)
+    public void AddTeamsite(
+        string id, string name = "", bool restricted = false,
+        List<SeismicPermission>? permissions = null)
     {
         Seismic.Teamsites.Add(new SeismicTeamsite
         {
             Id = id,
             Name = name.Length > 0 ? name : $"Teamsite {id}",
             IsRestricted = restricted,
+            Permissions = permissions ?? new List<SeismicPermission>(),
         });
         Seismic.ContentsByTeamsite.TryAdd(id, new List<SeismicContent>());
     }

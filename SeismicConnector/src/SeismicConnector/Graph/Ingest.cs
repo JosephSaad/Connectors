@@ -12,6 +12,10 @@
 //   ContentItem      — per teamsite, current published version only.
 //   Withdrawal pass  — (full crawls) expired items, items no longer present
 //                      in Seismic, and items whose exclusion state flipped.
+//   Late-exclusion   — (incremental crawls) tracked items the incremental did
+//                      NOT re-list are re-checked against the current
+//                      exclusion rules (metadata-only) and withdrawn if a
+//                      compliance flag landed without a modifiedAt bump.
 //
 // Checkpoints: SyncState.WriteCheckpoint(connectorId, sinceIso, objectKey,
 // chunkIndex) after every chunk; a crash resumes at the first incomplete
@@ -438,6 +442,21 @@ public sealed class IngestPipeline
             // Expiry withdrawal is cheap and safe on every crawl.
             Phase = "expiry pass";
             await WithdrawExpiredAsync(ct).ConfigureAwait(false);
+
+            // Late-exclusion pass for incrementals: an incremental only
+            // re-lists modifiedAt >= lastSync, so a compliance flag applied
+            // WITHOUT bumping modifiedAt is never re-listed here and its
+            // withdrawal would otherwise wait for the next FULL crawl. Re-check
+            // the tracked inventory this crawl did NOT visit against the
+            // current exclusion rules and withdraw newly-excluded items.
+            if (!fullCrawl)
+            {
+                Phase = "late-exclusion pass";
+                using (Tracing.StartActivity("crawl.late_exclusion"))
+                {
+                    await LateExclusionPassAsync(crawlStartUtc, teamsitesById, ct).ConfigureAwait(false);
+                }
+            }
         }
 
         if (stoppedEarly)
@@ -525,7 +544,9 @@ public sealed class IngestPipeline
             var batchItems = new List<(string ItemId, JsonNode Item)>();
             foreach (var teamsite in chunk)
             {
-                var acl = _aclMapper.Resolve(Array.Empty<SeismicPermission>(), null);
+                // Library items carry no item-level permissions — they take the
+                // teamsite's own permissions (empty → fallback policy applies).
+                var acl = _aclMapper.Resolve(Array.Empty<SeismicPermission>(), teamsite.Permissions);
                 if (acl.Skipped)
                 {
                     Stats.AddAclSkipped();
@@ -718,7 +739,7 @@ public sealed class IngestPipeline
             // fingerprint changed, refresh the ACL WITHOUT re-sending content.
             if (_config.Seismic.PermissionReacl)
             {
-                await ReAclIfDriftedAsync(content, tracked, nowUtc, repair: true, ct).ConfigureAwait(false);
+                await ReAclIfDriftedAsync(content, teamsite, tracked, nowUtc, repair: true, ct).ConfigureAwait(false);
             }
             else
             {
@@ -731,8 +752,9 @@ public sealed class IngestPipeline
             return null;
         }
 
-        // 5. Resolve ACL.
-        var acl = _aclMapper.Resolve(content.Permissions);
+        // 5. Resolve ACL (item permissions win; empty item permissions inherit
+        // the teamsite's — everyone with access to the library sees its content).
+        var acl = _aclMapper.Resolve(content.Permissions, teamsite?.Permissions);
         if (acl.Skipped)
         {
             Stats.AddAclSkipped();
@@ -745,6 +767,23 @@ public sealed class IngestPipeline
                     "no principal could be mapped to Entra ID", ct).ConfigureAwait(false);
                 _store.RemoveTrackedItem(content.Id);
             }
+            return null;
+        }
+
+        // Never widen on a transient identity gap: the source HAS principals
+        // but none currently maps (stale identity store), so any entries above
+        // are the tenant-everyone fallback — NOT a real resolution. Replacing a
+        // previously applied (restricted) ACL with it would re-ACL the item
+        // tenant-wide. Keep the indexed item and its ACL untouched; a later
+        // crawl re-resolves once the identity store recovers.
+        if (acl.Unresolved && tracked is { Status: "ingested" })
+        {
+            Stats.AddAclSkipped();
+            Logger.Warning(
+                $"Item {content.Id} ('{content.Name}'): principals unresolved (stale identity store) — "
+                + "leaving the indexed item and its ACL unchanged (no widening; SEISMIC_FALLBACK_ACL=tenant "
+                + "is not applied over a previously applied ACL).");
+            _store.UpsertTrackedItem(tracked with { LastSeenUtc = nowUtc });
             return null;
         }
 
@@ -967,6 +1006,73 @@ public sealed class IngestPipeline
         }
     }
 
+    /// <summary>
+    /// Incremental-crawl backstop for late exclusion flags (No-MNE): re-check
+    /// every tracked INGESTED item the incremental did not re-list (its
+    /// last-seen predates this crawl) against the current exclusion rules,
+    /// re-listing each affected teamsite metadata-only (no downloads), and
+    /// withdraw items that are now excluded. Items missing from the source
+    /// listing are left to the full crawl's not-in-source reaper (an
+    /// incremental sees a partial world and must not over-withdraw).
+    /// </summary>
+    internal async Task LateExclusionPassAsync(
+        DateTime crawlStartUtc,
+        IReadOnlyDictionary<string, SeismicTeamsite> teamsitesById,
+        CancellationToken ct)
+    {
+        var staleByTeamsite = _store.GetAllTrackedItems()
+            .Where(t => t.Status == "ingested" && t.LastSeenUtc < crawlStartUtc)
+            .GroupBy(t => t.TeamsiteId, StringComparer.Ordinal);
+
+        foreach (var group in staleByTeamsite)
+        {
+            if (ShouldPause)
+                return;
+            // Teamsites not visible to this crawl (HA: owned by another node)
+            // are out of scope; wholly-excluded teamsites were already handled
+            // by HandleExcludedTeamsiteAsync earlier in this crawl.
+            if (!teamsitesById.TryGetValue(group.Key, out var teamsite)
+                || _filter.IsTeamsiteExcluded(teamsite))
+            {
+                continue;
+            }
+
+            List<SeismicContent> contents;
+            try
+            {
+                contents = await _seismic.GetContentsAsync(teamsite.Id, null, ct).ConfigureAwait(false);
+            }
+            catch (CircuitOpenException)
+            {
+                _degradedPause = true;
+                return;
+            }
+            catch (SeismicApiError ex)
+            {
+                Logger.Warning(
+                    $"Late-exclusion pass: listing teamsite '{teamsite.Name}' failed ({ex.Message}) — "
+                    + "its items will be re-checked on the next crawl.");
+                continue;
+            }
+            var contentById = contents.ToDictionary(c => c.Id, StringComparer.Ordinal);
+
+            foreach (var tracked in group)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (!contentById.TryGetValue(tracked.ItemId, out var content))
+                    continue;  // not listed — the full crawl's reaper owns that case
+                var decision = _filter.Evaluate(content, teamsite);
+                if (!decision.Excluded)
+                    continue;
+                Stats.AddExcluded();
+                Report.RecordExcluded(content.Id, content.TeamsiteId, decision.Rule!, decision.Reason!);
+                await WithdrawItemAsync(content.Id, decision.Rule!,
+                    $"late exclusion (incremental): {decision.Reason}", ct).ConfigureAwait(false);
+                _store.UpsertTrackedItem(tracked with { Status = "excluded", LastSeenUtc = DateTime.UtcNow });
+            }
+        }
+    }
+
     private async Task WithdrawExpiredAsync(CancellationToken ct)
     {
         foreach (var tracked in _store.GetExpiredItems(DateTime.UtcNow))
@@ -1027,9 +1133,11 @@ public sealed class IngestPipeline
     /// <summary>
     /// Resolve <paramref name="content"/>'s current permissions and compare the
     /// ACL fingerprint against the tracked item's. Compliance-safe: when the
-    /// permissions cannot be resolved (the fallback would skip the item), the
-    /// existing ACL is LEFT UNCHANGED — a re-ACL never widens access on a
-    /// resolution failure. Otherwise:
+    /// permissions cannot be resolved — the fallback would skip the item, OR
+    /// the source has principals but none currently maps (a stale identity
+    /// store; with SEISMIC_FALLBACK_ACL=tenant the resolver hands back the
+    /// tenant-everyone fallback) — the existing ACL is LEFT UNCHANGED: a
+    /// re-ACL never widens access on a resolution failure. Otherwise:
     /// <list type="bullet">
     ///   <item><b>NoChange</b> — fingerprint matches; nothing to do.</item>
     ///   <item><b>Baseline</b> — the item had no stored fingerprint (ingested
@@ -1042,13 +1150,18 @@ public sealed class IngestPipeline
     /// </list>
     /// </summary>
     internal async Task<ReAclOutcome> ReAclIfDriftedAsync(
-        SeismicContent content, TrackedItem tracked, DateTime nowUtc, bool repair, CancellationToken ct)
+        SeismicContent content, SeismicTeamsite? teamsite, TrackedItem tracked, DateTime nowUtc,
+        bool repair, CancellationToken ct)
     {
-        var acl = _aclMapper.Resolve(content.Permissions);
-        if (acl.Skipped)
+        var acl = _aclMapper.Resolve(content.Permissions, teamsite?.Permissions);
+        if (acl.Skipped || acl.Unresolved)
         {
             // Compliance-safe: do NOT widen the ACL when principals can't be
-            // resolved. Leave the indexed ACL as-is and log.
+            // resolved. This covers BOTH fallback policies — skip (no entries)
+            // AND tenant (whose everyone-entry here is only the fallback for a
+            // transient identity gap, not a real resolution; PATCHing it would
+            // re-ACL a restricted item tenant-wide). Leave the indexed ACL
+            // as-is and log.
             Logger.Warning(
                 $"Re-ACL {content.Id} ('{content.Name}'): permissions unresolved — leaving the existing "
                 + "ACL unchanged (no widening).");
@@ -1141,6 +1254,36 @@ public sealed class IngestPipeline
             }
             Progress.Warning($"Content '{contentId}' not found in Seismic.");
             return false;
+        }
+
+        // Teamsite exclusion gate — explicit and FAIL-CLOSED. PrepareItemAsync
+        // applies id-based teamsite rules from content.TeamsiteId alone, but
+        // the name-based and Seismic-isRestricted rules need the resolved
+        // teamsite; without this gate a webhook/ingest-item call could slip a
+        // restricted library's item into the index.
+        if (teamsite is null)
+        {
+            Progress.Warning(
+                $"Content '{contentId}': teamsite '{content.TeamsiteId}' could not be resolved — "
+                + "refusing single-item ingest (fail closed: teamsite exclusion rules cannot be evaluated).");
+            return false;
+        }
+        if (_filter.IsTeamsiteExcluded(teamsite))
+        {
+            Stats.AddExcluded();
+            Report.RecordExcluded(content.Id, teamsite.Id, "restricted-library",
+                $"teamsite '{teamsite.Name}' is excluded by configuration (single-item path)");
+            Logger.Info($"EXCLUDED {content.Id}: teamsite '{teamsite.Name}' is excluded (single-item path).");
+            var trackedItem = _store.GetTrackedItem(content.Id);
+            if (trackedItem?.Status == "ingested")
+            {
+                await WithdrawItemAsync(content.Id, "restricted-library",
+                    $"teamsite '{teamsite.Name}' is excluded (single-item path)", ct).ConfigureAwait(false);
+            }
+            _store.UpsertTrackedItem(new TrackedItem(
+                content.Id, content.CurrentVersionId, content.TeamsiteId,
+                content.ExpiresAt?.ToUniversalTime(), DateTime.UtcNow, "excluded"));
+            return true;
         }
 
         if (_config.Seismic.EnrichUsage && _usageByContentId.Count == 0)

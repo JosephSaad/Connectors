@@ -100,7 +100,11 @@ always captures everything.
    Library metadata items, every teamsite's published content, then a
    withdrawal pass (expired, deleted/unpublished, late-excluded items).
 2. **Incremental crawl** (every `--incremental-hours`): only content with
-   `modifiedAt` ≥ the last successful sync; expiry withdrawals still run.
+   `modifiedAt` ≥ the last successful sync; expiry withdrawals still run, and
+   a **late-exclusion pass** re-checks tracked items the incremental did NOT
+   re-list against the current exclusion rules (metadata-only re-list, no
+   downloads) — so a compliance flag applied *without* bumping `modifiedAt`
+   is withdrawn on the next incremental, not deferred to the next full crawl.
 3. **Webhook events** (`SEISMIC_WEBHOOK_PORT` > 0): near-real-time targeted
    ingest/withdrawal between cycles; polling remains the safety net.
 4. Chunks are checkpointed — a crash or graceful stop resumes at the first
@@ -123,6 +127,10 @@ show-text operators with literal strings (octal + symbol escapes, line
 continuations) and hex strings, including UTF-16BE payloads. Scanned PDFs and
 exotic encodings fall back to metadata-only indexing (name + description).
 Payloads above `SEISMIC_MAX_EXTRACT_MB` (default 10 MB) are metadata-only.
+Decompression is bounded **during** extraction (32 MB per inflated
+PDF/OOXML stream, 1M chars of accumulated text), so a high-ratio
+decompression bomb inside an allowed-size download is truncated instead of
+inflating unboundedly into memory.
 Per-format success/attempt counters are exported on `/metrics`
 (`docs/OBSERVABILITY.md`). Swap in a richer library by adding an extractor to
 `CompositeExtractor`.
@@ -176,18 +184,28 @@ an **ACL-only Graph PATCH — the content is never re-sent**. The
 inventory regardless of the flag (`--dry-run` reports drift counts and writes
 `reacl_report_*.jsonl` without changing anything; a genuine dry-run drift
 exits 1). Compliance-safe throughout: if an item's permissions can't be
-resolved, its ACL is **left unchanged, never widened**, and the event is
-logged. Metrics `items_reacled_total` / `acl_drift_detected_total` and an
+resolved — including when the source has principals but none currently maps
+and `SEISMIC_FALLBACK_ACL=tenant` would otherwise hand back the
+tenant-everyone fallback — its ACL is **left unchanged, never widened**, and
+the event is logged. Metrics `items_reacled_total` / `acl_drift_detected_total` and an
 `acl_drift` webhook alert surface the activity.
 
 ### ACLs
 
-Seismic item permissions (falling back to teamsite permissions) are resolved
-to Entra principals via the identity store — users by email/UPN, groups by
-display name. Distribution restrictions (`internal-only` vs `client-approved`)
-are indexed as a refinable `distribution` property, not as ACLs. When nothing
-maps, `SEISMIC_FALLBACK_ACL` decides: `skip` (default, compliance-safe) or
-`tenant`. Run `identity-dry-run` to audit the mapping before deploying.
+Seismic item permissions are resolved to Entra principals via the identity
+store — users by email/UPN, groups by display name. Items with **no
+item-level permissions inherit the teamsite's permissions** (read from the
+teamsites listing); Library metadata items always carry the teamsite ACL.
+Distribution restrictions (`internal-only` vs `client-approved`) are indexed
+as a refinable `distribution` property, not as ACLs. When nothing maps,
+`SEISMIC_FALLBACK_ACL` decides: `skip` (default, compliance-safe) or
+`tenant`. The `tenant` fallback only ever applies to content that is
+**genuinely without principals**: when the source *has* principals but none
+currently maps (a stale/partial identity store), a previously indexed item's
+ACL and content are left untouched — the connector never widens an existing
+ACL to tenant-everyone on a transient identity gap, neither on re-ACL nor on
+a version-change re-ingest. Run `identity-dry-run` to audit the mapping
+before deploying.
 
 ## Running as a Windows service
 

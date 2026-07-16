@@ -98,6 +98,7 @@ public sealed class ReAclSweep
         // Index the full source inventory by content id (current permissions
         // live on the content; a teamsite/profile change surfaces here).
         var teamsites = await _seismic.GetTeamsitesAsync(ct).ConfigureAwait(false);
+        var teamsitesById = teamsites.ToDictionary(t => t.Id, StringComparer.Ordinal);
         var contentById = new Dictionary<string, SeismicContent>(StringComparer.Ordinal);
         foreach (var teamsite in teamsites)
         {
@@ -114,8 +115,9 @@ public sealed class ReAclSweep
             if (!contentById.TryGetValue(tracked.ItemId, out var content))
                 continue;  // gone/moved — the reconcile drift sweep owns that case
 
+            teamsitesById.TryGetValue(content.TeamsiteId, out var teamsite);
             var outcome = await _pipeline
-                .ReAclIfDriftedAsync(content, tracked, nowUtc, repair: !dryRun, ct)
+                .ReAclIfDriftedAsync(content, teamsite, tracked, nowUtc, repair: !dryRun, ct)
                 .ConfigureAwait(false);
 
             switch (outcome)

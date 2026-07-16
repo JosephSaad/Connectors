@@ -43,6 +43,26 @@ public interface IContentExtractor
     string Extract(byte[] payload);
 }
 
+/// <summary>
+/// Hard ceilings applied DURING extraction, so a decompression bomb (a small
+/// compressed payload that inflates to gigabytes) cannot exhaust memory.
+/// SEISMIC_MAX_EXTRACT_MB caps only the COMPRESSED download and the
+/// transformer's MaxContentChars trims only the FINAL text — both after
+/// inflation — so the inflation itself must be bounded here: extraction stops
+/// (keeping the text accumulated so far) once a ceiling is hit.
+/// </summary>
+internal static class ExtractionLimits
+{
+    /// <summary>Max bytes inflated from any single compressed stream (PDF FlateDecode).</summary>
+    internal const int MaxInflatedStreamBytes = 32 * 1024 * 1024;
+
+    /// <summary>Max XML characters parsed per OOXML package part (bounds the inflated zip entry).</summary>
+    internal const long MaxXmlCharsPerPart = 32_000_000;
+
+    /// <summary>Max characters accumulated into an extractor's text buffer (final cap is MaxContentChars).</summary>
+    internal const int MaxAccumulatedChars = 1_000_000;
+}
+
 /// <summary>Plain text and text-adjacent formats (txt, md, csv, json, html).</summary>
 public sealed class PlainTextExtractor : IContentExtractor
 {
@@ -104,8 +124,19 @@ public sealed class OpenXmlTextExtractor : IContentExtractor
                 .Where(IsTextPart)
                 .OrderBy(e => e.FullName, StringComparer.Ordinal))
             {
-                using var stream = entry.Open();
-                AppendTextNodes(stream, sb);
+                // Decompression-bomb guard: stop once enough text is in hand.
+                if (sb.Length >= ExtractionLimits.MaxAccumulatedChars)
+                    break;
+                try
+                {
+                    using var stream = entry.Open();
+                    AppendTextNodes(stream, sb);
+                }
+                catch (XmlException)
+                {
+                    // Oversized (MaxXmlCharsPerPart tripped) or malformed part —
+                    // keep whatever text was accumulated before the abort.
+                }
             }
             return PlainTextExtractor.NormalizeWhitespace(sb.ToString());
         }
@@ -127,11 +158,20 @@ public sealed class OpenXmlTextExtractor : IContentExtractor
 
     private static void AppendTextNodes(Stream stream, StringBuilder sb)
     {
-        var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit };
+        var settings = new XmlReaderSettings
+        {
+            DtdProcessing = DtdProcessing.Prohibit,
+            // Bomb guard: a tiny DEFLATE part can inflate to gigabytes of XML.
+            // The reader aborts (XmlException) once the part exceeds this many
+            // characters, bounding memory regardless of the compression ratio.
+            MaxCharactersInDocument = ExtractionLimits.MaxXmlCharsPerPart,
+        };
         using var reader = XmlReader.Create(stream, settings);
         var inTextNode = false;
         while (reader.Read())
         {
+            if (sb.Length >= ExtractionLimits.MaxAccumulatedChars)
+                return;  // enough text extracted — stop inflating this part
             if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "t")
             {
                 inTextNode = true;
@@ -161,6 +201,9 @@ public sealed class PdfTextExtractor : IContentExtractor
             var sb = new StringBuilder();
             foreach (var stream in EnumerateStreams(payload))
             {
+                // Decompression-bomb guard: stop once enough text is in hand.
+                if (sb.Length >= ExtractionLimits.MaxAccumulatedChars)
+                    break;
                 var inflated = TryInflate(stream) ?? stream;
                 var text = Encoding.Latin1.GetString(inflated);
                 ExtractShowTextOperators(text, sb);
@@ -217,14 +260,31 @@ public sealed class PdfTextExtractor : IContentExtractor
         return -1;
     }
 
-    private static byte[]? TryInflate(byte[] data)
+    /// <summary>
+    /// Inflate a FlateDecode stream, bounded at
+    /// <see cref="ExtractionLimits.MaxInflatedStreamBytes"/>: a high-ratio
+    /// decompression bomb is TRUNCATED at the ceiling instead of inflating
+    /// unboundedly into memory (extraction is best-effort anyway).
+    /// </summary>
+    internal static byte[]? TryInflate(byte[] data)
     {
         try
         {
             using var input = new MemoryStream(data);
             using var zlib = new ZLibStream(input, CompressionMode.Decompress);
             using var output = new MemoryStream();
-            zlib.CopyTo(output);
+            var buffer = new byte[81920];
+            int read;
+            while ((read = zlib.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                var room = ExtractionLimits.MaxInflatedStreamBytes - (int)output.Length;
+                if (read >= room)
+                {
+                    output.Write(buffer, 0, Math.Max(0, room));
+                    break;  // bomb guard: ceiling reached — keep what we have
+                }
+                output.Write(buffer, 0, read);
+            }
             return output.ToArray();
         }
         catch

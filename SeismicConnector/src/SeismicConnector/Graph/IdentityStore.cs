@@ -81,6 +81,16 @@ public sealed class SqliteIdentityStore : IIdentityStore
 {
     private readonly SqliteConnection _connection;
 
+    /// <summary>
+    /// Serializes ALL access to the single shared SqliteConnection.
+    /// Microsoft.Data.Sqlite connections are not thread-safe, and the ingest
+    /// pipeline dispatches several concurrent $batch workers that upsert/read
+    /// tracked items after their Graph await resumes on a pool thread —
+    /// without this lock those calls race ("database is locked" / torn reads).
+    /// Monitor is reentrant, so members may call each other under the lock.
+    /// </summary>
+    private readonly object _gate = new();
+
     public SqliteIdentityStore(string dbPath)
     {
         _connection = new SqliteConnection($"Data Source={dbPath}");
@@ -130,55 +140,67 @@ public sealed class SqliteIdentityStore : IIdentityStore
 
     public void UpsertPrincipal(PrincipalMapping mapping)
     {
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO principals (seismic_id, principal_type, email, entra_id, display_name, synced_at)
-            VALUES ($id, $type, $email, $entra, $name, $ts)
-            ON CONFLICT(seismic_id) DO UPDATE SET
-                principal_type = excluded.principal_type,
-                email          = excluded.email,
-                entra_id       = excluded.entra_id,
-                display_name   = excluded.display_name,
-                synced_at      = excluded.synced_at;
-            """;
-        cmd.Parameters.AddWithValue("$id", mapping.SeismicId);
-        cmd.Parameters.AddWithValue("$type", mapping.PrincipalType);
-        cmd.Parameters.AddWithValue("$email", (object?)mapping.Email ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$entra", (object?)mapping.EntraObjectId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$name", (object?)mapping.DisplayName ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$ts", DateTime.UtcNow.ToString("o"));
-        cmd.ExecuteNonQuery();
+        lock (_gate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO principals (seismic_id, principal_type, email, entra_id, display_name, synced_at)
+                VALUES ($id, $type, $email, $entra, $name, $ts)
+                ON CONFLICT(seismic_id) DO UPDATE SET
+                    principal_type = excluded.principal_type,
+                    email          = excluded.email,
+                    entra_id       = excluded.entra_id,
+                    display_name   = excluded.display_name,
+                    synced_at      = excluded.synced_at;
+                """;
+            cmd.Parameters.AddWithValue("$id", mapping.SeismicId);
+            cmd.Parameters.AddWithValue("$type", mapping.PrincipalType);
+            cmd.Parameters.AddWithValue("$email", (object?)mapping.Email ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$entra", (object?)mapping.EntraObjectId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$name", (object?)mapping.DisplayName ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$ts", DateTime.UtcNow.ToString("o"));
+            cmd.ExecuteNonQuery();
+        }
     }
 
     public PrincipalMapping? GetPrincipal(string seismicId)
     {
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText =
-            "SELECT seismic_id, principal_type, email, entra_id, display_name FROM principals WHERE seismic_id = $id";
-        cmd.Parameters.AddWithValue("$id", seismicId);
-        using var reader = cmd.ExecuteReader();
-        return reader.Read() ? ReadPrincipal(reader) : null;
+        lock (_gate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText =
+                "SELECT seismic_id, principal_type, email, entra_id, display_name FROM principals WHERE seismic_id = $id";
+            cmd.Parameters.AddWithValue("$id", seismicId);
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? ReadPrincipal(reader) : null;
+        }
     }
 
     public string? GetEntraObjectId(string seismicId) => GetPrincipal(seismicId)?.EntraObjectId;
 
     public IReadOnlyList<PrincipalMapping> GetAllPrincipals()
     {
-        var results = new List<PrincipalMapping>();
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText =
-            "SELECT seismic_id, principal_type, email, entra_id, display_name FROM principals ORDER BY seismic_id";
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-            results.Add(ReadPrincipal(reader));
-        return results;
+        lock (_gate)
+        {
+            var results = new List<PrincipalMapping>();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText =
+                "SELECT seismic_id, principal_type, email, entra_id, display_name FROM principals ORDER BY seismic_id";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                results.Add(ReadPrincipal(reader));
+            return results;
+        }
     }
 
     public int CountMappedPrincipals()
     {
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(*) FROM principals WHERE entra_id IS NOT NULL";
-        return Convert.ToInt32(cmd.ExecuteScalar());
+        lock (_gate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM principals WHERE entra_id IS NOT NULL";
+            return Convert.ToInt32(cmd.ExecuteScalar());
+        }
     }
 
     private static PrincipalMapping ReadPrincipal(SqliteDataReader reader) => new(
@@ -192,35 +214,41 @@ public sealed class SqliteIdentityStore : IIdentityStore
 
     public void UpsertTrackedItem(TrackedItem item)
     {
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO tracked_items (item_id, version_id, teamsite_id, expires_at, last_seen, status, acl_fingerprint)
-            VALUES ($id, $version, $teamsite, $expires, $seen, $status, $acl)
-            ON CONFLICT(item_id) DO UPDATE SET
-                version_id      = excluded.version_id,
-                teamsite_id     = excluded.teamsite_id,
-                expires_at      = excluded.expires_at,
-                last_seen       = excluded.last_seen,
-                status          = excluded.status,
-                acl_fingerprint = excluded.acl_fingerprint;
-            """;
-        cmd.Parameters.AddWithValue("$id", item.ItemId);
-        cmd.Parameters.AddWithValue("$version", item.VersionId);
-        cmd.Parameters.AddWithValue("$teamsite", item.TeamsiteId);
-        cmd.Parameters.AddWithValue("$expires", (object?)item.ExpiresAtUtc?.ToString("o") ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$seen", item.LastSeenUtc.ToString("o"));
-        cmd.Parameters.AddWithValue("$status", item.Status);
-        cmd.Parameters.AddWithValue("$acl", (object?)item.AclFingerprint ?? DBNull.Value);
-        cmd.ExecuteNonQuery();
+        lock (_gate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO tracked_items (item_id, version_id, teamsite_id, expires_at, last_seen, status, acl_fingerprint)
+                VALUES ($id, $version, $teamsite, $expires, $seen, $status, $acl)
+                ON CONFLICT(item_id) DO UPDATE SET
+                    version_id      = excluded.version_id,
+                    teamsite_id     = excluded.teamsite_id,
+                    expires_at      = excluded.expires_at,
+                    last_seen       = excluded.last_seen,
+                    status          = excluded.status,
+                    acl_fingerprint = excluded.acl_fingerprint;
+                """;
+            cmd.Parameters.AddWithValue("$id", item.ItemId);
+            cmd.Parameters.AddWithValue("$version", item.VersionId);
+            cmd.Parameters.AddWithValue("$teamsite", item.TeamsiteId);
+            cmd.Parameters.AddWithValue("$expires", (object?)item.ExpiresAtUtc?.ToString("o") ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$seen", item.LastSeenUtc.ToString("o"));
+            cmd.Parameters.AddWithValue("$status", item.Status);
+            cmd.Parameters.AddWithValue("$acl", (object?)item.AclFingerprint ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
     }
 
     public TrackedItem? GetTrackedItem(string itemId)
     {
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = SelectTracked + " WHERE item_id = $id";
-        cmd.Parameters.AddWithValue("$id", itemId);
-        using var reader = cmd.ExecuteReader();
-        return reader.Read() ? ReadTracked(reader) : null;
+        lock (_gate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = SelectTracked + " WHERE item_id = $id";
+            cmd.Parameters.AddWithValue("$id", itemId);
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? ReadTracked(reader) : null;
+        }
     }
 
     public IReadOnlyList<TrackedItem> GetAllTrackedItems() => QueryTracked(SelectTracked, null);
@@ -237,10 +265,13 @@ public sealed class SqliteIdentityStore : IIdentityStore
 
     public void RemoveTrackedItem(string itemId)
     {
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "DELETE FROM tracked_items WHERE item_id = $id";
-        cmd.Parameters.AddWithValue("$id", itemId);
-        cmd.ExecuteNonQuery();
+        lock (_gate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "DELETE FROM tracked_items WHERE item_id = $id";
+            cmd.Parameters.AddWithValue("$id", itemId);
+            cmd.ExecuteNonQuery();
+        }
     }
 
     private const string SelectTracked =
@@ -248,14 +279,17 @@ public sealed class SqliteIdentityStore : IIdentityStore
 
     private IReadOnlyList<TrackedItem> QueryTracked(string sql, Action<SqliteCommand>? bind)
     {
-        var results = new List<TrackedItem>();
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = sql;
-        bind?.Invoke(cmd);
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-            results.Add(ReadTracked(reader));
-        return results;
+        lock (_gate)
+        {
+            var results = new List<TrackedItem>();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = sql;
+            bind?.Invoke(cmd);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                results.Add(ReadTracked(reader));
+            return results;
+        }
     }
 
     private static TrackedItem ReadTracked(SqliteDataReader reader) => new(
@@ -271,5 +305,11 @@ public sealed class SqliteIdentityStore : IIdentityStore
         AclFingerprint = reader.IsDBNull(6) ? null : reader.GetString(6),
     };
 
-    public void Dispose() => _connection.Dispose();
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            _connection.Dispose();
+        }
+    }
 }
