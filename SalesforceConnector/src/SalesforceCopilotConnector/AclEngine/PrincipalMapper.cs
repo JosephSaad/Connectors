@@ -34,6 +34,7 @@
 // The SOQL IN clause is capped at _BATCH_SIZE (100) IDs per query to avoid
 // hitting Salesforce's per-query limit.
 
+using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 using SalesforceCopilotConnector.Graph;
 using SalesforceCopilotConnector.Infrastructure;
@@ -63,14 +64,18 @@ public class PrincipalMapper
     private readonly int _batchSize;
     // identifier (FedId/UPN/email) → resolved AAD GUID or null
     // Internal so tests can seed/inspect it (Python `mapper._principal_cache`).
-    internal readonly Dictionary<string, string?> _principalCache = new();
+    // ConcurrentDictionary because this instance is shared across parallel
+    // object workers (Ingest launches up to N ToAclEntriesAsync tasks at once);
+    // a plain Dictionary written concurrently can throw or return torn reads.
+    internal readonly ConcurrentDictionary<string, string?> _principalCache = new();
     // user IDs already warned about missing M365 principal (suppress duplicates)
     // Protected by a lock because 3 parallel object workers share this instance.
     private readonly HashSet<string> _warnedMissingPrincipals = new();
     private readonly object _warnedLock = new();
     // Pre-warm cache: user_id → {FederationIdentifier, UserName, Email}
     // Internal so tests can seed/inspect it (Python `mapper._user_details_cache`).
-    internal readonly Dictionary<string, JsonObject> _userDetailsCache = new();
+    // ConcurrentDictionary for the same shared-instance reason as _principalCache.
+    internal readonly ConcurrentDictionary<string, JsonObject> _userDetailsCache = new();
     // Cross-module accessor mirroring Python's `mapper._user_details_cache`
     // usage from graph/identity_publisher.py.
     internal IReadOnlyDictionary<string, JsonObject> UserDetailsCache => _userDetailsCache;
@@ -148,9 +153,13 @@ public class PrincipalMapper
 
         // Bulk-fetch identity fields for all user IDs in a single SOQL call
         // Use pre-warm cache when available to avoid per-record SOQL
-        var cached = aclResult.UserIds
-            .Where(uid => _userDetailsCache.ContainsKey(uid))
-            .ToDictionary(uid => uid, uid => _userDetailsCache[uid]);
+        // (TryGetValue avoids a ContainsKey/indexer race with concurrent prewarm writes)
+        var cached = new Dictionary<string, JsonObject>();
+        foreach (var uid in aclResult.UserIds)
+        {
+            if (_userDetailsCache.TryGetValue(uid, out var details))
+                cached[uid] = details;
+        }
         var uncached = new HashSet<string>(aclResult.UserIds);
         uncached.ExceptWith(cached.Keys);
         Dictionary<string, JsonObject> userDetails;

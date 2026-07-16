@@ -526,122 +526,175 @@ public class AclResolver
     ///
     /// When pre-warmed data is available, uses in-memory lookups instead of
     /// per-group SOQL queries.
+    ///
+    /// Internal so tests can drive cyclic-membership scenarios directly.
     /// </summary>
-    private async Task<(HashSet<string> UserIds, bool IncludesEveryone)> ResolveGroupAsync(string groupId)
+    internal async Task<(HashSet<string> UserIds, bool IncludesEveryone)> ResolveGroupAsync(string groupId)
+    {
+        var (userIds, includesEveryone, _) = await ResolveGroupAsync(groupId, new HashSet<string>());
+        return (userIds, includesEveryone);
+    }
+
+    /// <summary>
+    /// Core recursive resolution with cycle detection.
+    ///
+    /// <paramref name="visited"/> holds the ancestor chain of the current DFS
+    /// (a group already on the chain is a cycle — the newer AclEngine
+    /// QueueHandler uses the same visited-set approach).  When a cycle is
+    /// detected the nested reference contributes nothing, and every group on
+    /// the cycle path is left uncached so a later top-level resolve of those
+    /// groups computes their full membership.
+    /// </summary>
+    private async Task<(HashSet<string> UserIds, bool IncludesEveryone, bool CycleDetected)> ResolveGroupAsync(
+        string groupId,
+        HashSet<string> visited)
     {
         lock (_cacheLock)
         {
             if (_groupCache.TryGetValue(groupId, out var cached))
-                return cached;
+                return (cached.UserIds, cached.IncludesEveryone, false);
         }
 
-        // ── Fast path: use pre-warmed data ────────────────────────────────
-        if (_allGroupsById != null)
+        // Cycle guard: this group is already an ancestor in the current DFS.
+        if (!visited.Add(groupId))
         {
-            var group = _allGroupsById.GetValueOrDefault(groupId);
-            if (group == null)
+            Logger.Warning(
+                $"[LegacyACL] Cyclic group membership detected at {groupId}; skipping nested reference");
+            return (new HashSet<string>(), false, true);
+        }
+
+        try
+        {
+            // ── Fast path: use pre-warmed data ────────────────────────────────
+            if (_allGroupsById != null)
+            {
+                var group = _allGroupsById.GetValueOrDefault(groupId);
+                if (group == null)
+                    return CacheGroup(groupId, (new HashSet<string>(), false));
+
+                var groupType = (group.Type ?? "").Trim();
+
+                if (groupType == nameof(UserOrGroupType.Organization))
+                    return CacheGroup(groupId, (new HashSet<string>(), true));
+
+                if (groupType == nameof(UserOrGroupType.Role) && !string.IsNullOrEmpty(group.RelatedId))
+                    return CacheGroup(groupId, (GetRoleUsersFromCache(group.RelatedId!, includeDescendants: false), false));
+
+                if (groupType is nameof(UserOrGroupType.RoleAndSubordinates)
+                        or nameof(UserOrGroupType.RoleAndSubordinatesInternal)
+                    && !string.IsNullOrEmpty(group.RelatedId))
+                {
+                    return CacheGroup(groupId, (GetRoleUsersFromCache(group.RelatedId!, includeDescendants: true), false));
+                }
+
+                if (groupType == nameof(UserOrGroupType.Manager) && !string.IsNullOrEmpty(group.RelatedId))
+                    return CacheGroup(groupId, (await ResolveManagerUsersAsync(group.RelatedId!, includeDescendants: false), false));
+
+                if (groupType == nameof(UserOrGroupType.ManagerAndSubordinatesInternal) && !string.IsNullOrEmpty(group.RelatedId))
+                    return CacheGroup(groupId, (await ResolveManagerUsersAsync(group.RelatedId!, includeDescendants: true), false));
+
+                // Regular group: expand members from pre-warmed data
+                var memberIds = _allGroupMembersByGroup?.GetValueOrDefault(groupId) ?? new List<string>();
+                var userIds = new HashSet<string>();
+                var includesEveryone = false;
+                var cycleDetected = false;
+                foreach (var memberId in memberIds)
+                {
+                    if (string.IsNullOrEmpty(memberId) || memberId == groupId)
+                        continue;
+                    if (memberId.StartsWith(UserIdPrefix, StringComparison.Ordinal))
+                    {
+                        userIds.Add(memberId);
+                        continue;
+                    }
+                    var (nestedUsers, nestedEveryone, nestedCycle) = await ResolveGroupAsync(memberId, visited);
+                    userIds.UnionWith(nestedUsers);
+                    includesEveryone = includesEveryone || nestedEveryone;
+                    cycleDetected = cycleDetected || nestedCycle;
+                }
+
+                return CacheGroup(groupId, (userIds, includesEveryone), cycleDetected);
+            }
+
+            // ── Fallback: per-group SOQL queries ──────────────────────────────
+            var groups = await _helper.GetGroupTypeAndRelatedIdAsync(BuildInFilter("Id", new List<string> { groupId }));
+            if (groups.Count == 0)
                 return CacheGroup(groupId, (new HashSet<string>(), false));
 
-            var groupType = (group.Type ?? "").Trim();
+            var fallbackGroup = groups[0];
+            var fallbackGroupType = (fallbackGroup.Type ?? "").Trim();
 
-            if (groupType == nameof(UserOrGroupType.Organization))
+            if (fallbackGroupType == nameof(UserOrGroupType.Organization))
                 return CacheGroup(groupId, (new HashSet<string>(), true));
 
-            if (groupType == nameof(UserOrGroupType.Role) && !string.IsNullOrEmpty(group.RelatedId))
-                return CacheGroup(groupId, (GetRoleUsersFromCache(group.RelatedId!, includeDescendants: false), false));
+            if (fallbackGroupType == nameof(UserOrGroupType.Role) && !string.IsNullOrEmpty(fallbackGroup.RelatedId))
+                return CacheGroup(groupId, (await ResolveRoleUsersAsync(fallbackGroup.RelatedId!, includeDescendants: false), false));
 
-            if (groupType is nameof(UserOrGroupType.RoleAndSubordinates)
+            if (fallbackGroupType is nameof(UserOrGroupType.RoleAndSubordinates)
                     or nameof(UserOrGroupType.RoleAndSubordinatesInternal)
-                && !string.IsNullOrEmpty(group.RelatedId))
+                && !string.IsNullOrEmpty(fallbackGroup.RelatedId))
             {
-                return CacheGroup(groupId, (GetRoleUsersFromCache(group.RelatedId!, includeDescendants: true), false));
+                return CacheGroup(groupId, (await ResolveRoleUsersAsync(fallbackGroup.RelatedId!, includeDescendants: true), false));
             }
 
-            if (groupType == nameof(UserOrGroupType.Manager) && !string.IsNullOrEmpty(group.RelatedId))
-                return CacheGroup(groupId, (await ResolveManagerUsersAsync(group.RelatedId!, includeDescendants: false), false));
+            if (fallbackGroupType == nameof(UserOrGroupType.Manager) && !string.IsNullOrEmpty(fallbackGroup.RelatedId))
+                return CacheGroup(groupId, (await ResolveManagerUsersAsync(fallbackGroup.RelatedId!, includeDescendants: false), false));
 
-            if (groupType == nameof(UserOrGroupType.ManagerAndSubordinatesInternal) && !string.IsNullOrEmpty(group.RelatedId))
-                return CacheGroup(groupId, (await ResolveManagerUsersAsync(group.RelatedId!, includeDescendants: true), false));
+            if (fallbackGroupType == nameof(UserOrGroupType.ManagerAndSubordinatesInternal) && !string.IsNullOrEmpty(fallbackGroup.RelatedId))
+                return CacheGroup(groupId, (await ResolveManagerUsersAsync(fallbackGroup.RelatedId!, includeDescendants: true), false));
 
-            // Regular group: expand members from pre-warmed data
-            var memberIds = _allGroupMembersByGroup?.GetValueOrDefault(groupId) ?? new List<string>();
-            var userIds = new HashSet<string>();
-            var includesEveryone = false;
-            foreach (var memberId in memberIds)
+            var members = await _helper.GetGroupMembersAsync(BuildInFilter("GroupId", new List<string> { groupId }));
+            var fallbackUserIds = new HashSet<string>();
+            var fallbackIncludesEveryone = false;
+            var fallbackCycleDetected = false;
+
+            foreach (var member in members)
             {
+                var memberId = member.UserOrGroupId;
                 if (string.IsNullOrEmpty(memberId) || memberId == groupId)
                     continue;
-                if (memberId.StartsWith(UserIdPrefix, StringComparison.Ordinal))
+                if (memberId!.StartsWith(UserIdPrefix, StringComparison.Ordinal))
                 {
-                    userIds.Add(memberId);
+                    fallbackUserIds.Add(memberId);
                     continue;
                 }
-                var (nestedUsers, nestedEveryone) = await ResolveGroupAsync(memberId);
-                userIds.UnionWith(nestedUsers);
-                includesEveryone = includesEveryone || nestedEveryone;
+                var (nestedUsers, nestedEveryone, nestedCycle) = await ResolveGroupAsync(memberId, visited);
+                fallbackUserIds.UnionWith(nestedUsers);
+                fallbackIncludesEveryone = fallbackIncludesEveryone || nestedEveryone;
+                fallbackCycleDetected = fallbackCycleDetected || nestedCycle;
             }
 
-            return CacheGroup(groupId, (userIds, includesEveryone));
+            return CacheGroup(groupId, (fallbackUserIds, fallbackIncludesEveryone), fallbackCycleDetected);
         }
-
-        // ── Fallback: per-group SOQL queries ──────────────────────────────
-        var groups = await _helper.GetGroupTypeAndRelatedIdAsync(BuildInFilter("Id", new List<string> { groupId }));
-        if (groups.Count == 0)
-            return CacheGroup(groupId, (new HashSet<string>(), false));
-
-        var fallbackGroup = groups[0];
-        var fallbackGroupType = (fallbackGroup.Type ?? "").Trim();
-
-        if (fallbackGroupType == nameof(UserOrGroupType.Organization))
-            return CacheGroup(groupId, (new HashSet<string>(), true));
-
-        if (fallbackGroupType == nameof(UserOrGroupType.Role) && !string.IsNullOrEmpty(fallbackGroup.RelatedId))
-            return CacheGroup(groupId, (await ResolveRoleUsersAsync(fallbackGroup.RelatedId!, includeDescendants: false), false));
-
-        if (fallbackGroupType is nameof(UserOrGroupType.RoleAndSubordinates)
-                or nameof(UserOrGroupType.RoleAndSubordinatesInternal)
-            && !string.IsNullOrEmpty(fallbackGroup.RelatedId))
+        finally
         {
-            return CacheGroup(groupId, (await ResolveRoleUsersAsync(fallbackGroup.RelatedId!, includeDescendants: true), false));
+            // Restore ancestor-chain semantics so shared (diamond) references
+            // reached via a different path are not misreported as cycles.
+            visited.Remove(groupId);
         }
-
-        if (fallbackGroupType == nameof(UserOrGroupType.Manager) && !string.IsNullOrEmpty(fallbackGroup.RelatedId))
-            return CacheGroup(groupId, (await ResolveManagerUsersAsync(fallbackGroup.RelatedId!, includeDescendants: false), false));
-
-        if (fallbackGroupType == nameof(UserOrGroupType.ManagerAndSubordinatesInternal) && !string.IsNullOrEmpty(fallbackGroup.RelatedId))
-            return CacheGroup(groupId, (await ResolveManagerUsersAsync(fallbackGroup.RelatedId!, includeDescendants: true), false));
-
-        var members = await _helper.GetGroupMembersAsync(BuildInFilter("GroupId", new List<string> { groupId }));
-        var fallbackUserIds = new HashSet<string>();
-        var fallbackIncludesEveryone = false;
-
-        foreach (var member in members)
-        {
-            var memberId = member.UserOrGroupId;
-            if (string.IsNullOrEmpty(memberId) || memberId == groupId)
-                continue;
-            if (memberId!.StartsWith(UserIdPrefix, StringComparison.Ordinal))
-            {
-                fallbackUserIds.Add(memberId);
-                continue;
-            }
-            var (nestedUsers, nestedEveryone) = await ResolveGroupAsync(memberId);
-            fallbackUserIds.UnionWith(nestedUsers);
-            fallbackIncludesEveryone = fallbackIncludesEveryone || nestedEveryone;
-        }
-
-        return CacheGroup(groupId, (fallbackUserIds, fallbackIncludesEveryone));
     }
 
-    private (HashSet<string> UserIds, bool IncludesEveryone) CacheGroup(
+    /// <summary>
+    /// Store a fully resolved group in the cache and return it.
+    ///
+    /// When <paramref name="cycleDetected"/> is true the result is *partial*
+    /// (a nested reference back to an ancestor was skipped), so it is returned
+    /// without being cached — caching it could permanently under-grant records
+    /// shared directly with that group.
+    /// </summary>
+    private (HashSet<string> UserIds, bool IncludesEveryone, bool CycleDetected) CacheGroup(
         string groupId,
-        (HashSet<string> UserIds, bool IncludesEveryone) result)
+        (HashSet<string> UserIds, bool IncludesEveryone) result,
+        bool cycleDetected = false)
     {
-        lock (_cacheLock)
+        if (!cycleDetected)
         {
-            _groupCache[groupId] = result;
+            lock (_cacheLock)
+            {
+                _groupCache[groupId] = result;
+            }
         }
-        return result;
+        return (result.UserIds, result.IncludesEveryone, cycleDetected);
     }
 
     /// <summary>

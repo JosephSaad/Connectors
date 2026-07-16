@@ -56,7 +56,9 @@ internal sealed class AdaptiveConcurrency
     private static readonly IAppLogger Logger = Logging.GetLogger("salesforce_connector");
 
     private readonly int _max;
-    private int _current;
+    // volatile: Current is read outside _lock by worker loops while
+    // OnSuccess/OnThrottle mutate it under the lock.
+    private volatile int _current;
     private int _successStreak;
     private readonly object _lock = new();
 

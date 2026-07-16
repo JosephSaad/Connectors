@@ -68,7 +68,12 @@ public class QueueHandler
 
     /// <summary>
     /// Fetch ALL GroupMember rows in one SOQL call.
-    /// After this, ResolveStaticGroupAsync() is a pure in-memory DFS.
+    /// After this, ResolveStaticGroupAsync() is a pure in-memory DFS:
+    /// GetGroupMembersAsync() serves every lookup from the pre-warmed map
+    /// without issuing any per-group SOQL.
+    ///
+    /// If the prewarm query fails, the cache stays unset and every lookup
+    /// falls back to a per-group SOQL query.
     /// </summary>
     public async Task PrewarmAsync()
     {
@@ -100,6 +105,8 @@ public class QueueHandler
         {
             Logger.Warning(
                 $"[QueueHandler] GroupMember prewarm failed: {exc.Message}; will fall back to per-group SOQL");
+            // Leave _groupMembers unset so lookups use the per-group SOQL fallback.
+            return;
         }
 
         lock (_prewarmLock)
@@ -267,9 +274,20 @@ public class QueueHandler
         return resolved;
     }
 
-    /// <summary>Return all UserOrGroupId values from GroupMember for <paramref name="groupId"/>.</summary>
+    /// <summary>
+    /// Return all UserOrGroupId values from GroupMember for <paramref name="groupId"/>.
+    ///
+    /// Fast path: when <see cref="PrewarmAsync"/> has populated the group-member
+    /// map, lookups are served from memory with zero SOQL (a group absent from
+    /// the map simply has no members).  Slow path: per-group SOQL query.
+    /// </summary>
     private async Task<List<string>> GetGroupMembersAsync(string groupId)
     {
+        // Fast path — pre-warmed cache (mirrors GroupHandler.FetchGroupAsync)
+        var prewarmed = _groupMembers;
+        if (prewarmed is not null)
+            return prewarmed.GetValueOrDefault(groupId) ?? new List<string>();
+
         var soql = $"SELECT UserOrGroupId FROM GroupMember WHERE GroupId = '{groupId}'";
         List<System.Text.Json.Nodes.JsonObject> records;
         try

@@ -258,6 +258,22 @@ per record:
 data-flow diagram, object-by-object, is in
 [ACL_PERMISSION_DFD.md](ACL_PERMISSION_DFD.md).
 
+Concurrency & caching notes (one resolver/mapper instance is shared across the
+parallel object workers started by `Graph/Ingest.cs`):
+
+- `PrincipalMapper.cs` and `ShareFetcher.cs` keep their principal / user-detail
+  / owner / share-field caches in `ConcurrentDictionary`s so the slow
+  (cache-miss) paths are safe under concurrent resolution; the once-per-type
+  missing-parent warning in `Resolver.cs` is lock-guarded for the same reason.
+- `QueueHandler.PrewarmAsync()` bulk-loads all `GroupMember` rows once per run;
+  static group/queue expansion is then a pure in-memory DFS with **zero
+  per-group SOQL**. If the prewarm query fails, expansion falls back to one
+  SOQL per group node.
+- Group expansion is cycle-safe in both engines: `QueueHandler.cs` and
+  `Graph/LegacyAclResolver.cs` track visited groups, so cyclic memberships
+  (A → B → A) terminate, with the cyclic reference contributing no extra
+  grants.
+
 ---
 
 ## 7. Extension points

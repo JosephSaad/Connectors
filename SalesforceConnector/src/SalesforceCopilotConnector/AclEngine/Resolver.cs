@@ -85,7 +85,10 @@ public class AclResolver
 
     // Track object types for which we've already logged the missing-parent warning
     // so it fires at most once per object type instead of once per record.
+    // Guarded by WarnedNoParentLock: the set is mutated during concurrent record
+    // resolution and unsynchronized HashSet.Add can throw.
     private static readonly HashSet<string> WarnedNoParent = new();
+    private static readonly object WarnedNoParentLock = new();
 
     // Maximum depth when following ControlledByParent chains to prevent runaway
     // recursion on misconfigured orgs or circular references.
@@ -346,9 +349,13 @@ public class AclResolver
 
         if (string.IsNullOrEmpty(parentField) || string.IsNullOrEmpty(parentType))
         {
-            if (!WarnedNoParent.Contains(objectType))
+            bool firstWarn;
+            lock (WarnedNoParentLock)
             {
-                WarnedNoParent.Add(objectType);
+                firstWarn = WarnedNoParent.Add(objectType);
+            }
+            if (firstWarn)
+            {
                 Logger.Warning(
                     $"[AclResolver] Cannot determine controlling parent for {objectType}; "
                     + "falling back to private ACL (this warning fires once per object type)");
@@ -386,7 +393,8 @@ public class AclResolver
     /// Returns (fieldApiName, parentObjectType) or (null, null) when the
     /// object has no parent entry in schema.json.
     /// </summary>
-    private Task<(string?, string?)> GetControllingParentInfoAsync(string objectType)
+    // Internal so tests can exercise the warn-dedup path under concurrency.
+    internal Task<(string?, string?)> GetControllingParentInfoAsync(string objectType)
     {
         if (_parentMap.TryGetValue(objectType, out var entry))
         {
@@ -396,9 +404,13 @@ public class AclResolver
             return Task.FromResult<(string?, string?)>((parentField, parentType));
         }
 
-        if (!WarnedNoParent.Contains(objectType))
+        bool firstNoParentWarn;
+        lock (WarnedNoParentLock)
         {
-            WarnedNoParent.Add(objectType);
+            firstNoParentWarn = WarnedNoParent.Add(objectType);
+        }
+        if (firstNoParentWarn)
+        {
             Logger.Warning(
                 $"[AclResolver] No parentObjectName in schema.json for {objectType} – "
                 + "cannot follow ControlledByParent chain (this warning fires once per object type)");

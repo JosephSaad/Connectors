@@ -33,6 +33,7 @@
 //         ?q=SELECT+AccountId%2CUserOrGroupId%2CAccountAccessLevel%2CRowCause
 //            +FROM+AccountShare+WHERE+AccountId%3D'<record_id>'
 
+using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 using SalesforceCopilotConnector.Infrastructure;
 
@@ -50,22 +51,26 @@ public class ShareFetcher
     private static readonly IAppLogger Logger = Logging.GetLogger("salesforce_connector.acl_engine");
 
     private readonly SalesforceClient _sf;
+    // All caches below are ConcurrentDictionary because one ShareFetcher
+    // instance is shared across parallel object workers; the slow (cache-miss)
+    // path writes them concurrently during incremental/mixed-mode ingest.
     // Cache: object_type → parent field name on the share table
-    private readonly Dictionary<string, string?> _parentFieldCache = new();
+    private readonly ConcurrentDictionary<string, string?> _parentFieldCache = new();
     // Cache: object_type → access level field name on the share table
-    private readonly Dictionary<string, string?> _accessLevelFieldCache = new();
+    private readonly ConcurrentDictionary<string, string?> _accessLevelFieldCache = new();
     // Bulk pre-warm caches (populated by PrewarmChunkAsync)
     // record_id → OwnerId
-    private readonly Dictionary<string, string?> _ownerCache = new();
+    private readonly ConcurrentDictionary<string, string?> _ownerCache = new();
     // Cross-module accessor mirroring Python's `share_fetcher._owner_cache`
     // usage from graph/ingest.py.
     internal IReadOnlyDictionary<string, string?> OwnerCache => _ownerCache;
     // record_id → list of ShareEntry
-    private readonly Dictionary<string, List<ShareEntry>> _shareCache = new();
+    private readonly ConcurrentDictionary<string, List<ShareEntry>> _shareCache = new();
     // Object types whose sObject has no OwnerId field.
     // Populated dynamically the first time a query returns INVALID_FIELD,
     // so subsequent batches and runs skip the query immediately.
-    private readonly HashSet<string> _noOwnerIdTypes = new();
+    // (ConcurrentDictionary used as a concurrent set: value is ignored.)
+    private readonly ConcurrentDictionary<string, byte> _noOwnerIdTypes = new();
 
     public ShareFetcher(SalesforceClient sfClient)
     {
@@ -113,8 +118,7 @@ public class ShareFetcher
         foreach (var rid in recordIds)
         {
             _ownerCache.TryAdd(rid, null);
-            if (!_shareCache.ContainsKey(rid))
-                _shareCache[rid] = new List<ShareEntry>();
+            _shareCache.TryAdd(rid, new List<ShareEntry>());
         }
 
         // Objects known to lack an OwnerId field in Salesforce.
@@ -133,7 +137,7 @@ public class ShareFetcher
                 foreach (var rid in batch)
                     _ownerCache[rid] = rid;
             }
-            else if (_noOwnerIdTypes.Contains(objectType))
+            else if (_noOwnerIdTypes.ContainsKey(objectType))
             {
                 // Previously discovered via INVALID_FIELD — leave owner as None
                 // (already pre-initialised above).
@@ -158,7 +162,7 @@ public class ShareFetcher
                     {
                         Logger.Warning(
                             $"[ShareFetcher] OwnerId field does not exist on {objectType} (will skip for all batches): {exc.Message}");
-                        _noOwnerIdTypes.Add(objectType);
+                        _noOwnerIdTypes.TryAdd(objectType, 0);
                     }
                     else
                     {
@@ -194,11 +198,7 @@ public class ShareFetcher
                         accessLevel: !string.IsNullOrEmpty(accessLevelField)
                             ? r[accessLevelField]?.GetValue<string>()
                             : null);
-                    if (!_shareCache.TryGetValue(parentId, out var entries))
-                    {
-                        entries = new List<ShareEntry>();
-                        _shareCache[parentId] = entries;
-                    }
+                    var entries = _shareCache.GetOrAdd(parentId, _ => new List<ShareEntry>());
                     entries.Add(entry);
                 }
             }
@@ -232,7 +232,7 @@ public class ShareFetcher
         }
 
         // Object previously discovered to have no OwnerId field (INVALID_FIELD).
-        if (_noOwnerIdTypes.Contains(objectType))
+        if (_noOwnerIdTypes.ContainsKey(objectType))
         {
             _ownerCache[recordId] = null;
             return null;
@@ -252,7 +252,7 @@ public class ShareFetcher
             {
                 Logger.Warning(
                     $"[ShareFetcher] OwnerId field does not exist on {objectType}; skipping for future lookups: {exc.Message}");
-                _noOwnerIdTypes.Add(objectType);
+                _noOwnerIdTypes.TryAdd(objectType, 0);
             }
             else
             {
@@ -349,11 +349,11 @@ public class ShareFetcher
     private async Task<(string?, string?)> GetShareFieldsAsync(string objectType, string shareObject)
     {
         // Fast path – both already cached
-        if (_parentFieldCache.ContainsKey(objectType) && _accessLevelFieldCache.ContainsKey(objectType))
+        // (TryGetValue avoids a ContainsKey/indexer race with concurrent writers)
+        if (_parentFieldCache.TryGetValue(objectType, out var cachedParent)
+            && _accessLevelFieldCache.TryGetValue(objectType, out var cachedAccessLevel))
         {
-            return (
-                _parentFieldCache[objectType],
-                _accessLevelFieldCache[objectType]);
+            return (cachedParent, cachedAccessLevel);
         }
 
         // Fetch describe once and extract both fields
@@ -365,11 +365,10 @@ public class ShareFetcher
         catch (InvalidOperationException exc)
         {
             Logger.Warning($"[ShareFetcher] describe({shareObject}) failed: {exc.Message}");
-            _parentFieldCache[objectType] = await DiscoverParentFieldViaProbeAsync(objectType, shareObject);
+            var probedParent = await DiscoverParentFieldViaProbeAsync(objectType, shareObject);
+            _parentFieldCache[objectType] = probedParent;
             _accessLevelFieldCache[objectType] = null;
-            return (
-                _parentFieldCache[objectType],
-                _accessLevelFieldCache[objectType]);
+            return (probedParent, null);
         }
 
         var fields = describe["fields"] as JsonArray ?? new JsonArray();
