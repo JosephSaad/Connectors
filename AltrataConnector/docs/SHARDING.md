@@ -24,7 +24,9 @@ With the shard map set:
   that shard's connection; per-shard results are aggregated into one summary.
 * `seat-sync` and `purge-all` iterate every shard (each carries its own seat
   hash / item registry).
-* `/metrics` dead-letter depth sums across shard queues.
+* `/metrics` dead-letter depth sums across shard queues **plus the base
+  connector's own queue** — matching `retry-failed`, which replays every shard
+  and the base target, so a DELETE dead-lettered on the base stays visible.
 * A **misconfigured shard map aborts the run** — the connector never crawls a
   partial or overlapping partition.
 
@@ -46,8 +48,10 @@ GRAPH_CONNECTION_SHARDS='{
 Validation (`TryLoad` reports EVERY problem; never throws on bad input):
 
 - valid JSON object, at least one shard;
-- connection ids valid (3-32 alphanumeric, no reserved Microsoft prefix) and
-  unique;
+- connection ids valid (3-32 alphanumeric, no reserved Microsoft prefix),
+  unique among themselves, and **distinct from the base `CONNECTOR_ID`** — a
+  shard equal to it would alias the base's own state store and be processed
+  twice;
 - each shard maps to a non-empty array of known dataset names;
 - **exact partition**: every dataset in exactly one shard — unassigned and
   doubly-assigned datasets are both reported.

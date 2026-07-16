@@ -466,6 +466,55 @@ public class ShardingConfigTests : IDisposable
     }
 
     [Fact]
+    public void ShardIdEqualToBaseConnectorIdIsRejected()
+    {
+        // A shard named the same as the base CONNECTOR_ID aliases the base's
+        // own state store, so shard-aware commands would process/dispose it
+        // twice. Reject it (case-insensitively) with a clear error.
+        var map = """
+            {
+              "altrataBase":   ["PersonProfile", "CareerHistory", "BoardMembership"],
+              "altrataWealthB":["WealthIndicator", "RelationshipPath", "Organization"]
+            }
+            """;
+        Assert.False(ShardingConfig.TryParse(map, baseConnectorId: "AltrataBase",
+            out _, out var error));
+        Assert.Contains("must not equal the base", error!);
+        Assert.Contains("altrataBase", error!);
+    }
+
+    [Fact]
+    public void ShardIdCollisionIsSurfacedThroughTryLoad()
+    {
+        Environment.SetEnvironmentVariable("CONNECTOR_ID", "AltrataBase");
+        try
+        {
+            Environment.SetEnvironmentVariable(ShardingConfig.EnvVar, """
+                {
+                  "AltrataBase":   ["PersonProfile", "CareerHistory", "BoardMembership"],
+                  "altrataWealthB":["WealthIndicator", "RelationshipPath", "Organization"]
+                }
+                """);
+            Assert.False(ShardingConfig.TryLoad(out _, out var error));
+            Assert.Contains("must not equal the base", error!);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CONNECTOR_ID", null);
+        }
+    }
+
+    [Fact]
+    public void DistinctShardIdsStillLoadWithBaseConnectorIdSet()
+    {
+        // Sanity: a base id that matches NO shard must not trip the new check.
+        Assert.True(ShardingConfig.TryParse(ValidMap, baseConnectorId: "AltrataBase",
+            out var shards, out var error));
+        Assert.Null(error);
+        Assert.Equal(3, shards.Count);
+    }
+
+    [Fact]
     public void ForShardRebindsTheConnectionId()
     {
         var baseConfig = TestFixtures.NewConfig();

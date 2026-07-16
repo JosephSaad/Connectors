@@ -451,3 +451,62 @@ public class UnreplayableDeadLetterTests
         Assert.False(parsed.GetFlag("--clear-on-success"));
     }
 }
+
+// ---- LOW: DeadLetterDepth must include the base store under sharding -----------------
+//
+// Regression for the review finding: under GRAPH_CONNECTION_SHARDS the depth
+// gauge summed only the shard stores while retry-failed replays every shard AND
+// the base target. A persistently-failing erasure DELETE dead-lettered on the
+// base connection was therefore invisible to /health + /metrics.
+
+public class ShardedDeadLetterDepthTests : IDisposable
+{
+    private readonly string? _origLogsDir = Environment.GetEnvironmentVariable("LOGS_DIR");
+    private readonly string? _origDataDir = Environment.GetEnvironmentVariable("DATA_DIR");
+
+    public void Dispose()
+    {
+        Environment.SetEnvironmentVariable(ShardingConfig.EnvVar, null);
+        Environment.SetEnvironmentVariable("LOGS_DIR", _origLogsDir);
+        Environment.SetEnvironmentVariable("DATA_DIR", _origDataDir);
+    }
+
+    private const string ShardMap = """
+        {
+          "altrataPeopleA": ["PersonProfile", "CareerHistory", "BoardMembership"],
+          "altrataWealthB": ["WealthIndicator", "RelationshipPath", "Organization"]
+        }
+        """;
+
+    [Fact]
+    public void DepthIncludesBaseStoreDeadLettersUnderSharding()
+    {
+        // Point the shard stores DeadLetterDepth builds internally at a temp dir.
+        var shardEnvRoot = TestFixtures.NewTempDir("dldepthshards");
+        Environment.SetEnvironmentVariable("LOGS_DIR", shardEnvRoot);
+        Environment.SetEnvironmentVariable("DATA_DIR", shardEnvRoot);
+        Environment.SetEnvironmentVariable(ShardingConfig.EnvVar, ShardMap);
+
+        // Base runtime keeps its own isolated store (independent of LOGS_DIR).
+        var baseRoot = TestFixtures.NewTempDir("dldepthbase");
+        using var runtime = TestFixtures.NewRuntime(TestFixtures.NewConfig(),
+            new FakeGraphClient(), baseRoot);
+
+        // A persistently-failing erasure DELETE dead-lettered on the BASE store.
+        runtime.State.AddDeadLetter(new DeadLetterRecord
+        {
+            ItemId = "PersonProfile-Base", Op = DeadLetterOps.Delete,
+        });
+        // Plus one replayable DELETE on shard A's own store.
+        var shardA = new FileStateStore("altrataPeopleA",
+            logsDir: shardEnvRoot, dataDir: shardEnvRoot);
+        shardA.AddDeadLetter(new DeadLetterRecord
+        {
+            ItemId = "PersonProfile-ShardA", Op = DeadLetterOps.Delete,
+        });
+
+        // Base (1) + shard A (1) + shard B (0). Before the fix the base store was
+        // omitted and this returned 1.
+        Assert.Equal(2, runtime.DeadLetterDepth());
+    }
+}

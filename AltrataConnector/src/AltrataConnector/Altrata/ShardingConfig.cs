@@ -48,11 +48,23 @@ public static class ShardingConfig
         var raw = Environment.GetEnvironmentVariable(EnvVar);
         if (string.IsNullOrWhiteSpace(raw))
             return false;
-        return TryParse(raw, out shards, out error);
+        // Reject a shard whose id collides with the base CONNECTOR_ID — that
+        // would point a shard at the base connector's own state store, so
+        // shard-aware commands (retry-failed, forget-subject, ...) process and
+        // dispose it twice.
+        var baseConnectorId = Environment.GetEnvironmentVariable("CONNECTOR_ID");
+        return TryParse(raw, baseConnectorId, out shards, out error);
     }
 
     /// <summary>Pure parse/validate seam (unit-testable without env mutation).</summary>
-    public static bool TryParse(string json, out IReadOnlyList<Shard> shards, out string? error)
+    public static bool TryParse(string json, out IReadOnlyList<Shard> shards, out string? error) =>
+        TryParse(json, baseConnectorId: null, out shards, out error);
+
+    /// <summary>Pure parse/validate seam. <paramref name="baseConnectorId"/> is
+    /// the deployment's CONNECTOR_ID; a shard id equal to it (case-insensitive)
+    /// is rejected because it would alias the base connector's state store.</summary>
+    public static bool TryParse(string json, string? baseConnectorId,
+        out IReadOnlyList<Shard> shards, out string? error)
     {
         shards = Array.Empty<Shard>();
         var problems = new List<string>();
@@ -90,6 +102,10 @@ public static class ShardingConfig
                     problems.Add($"shard '{connectionId}': {idError.Replace("CONNECTOR_ID", "connection id")}");
                 if (!seenConnectionIds.Add(connectionId))
                     problems.Add($"connection id '{connectionId}' appears more than once");
+                if (!string.IsNullOrWhiteSpace(baseConnectorId) &&
+                    string.Equals(connectionId, baseConnectorId, StringComparison.OrdinalIgnoreCase))
+                    problems.Add($"shard connection id '{connectionId}' must not equal the base " +
+                                 "CONNECTOR_ID (the base and shard would share one state store)");
 
                 if (property.Value.ValueKind != JsonValueKind.Array || property.Value.GetArrayLength() == 0)
                 {

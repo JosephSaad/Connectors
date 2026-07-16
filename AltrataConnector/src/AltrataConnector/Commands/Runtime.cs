@@ -99,15 +99,19 @@ public sealed class Runtime : IDisposable
     /// Dead-letter depth for /metrics — REPLAYABLE records only (transform
     /// failures have their own gauge and never trip the replay alert). Under
     /// connection sharding each shard dead-letters against its own connection
-    /// id, so the depth is the sum across shard stores; otherwise the base
-    /// connector's queue is the whole story.
+    /// id, so the depth is the sum across shard stores PLUS the base connector's
+    /// own queue — matching retry-failed's accounting, which replays every shard
+    /// AND the base target. A persistently-failing DELETE dead-lettered on the
+    /// base connection must stay visible to /health and the metrics gauge.
+    /// Without sharding the base queue is the whole story.
     /// </summary>
     public int DeadLetterDepth()
     {
         if (!ShardingConfig.TryLoad(out var shards, out _) || shards.Count == 0)
             return State.ReadDeadLetters().Count(r => r.IsReplayable);
 
-        var depth = 0;
+        // Base store is always a retry-failed target, so it is always counted.
+        var depth = State.ReadDeadLetters().Count(r => r.IsReplayable);
         foreach (var shard in shards)
         {
             IStateStore shardState = Config.UseSqlServer
