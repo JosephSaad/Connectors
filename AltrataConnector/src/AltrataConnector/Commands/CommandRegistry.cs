@@ -138,9 +138,11 @@ public static class CommandRegistry
             Options = new List<OptionSpec>
             {
                 new() { Name = "--clear-on-success", Help = "Delete the dead-letter file when everything replays" },
+                new() { Name = "--retire-unreplayable", Help = "Drop transform-failure entries (no payload to replay; fix the feed and re-ingest instead)" },
             },
             Handler = WithRuntime("retry-failed", (runtime, args) =>
-                RetryFailedAsync(runtime, args.GetFlag("--clear-on-success"))),
+                RetryFailedAsync(runtime, args.GetFlag("--clear-on-success"),
+                    args.GetFlag("--retire-unreplayable"))),
         });
 
         parser.AddCommand(new CommandSpec
@@ -490,7 +492,8 @@ public static class CommandRegistry
     /// that shard's own connection (plus the base queue), so no
     /// CONNECTOR_ID=&lt;shardId&gt; workaround is needed.
     /// </summary>
-    internal static async Task<object?> RetryFailedAsync(Runtime runtime, bool clearOnSuccess)
+    internal static async Task<object?> RetryFailedAsync(Runtime runtime, bool clearOnSuccess,
+        bool retireUnreplayable = false)
     {
         var targets = new List<(Runtime Rt, bool Owned, string Label)>();
         if (ShardingConfig.TryLoad(out var shards, out var shardError))
@@ -509,19 +512,32 @@ public static class CommandRegistry
             var totalReplayed = 0;
             var totalRemaining = 0;
             var totalRecords = 0;
+            var totalUnreplayable = 0;
+            var totalRetired = 0;
             foreach (var (rt, _, label) in targets)
             {
-                var (records, replayed, remaining) = await RetryFailedCoreAsync(rt, clearOnSuccess, label);
-                totalRecords += records;
-                totalReplayed += replayed;
-                totalRemaining += remaining;
+                var result = await RetryFailedCoreAsync(rt, clearOnSuccess, retireUnreplayable, label);
+                totalRecords += result.Records;
+                totalReplayed += result.Replayed;
+                totalRemaining += result.Remaining;
+                totalUnreplayable += result.Unreplayable;
+                totalRetired += result.Retired;
             }
 
             if (totalRecords == 0)
                 Console.WriteLine("Dead-letter queue is empty.");
             else
-                Console.WriteLine($"TOTAL: {totalReplayed} replayed, {totalRemaining} still failing.");
+                Console.WriteLine($"TOTAL: {totalReplayed} replayed, {totalRemaining} still failing" +
+                                  (totalRetired > 0 ? $", {totalRetired} retired" : "") +
+                                  (totalUnreplayable > 0 ? $", {totalUnreplayable} un-replayable kept" : "") + ".");
+            if (totalUnreplayable > 0)
+                Console.WriteLine("Un-replayable entries are transform failures (no item payload exists). " +
+                                  "Fix the source feed and re-run ingest, or drop them with " +
+                                  "retry-failed --retire-unreplayable.");
+            // Alert/exit semantics track the REPLAYABLE queue only; un-replayable
+            // entries are surfaced above and via altrata_deadletter_unreplayable.
             Metrics.SetDeadLetterDepth(totalRemaining);
+            Metrics.Set("altrata_deadletter_unreplayable", totalUnreplayable);
             return totalRemaining == 0;
         }
         finally
@@ -534,21 +550,48 @@ public static class CommandRegistry
         }
     }
 
+    private readonly record struct RetryFailedResult(
+        int Records, int Replayed, int Remaining, int Unreplayable, int Retired);
+
     /// <summary>Replay one state store's queue against its own Graph connection.
-    /// Upsert ops re-PUT the captured payload (seat invariant re-asserted);
-    /// delete ops re-issue the idempotent DELETE (delta tombstones).</summary>
-    private static async Task<(int Records, int Replayed, int Remaining)> RetryFailedCoreAsync(
-        Runtime runtime, bool clearOnSuccess, string label)
+    /// Upsert ops re-PUT the captured item under an ACL REBUILT from the
+    /// CURRENT seats (never the ACL captured at dead-letter time — a seat
+    /// removed since then must not be re-granted) and record the hash of the
+    /// ACL actually sent; delete ops re-issue the idempotent DELETE (delta
+    /// tombstones). Un-replayable entries (transform failures) are kept and
+    /// reported, or dropped when <paramref name="retireUnreplayable"/>.</summary>
+    private static async Task<RetryFailedResult> RetryFailedCoreAsync(
+        Runtime runtime, bool clearOnSuccess, bool retireUnreplayable, string label)
     {
         var records = runtime.State.ReadDeadLetters();
         if (records.Count == 0)
-            return (0, 0, 0);
+            return new RetryFailedResult(0, 0, 0, 0, 0);
 
         Console.WriteLine($"[{label}] Replaying {records.Count} dead-lettered record(s)...");
         var remaining = new List<DeadLetterRecord>();
+        var unreplayable = new List<DeadLetterRecord>();
         var replayed = 0;
+        var retired = 0;
+        // Entitlement rebuilt lazily ONCE per queue from the CURRENT seat list.
+        // BuildAcl fails closed on an empty seat list, keeping the record queued.
+        IReadOnlyList<AclEntry>? currentAcl = null;
+        string? currentSeatHash = null;
         foreach (var record in records)
         {
+            if (!record.IsReplayable)
+            {
+                if (retireUnreplayable)
+                {
+                    retired++;
+                    Logger.Info($"[{label}] Retired un-replayable dead-letter {record.ItemId} " +
+                                $"(op {record.Op}, error: {record.Error})");
+                }
+                else
+                {
+                    unreplayable.Add(record);  // kept verbatim — attempts not bumped
+                }
+                continue;
+            }
             if (ServiceStop.Requested)
             {
                 remaining.Add(record);
@@ -565,15 +608,22 @@ public static class CommandRegistry
                     continue;
                 }
 
-                if (string.IsNullOrEmpty(record.PayloadJson))
-                    throw new InvalidOperationException("no payload captured — re-run ingest for this delivery");
                 var item = JsonSerializer.Deserialize<ExternalItem>(record.PayloadJson)
                            ?? throw new InvalidOperationException("payload unreadable");
+                if (currentAcl == null)
+                {
+                    var seats = runtime.Identity.GetSeats();
+                    currentAcl = SeatAclBuilder.BuildAcl(seats);   // throws when seats empty — fail closed
+                    currentSeatHash = SeatAclBuilder.ComputeSeatHash(seats);
+                }
+                // Replace the STALE captured ACL with the freshly built one and
+                // record the matching hash, so the re-ACL reconciliation
+                // (ListItemsWithAclHashOtherThan) stays truthful for this item.
+                item = item with { Acl = currentAcl };
                 SeatAclBuilder.AssertNeverEveryone(item.Acl);
                 await runtime.Graph.PutItemAsync(item, ServiceStop.Token);
                 runtime.Identity.RecordIngestedItem(new Identity.IngestedItem(
-                    item.Id, record.Dataset, SeatAclBuilder.ComputeSeatHash(runtime.Identity.GetSeats()),
-                    DateTime.UtcNow));
+                    item.Id, record.Dataset, currentSeatHash!, DateTime.UtcNow));
                 replayed++;
                 Metrics.Increment("altrata_items_ingested_total");
             }
@@ -584,17 +634,20 @@ public static class CommandRegistry
             }
         }
 
-        if (remaining.Count == 0 && clearOnSuccess)
+        var keep = remaining.Concat(unreplayable).ToList();
+        if (keep.Count == 0 && clearOnSuccess)
         {
             runtime.State.ClearDeadLetters();
             Console.WriteLine($"[{label}] All {replayed} record(s) replayed; dead-letter queue cleared.");
         }
         else
         {
-            runtime.State.ReplaceDeadLetters(remaining);
-            Console.WriteLine($"[{label}] {replayed} replayed, {remaining.Count} still failing.");
+            runtime.State.ReplaceDeadLetters(keep);
+            Console.WriteLine($"[{label}] {replayed} replayed, {remaining.Count} still failing" +
+                              (retired > 0 ? $", {retired} retired" : "") +
+                              (unreplayable.Count > 0 ? $", {unreplayable.Count} un-replayable kept" : "") + ".");
         }
-        return (records.Count, replayed, remaining.Count);
+        return new RetryFailedResult(records.Count, replayed, remaining.Count, unreplayable.Count, retired);
     }
 
     // ---- identity-dry-run -------------------------------------------------------------------
@@ -770,151 +823,227 @@ public static class CommandRegistry
         Telemetry.SetTag(span, "altrata.subject.resolved_by",
             !string.IsNullOrWhiteSpace(altrataId) ? "id" : "email");
 
-        // Resolve subject id(s): direct id, or every altrata id linked to the
-        // email's CRM contact through the crosswalk.
-        var subjectIds = new SortedSet<string>(StringComparer.Ordinal);
-        if (!string.IsNullOrWhiteSpace(altrataId))
-            subjectIds.Add(altrataId.Trim());
-        if (!string.IsNullOrWhiteSpace(email))
+        // Build the target set: every shard connection's store PLUS the base
+        // state. Under GRAPH_CONNECTION_SHARDS the ingested items, crosswalk,
+        // reverse index and suppression list live in each shard's own store, so
+        // an erasure that touched only the base would withdraw nothing, suppress
+        // nothing, and the subject would be re-ingested on the next shard crawl.
+        // This mirrors retry-failed / purge-all.
+        var targets = new List<(Runtime Rt, bool Owned, string Label)>();
+        if (ShardingConfig.TryLoad(out var shards, out var shardError))
         {
-            var contact = runtime.Identity.FindContactByEmail(email.Trim().ToLowerInvariant());
-            if (contact == null)
+            foreach (var shard in shards)
+                targets.Add((CreateShardRuntime(runtime, shard), true, $"shard {shard.ConnectionId}"));
+        }
+        else if (shardError != null)
+        {
+            throw new ConfigurationError(shardError);
+        }
+        targets.Add((runtime, false, runtime.Config.ConnectorId));
+
+        try
+        {
+            // Resolve subject id(s) across EVERY target: direct id, or every
+            // altrata id linked to the email's CRM contact through any target's
+            // crosswalk (an email may only resolve in the shard that ingested it).
+            var subjectIds = new SortedSet<string>(StringComparer.Ordinal);
+            if (!string.IsNullOrWhiteSpace(altrataId))
+                subjectIds.Add(altrataId.Trim());
+            if (!string.IsNullOrWhiteSpace(email))
             {
-                Console.WriteLine($"No CRM contact matches email '{email}'. Nothing to erase by email.");
-            }
-            else
-            {
-                foreach (var entry in runtime.Identity.ListCrosswalk())
+                var normalized = email.Trim().ToLowerInvariant();
+                var matched = false;
+                foreach (var (rt, _, _) in targets)
                 {
-                    if (string.Equals(entry.CrmContactId, contact.Id, StringComparison.Ordinal))
-                        subjectIds.Add(entry.AltrataId);
+                    var contact = rt.Identity.FindContactByEmail(normalized);
+                    if (contact == null)
+                        continue;
+                    matched = true;
+                    foreach (var entry in rt.Identity.ListCrosswalk())
+                    {
+                        if (string.Equals(entry.CrmContactId, contact.Id, StringComparison.Ordinal))
+                            subjectIds.Add(entry.AltrataId);
+                    }
+                }
+                if (!matched)
+                    Console.WriteLine($"No CRM contact matches email '{email}'. Nothing to erase by email.");
+            }
+
+            if (subjectIds.Count == 0)
+            {
+                Console.WriteLine("Could not resolve any subject to erase.");
+                return false;
+            }
+
+            // Per-target withdraw set: items concerning the subject (reverse
+            // index + the PersonProfile id) that actually exist in that target's
+            // inventory.
+            var perTarget = new List<(Runtime Rt, string Label, List<string> Withdraw)>();
+            var allWithdraw = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (var (rt, _, label) in targets)
+            {
+                var itemIds = new SortedSet<string>(StringComparer.Ordinal);
+                foreach (var id in subjectIds)
+                {
+                    foreach (var itemId in rt.Identity.ListItemsForSubject(id))
+                        itemIds.Add(itemId);
+                    itemIds.Add(ItemTransformer.BuildItemId(Datasets.PersonProfile, id));
+                }
+                var inventory = rt.Identity.ListIngestedItems().Select(i => i.ItemId)
+                    .ToHashSet(StringComparer.Ordinal);
+                var toWithdraw = itemIds.Where(inventory.Contains).ToList();
+                perTarget.Add((rt, label, toWithdraw));
+                foreach (var w in toWithdraw)
+                    allWithdraw.Add(w);
+            }
+
+            Telemetry.SetTag(span, "altrata.subject.count", subjectIds.Count);
+            Telemetry.SetTag(span, "altrata.items.count", allWithdraw.Count);
+
+            Console.WriteLine("Erasure scope");
+            Console.WriteLine("-------------");
+            Console.WriteLine($"Subject id(s)          : {string.Join(", ", subjectIds)}");
+            if (!string.IsNullOrWhiteSpace(email))
+                Console.WriteLine($"Resolved from email    : {email}");
+            Console.WriteLine($"Items to withdraw      : {allWithdraw.Count}");
+            foreach (var (_, label, withdraw) in perTarget.Where(t => t.Withdraw.Count > 0))
+            {
+                Console.WriteLine($"  [{label}] {withdraw.Count} item(s)");
+                foreach (var itemId in withdraw)
+                    Console.WriteLine($"    - {itemId}");
+            }
+            var alreadySuppressed = subjectIds.Count(id => targets.All(t => t.Rt.State.IsSubjectSuppressed(id)));
+            Console.WriteLine($"Already suppressed     : {alreadySuppressed} / {subjectIds.Count}");
+
+            if (!confirm)
+            {
+                Console.WriteLine();
+                Console.WriteLine("DRY RUN — nothing was erased. Re-run with --confirm to execute.");
+                return true;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("Erasing...");
+            var withdrawn = 0;
+            var failures = 0;
+            foreach (var (rt, _, toWithdraw) in perTarget)
+            {
+                foreach (var itemId in toWithdraw)
+                {
+                    try
+                    {
+                        await rt.Graph.DeleteItemAsync(itemId, ServiceStop.Token);
+                        rt.Identity.RemoveIngestedItem(itemId);
+                        withdrawn++;
+                        Metrics.Increment("altrata_items_erased_total");
+                        Metrics.Increment("altrata_items_deleted_total");
+                    }
+                    catch (Exception exc)
+                    {
+                        // Durability: still suppress + ledger, but queue the DELETE
+                        // (on this target's queue) for retry-failed to complete.
+                        failures++;
+                        Logger.Error($"Erasure withdrawal failed for {itemId}: {exc.Message}");
+                        rt.State.AddDeadLetter(new DeadLetterRecord
+                        {
+                            ItemId = itemId,
+                            Dataset = "",
+                            DeliveryId = "erasure",
+                            Error = exc.Message,
+                            Op = DeadLetterOps.Delete,
+                            PayloadJson = "",
+                            CorrelationId = CorrelationContext.Current,
+                        });
+                        rt.Identity.RemoveIngestedItem(itemId);
+                    }
                 }
             }
-        }
 
-        if (subjectIds.Count == 0)
-        {
-            Console.WriteLine("Could not resolve any subject to erase.");
-            return false;
-        }
+            // Local erasure + durable suppression on EVERY target's store so each
+            // shard crawl skips the subject; ledger once (base) per subject.
+            foreach (var id in subjectIds)
+            {
+                foreach (var (rt, _, _) in perTarget)
+                {
+                    rt.Identity.RemoveCrosswalk(id);
+                    rt.Identity.RemovePersonFromPathIndex(id);
+                    rt.State.AddSuppressedSubject(id);
+                }
+                runtime.Erasure.Append(actor, ErasureActions.Erase, id, email, allWithdraw.ToList());
+                Metrics.Increment("altrata_subjects_erased_total");
+            }
 
-        // Determine the item set: every item concerning the subject (reverse
-        // index) plus the PersonProfile item id (belt-and-braces).
-        var itemIds = new SortedSet<string>(StringComparer.Ordinal);
-        foreach (var id in subjectIds)
-        {
-            foreach (var itemId in runtime.Identity.ListItemsForSubject(id))
-                itemIds.Add(itemId);
-            itemIds.Add(ItemTransformer.BuildItemId(Datasets.PersonProfile, id));
-        }
-        // Only withdraw items actually in the inventory (the PersonProfile id may
-        // not exist); report the reverse-indexed set regardless.
-        var inventory = runtime.Identity.ListIngestedItems().Select(i => i.ItemId)
-            .ToHashSet(StringComparer.Ordinal);
-        var toWithdraw = itemIds.Where(inventory.Contains).ToList();
-        Telemetry.SetTag(span, "altrata.subject.count", subjectIds.Count);
-        Telemetry.SetTag(span, "altrata.items.count", toWithdraw.Count);
+            Metrics.Set("altrata_suppression_list_size", runtime.State.ListSuppressedSubjects().Count);
+            Telemetry.SetTag(span, "altrata.items.withdrawn", withdrawn);
+            Telemetry.SetTag(span, "altrata.items.failed", failures);
 
-        Console.WriteLine("Erasure scope");
-        Console.WriteLine("-------------");
-        Console.WriteLine($"Subject id(s)          : {string.Join(", ", subjectIds)}");
-        if (!string.IsNullOrWhiteSpace(email))
-            Console.WriteLine($"Resolved from email    : {email}");
-        Console.WriteLine($"Items to withdraw      : {toWithdraw.Count}");
-        foreach (var itemId in toWithdraw)
-            Console.WriteLine($"  - {itemId}");
-        Console.WriteLine($"Crosswalk links        : " +
-            $"{subjectIds.Count(id => runtime.Identity.GetCrosswalk(id) != null)}");
-        Console.WriteLine($"Already suppressed     : " +
-            $"{subjectIds.Count(runtime.State.IsSubjectSuppressed)} / {subjectIds.Count}");
-
-        if (!confirm)
-        {
-            Console.WriteLine();
-            Console.WriteLine("DRY RUN — nothing was erased. Re-run with --confirm to execute.");
+            if (failures > 0)
+            {
+                Console.WriteLine($"{withdrawn} item(s) withdrawn, {failures} queued for retry (dead-lettered DELETE). " +
+                                  $"{subjectIds.Count} subject(s) suppressed and ledgered. " +
+                                  "Run retry-failed to complete the Graph withdrawals.");
+                return false;
+            }
+            Console.WriteLine($"{withdrawn} item(s) withdrawn; {subjectIds.Count} subject(s) suppressed and ledgered. " +
+                              "Erasure complete and durable against re-delivery.");
             return true;
         }
-
-        Console.WriteLine();
-        Console.WriteLine("Erasing...");
-        var withdrawn = 0;
-        var failures = 0;
-        foreach (var itemId in toWithdraw)
+        finally
         {
-            try
-            {
-                await runtime.Graph.DeleteItemAsync(itemId, ServiceStop.Token);
-                runtime.Identity.RemoveIngestedItem(itemId);
-                withdrawn++;
-                Metrics.Increment("altrata_items_erased_total");
-                Metrics.Increment("altrata_items_deleted_total");
-            }
-            catch (Exception exc)
-            {
-                // Durability: still suppress + ledger, but queue the DELETE for
-                // retry so the item is eventually removed from Graph too.
-                failures++;
-                Logger.Error($"Erasure withdrawal failed for {itemId}: {exc.Message}");
-                runtime.State.AddDeadLetter(new DeadLetterRecord
-                {
-                    ItemId = itemId,
-                    Dataset = "",
-                    DeliveryId = "erasure",
-                    Error = exc.Message,
-                    Op = DeadLetterOps.Delete,
-                    PayloadJson = "",
-                    CorrelationId = CorrelationContext.Current,
-                });
-                runtime.Identity.RemoveIngestedItem(itemId);
-            }
+            foreach (var (rt, owned, _) in targets)
+                if (owned)
+                    rt.Dispose();
         }
-
-        // Local erasure + durable suppression + ledger — always applied so the
-        // subject is forgotten regardless of transient Graph failures.
-        foreach (var id in subjectIds)
-        {
-            runtime.Identity.RemoveCrosswalk(id);
-            runtime.Identity.RemovePersonFromPathIndex(id);
-            runtime.State.AddSuppressedSubject(id);
-            runtime.Erasure.Append(actor, ErasureActions.Erase, id, email, toWithdraw);
-            Metrics.Increment("altrata_subjects_erased_total");
-        }
-
-        Metrics.Set("altrata_suppression_list_size", runtime.State.ListSuppressedSubjects().Count);
-        Telemetry.SetTag(span, "altrata.items.withdrawn", withdrawn);
-        Telemetry.SetTag(span, "altrata.items.failed", failures);
-
-        if (failures > 0)
-        {
-            Console.WriteLine($"{withdrawn} item(s) withdrawn, {failures} queued for retry (dead-lettered DELETE). " +
-                              $"{subjectIds.Count} subject(s) suppressed and ledgered. " +
-                              "Run retry-failed to complete the Graph withdrawals.");
-            return false;
-        }
-        Console.WriteLine($"{withdrawn} item(s) withdrawn; {subjectIds.Count} subject(s) suppressed and ledgered. " +
-                          "Erasure complete and durable against re-delivery.");
-        return true;
     }
 
     internal static Task<object?> UnsuppressSubjectAsync(
         Runtime runtime, string altrataId, string actor, bool confirm)
     {
         var id = altrataId.Trim();
-        if (!runtime.State.IsSubjectSuppressed(id))
+
+        // Shard-aware: the suppression lives in each shard's own state (plus the
+        // base), so lifting a block must clear every store — otherwise a shard
+        // keeps skipping the subject.
+        var targets = new List<(Runtime Rt, bool Owned)>();
+        if (ShardingConfig.TryLoad(out var shards, out var shardError))
         {
-            Console.WriteLine($"Subject '{id}' is not suppressed — nothing to do.");
+            foreach (var shard in shards)
+                targets.Add((CreateShardRuntime(runtime, shard), true));
+        }
+        else if (shardError != null)
+        {
+            throw new ConfigurationError(shardError);
+        }
+        targets.Add((runtime, false));
+
+        try
+        {
+            if (targets.All(t => !t.Rt.State.IsSubjectSuppressed(id)))
+            {
+                Console.WriteLine($"Subject '{id}' is not suppressed — nothing to do.");
+                return Task.FromResult<object?>(true);
+            }
+            if (!confirm)
+            {
+                Console.WriteLine($"DRY RUN — subject '{id}' WOULD be un-suppressed (re-ingestable on the next crawl). " +
+                                  "Re-run with --confirm.");
+                return Task.FromResult<object?>(true);
+            }
+            foreach (var (rt, _) in targets)
+            {
+                if (rt.State.IsSubjectSuppressed(id))
+                    rt.State.RemoveSuppressedSubject(id);
+            }
+            runtime.Erasure.Append(actor, ErasureActions.Unsuppress, id, null, Array.Empty<string>());
+            Metrics.Set("altrata_suppression_list_size", runtime.State.ListSuppressedSubjects().Count);
+            Console.WriteLine($"Subject '{id}' un-suppressed; it may be ingested again on the next crawl.");
             return Task.FromResult<object?>(true);
         }
-        if (!confirm)
+        finally
         {
-            Console.WriteLine($"DRY RUN — subject '{id}' WOULD be un-suppressed (re-ingestable on the next crawl). " +
-                              "Re-run with --confirm.");
-            return Task.FromResult<object?>(true);
+            foreach (var (rt, owned) in targets)
+                if (owned)
+                    rt.Dispose();
         }
-        runtime.State.RemoveSuppressedSubject(id);
-        runtime.Erasure.Append(actor, ErasureActions.Unsuppress, id, null, Array.Empty<string>());
-        Metrics.Set("altrata_suppression_list_size", runtime.State.ListSuppressedSubjects().Count);
-        Console.WriteLine($"Subject '{id}' un-suppressed; it may be ingested again on the next crawl.");
-        return Task.FromResult<object?>(true);
     }
 }

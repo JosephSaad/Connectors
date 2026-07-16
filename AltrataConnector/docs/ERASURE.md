@@ -34,6 +34,19 @@ exactly what *would* be removed — subject id(s), the item-id list, crosswalk a
 suppression status — is printed and nothing is mutated. Same safety pattern as
 `purge-all`.
 
+### Sharding (`GRAPH_CONNECTION_SHARDS`)
+
+`forget-subject` and `unsuppress-subject` are **shard-aware**, like `retry-failed`
+and `purge-all`. Under connection sharding a subject's items, reverse index,
+crosswalk and suppression list live in *each shard's own store*, so erasure
+resolves the subject across every shard, withdraws each shard's items on that
+shard's own Graph connection, and suppresses the subject in every shard's state
+(plus the base). A single authoritative ledger entry per subject is written to the
+base ledger. `--email` resolution scans every shard's crosswalk, since an email may
+only be linked in the shard that ingested that person. (Without this, an erasure
+under sharding would withdraw and suppress nothing, and the subject would be
+re-ingested on the next crawl.)
+
 ## Durability against re-delivery (the key property)
 
 Erased subject ids go on a persisted **suppression list** in the state store

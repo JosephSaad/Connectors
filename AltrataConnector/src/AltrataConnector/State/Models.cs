@@ -2,6 +2,8 @@
 // ---------------
 // Serializable state records shared by the file and SQL Server state backends.
 
+using System.Text.Json.Serialization;
+
 namespace AltrataConnector.State;
 
 /// <summary>Crash-resume checkpoint: position inside a feed delivery.</summary>
@@ -19,6 +21,11 @@ public static class DeadLetterOps
 {
     public const string Upsert = "upsert";
     public const string Delete = "delete";
+
+    /// <summary>A record that failed TRANSFORM (before an item existed to PUT).
+    /// Deterministic — replaying cannot fix it; fix the source feed and re-run
+    /// ingest, or retire it with `retry-failed --retire-unreplayable`.</summary>
+    public const string Transform = "transform";
 }
 
 /// <summary>One dead-lettered record (JSONL line in file mode, row in SQL mode).</summary>
@@ -38,6 +45,18 @@ public sealed record DeadLetterRecord
     public string PayloadJson { get; init; } = "";
     public DateTime FailedUtc { get; init; } = DateTime.UtcNow;
     public int Attempts { get; init; } = 1;
+
+    /// <summary>
+    /// True when retry-failed can act on this record: DELETEs carry their whole
+    /// payload in the item id, upserts need the captured item JSON. Transform
+    /// failures (op 'transform', or legacy upserts with an empty payload from
+    /// queues written before the op existed) are NOT replayable — they are
+    /// excluded from the dead-letter alert depth and retired explicitly.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsReplayable =>
+        Op == DeadLetterOps.Delete
+        || (Op == DeadLetterOps.Upsert && PayloadJson.Length > 0);
 }
 
 /// <summary>Crawl kinds tracked by the sync timestamps.</summary>

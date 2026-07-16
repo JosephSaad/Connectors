@@ -8,6 +8,7 @@
 //                     the linked CRM contact id from entity resolution
 //   * content       : compact human-readable text for semantic indexing
 
+using System.Security.Cryptography;
 using System.Text;
 using AltrataConnector.Entitlement;
 using AltrataConnector.Graph;
@@ -78,14 +79,39 @@ public sealed class ItemTransformer
         }
     }
 
-    /// <summary>Graph-safe item id: alphanumeric plus '-' (everything else → '-').</summary>
+    /// <summary>
+    /// Graph-safe, collision-free item id. Record ids that are already
+    /// Graph-safe (alphanumeric plus '-') keep the legacy `{dataset}-{id}`
+    /// shape unchanged. Ids containing any other character are sanitized
+    /// (char → '-') AND suffixed with a short stable SHA-256 of the raw id, so
+    /// two distinct raw ids can never fold onto the same item id (e.g.
+    /// 'acct:12/3' vs 'acct-12-3' — sanitization alone is not injective, and a
+    /// collision would let one subject's PUT overwrite another's item or a
+    /// DSAR tombstone mis-target). Deterministic: erasure recomputes the same
+    /// id from the same raw id.
+    /// </summary>
     public static string BuildItemId(string dataset, string recordId)
     {
         var raw = $"{dataset}-{recordId}";
+        var sanitized = false;
         var sb = new StringBuilder(raw.Length);
         foreach (var ch in raw)
-            sb.Append(char.IsLetterOrDigit(ch) || ch == '-' ? ch : '-');
-        return sb.ToString();
+        {
+            if (char.IsLetterOrDigit(ch) || ch == '-')
+            {
+                sb.Append(ch);
+            }
+            else
+            {
+                sb.Append('-');
+                sanitized = true;
+            }
+        }
+        if (!sanitized)
+            return sb.ToString();
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(recordId)))
+            .ToLowerInvariant()[..12];
+        return $"{sb}-{hash}";
     }
 
     public ExternalItem Transform(FeedRecord record, IReadOnlyList<AclEntry> acl)

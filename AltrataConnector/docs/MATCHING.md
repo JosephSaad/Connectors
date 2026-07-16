@@ -39,8 +39,14 @@ score = 0.6 · jaccard(name tokens)
   ```json
   {"TimestampUtc":"…","AltrataId":"P42","CandidateContactId":"C1",
    "Score":0.8,"NameScore":1.0,"EmployerScore":0.67,"RoleScore":0.0,
-   "Name":"Ada Lovelace","Employer":"Analytical Engines International"}
+   "NameHash":"1f0c2e…","EmployerHash":"9ab41d…"}
   ```
+
+  **PII**: the queue is a log file and follows the connector-wide
+  ids/counts/hashes-only rule — it carries ids, scores and short SHA-256
+  hashes of the *normalized* name/employer (dedup keys), never the raw
+  personal values. An adjudicator dereferences both sides through the ids:
+  the Altrata record via the feed and the CRM contact via the identity store.
 
   Review workflow: confirm a candidate by adding the pair to your CRM export
   (or fixing the email), then re-crawl — the deterministic tier picks it up.

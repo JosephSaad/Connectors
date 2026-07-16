@@ -183,8 +183,14 @@ public class ItemTransformerTests
     [Fact]
     public void BuildsGraphSafeItemIds()
     {
+        // Graph-safe ids keep the legacy shape; ids needing sanitization gain a
+        // short stable hash suffix so distinct raw ids can never collide
+        // (see CodeReviewRound2Tests.SanitizedIdsNeverCollide).
         Assert.Equal("PersonProfile-P1", ItemTransformer.BuildItemId("PersonProfile", "P1"));
-        Assert.Equal("PersonProfile-a-b-c", ItemTransformer.BuildItemId("PersonProfile", "a/b c"));
+        var dirty = ItemTransformer.BuildItemId("PersonProfile", "a/b c");
+        Assert.StartsWith("PersonProfile-a-b-c-", dirty);
+        Assert.Matches("^PersonProfile-a-b-c-[0-9a-f]{12}$", dirty);
+        Assert.Equal(dirty, ItemTransformer.BuildItemId("PersonProfile", "a/b c"));  // deterministic
     }
 
     [Fact]

@@ -11,6 +11,7 @@
 // CRM contact id is emitted as a property on the externalItem.
 
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace AltrataConnector.Identity;
@@ -137,7 +138,15 @@ public sealed record FuzzyOptions
     public IMatchReviewSink? Review { get; init; }
 }
 
-/// <summary>A below-threshold candidate for a human to review.</summary>
+/// <summary>
+/// A below-threshold candidate for a human to review. PII CAUTION: this record
+/// is written to a log file (logs/match_review_*.jsonl), which enforces the
+/// same ids/counts/hashes-only allowlist as every other connector log — it
+/// carries ONLY ids, scores and short hashes of the compared values (for
+/// dedup); never the raw name/employer. An adjudicator dereferences both sides
+/// via the ids: the Altrata record through the feed/store and the CRM contact
+/// through the identity store.
+/// </summary>
 public sealed record MatchReviewEntry
 {
     public DateTime TimestampUtc { get; init; } = DateTime.UtcNow;
@@ -147,8 +156,19 @@ public sealed record MatchReviewEntry
     public double NameScore { get; init; }
     public double EmployerScore { get; init; }
     public double RoleScore { get; init; }
-    public string? Name { get; init; }
-    public string? Employer { get; init; }
+
+    /// <summary>Short SHA-256 of the NORMALIZED record name (dedup key, no PII).</summary>
+    public string? NameHash { get; init; }
+
+    /// <summary>Short SHA-256 of the NORMALIZED record employer (dedup key, no PII).</summary>
+    public string? EmployerHash { get; init; }
+
+    /// <summary>Stable short hash of a normalized value for review-queue dedup.</summary>
+    public static string? HashValue(string? normalized) =>
+        string.IsNullOrEmpty(normalized)
+            ? null
+            : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)))
+                .ToLowerInvariant()[..16];
 }
 
 public interface IMatchReviewSink
@@ -295,6 +315,8 @@ public sealed class EntityResolver
 
         if (bestScore.Total >= _fuzzy.ReviewFloor)
         {
+            // Ids + scores + hashes ONLY — raw name/employer are PII and must
+            // never reach the review-queue log file.
             _fuzzy.Review?.Add(new MatchReviewEntry
             {
                 AltrataId = altrataId ?? "(unknown)",
@@ -303,8 +325,8 @@ public sealed class EntityResolver
                 NameScore = bestScore.NameScore,
                 EmployerScore = bestScore.EmployerScore,
                 RoleScore = bestScore.RoleScore,
-                Name = name,
-                Employer = employer,
+                NameHash = MatchReviewEntry.HashValue(normalizedName),
+                EmployerHash = MatchReviewEntry.HashValue(normalizedEmployer),
             });
         }
         return null;

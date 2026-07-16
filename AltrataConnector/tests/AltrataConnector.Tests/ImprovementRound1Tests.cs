@@ -498,6 +498,8 @@ public class ShardAwareRetryFailedTests : IDisposable
             var runtime = TestFixtures.NewRuntime(
                 TestFixtures.NewConfig() with { ConnectorId = shard.ConnectionId },
                 graph, Path.Combine(root, shard.ConnectionId));
+            // Upsert replays rebuild the ACL from each shard's CURRENT seats.
+            runtime.Identity.ReplaceSeats(TestFixtures.DefaultSeats());
             shardRuntimes[shard.ConnectionId] = runtime;
             return runtime;
         };

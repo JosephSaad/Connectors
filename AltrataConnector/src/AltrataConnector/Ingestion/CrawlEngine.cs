@@ -250,10 +250,16 @@ public sealed class CrawlEngine
             }
         }
 
-        // 6. Bookkeeping + alerts.
-        var deadLetterDepth = _state.ReadDeadLetters().Count;
-        Metrics.SetDeadLetterDepth(deadLetterDepth);
-        await _alerts.CheckDeadLetterDepthAsync(deadLetterDepth);
+        // 6. Bookkeeping + alerts. Only REPLAYABLE records count toward the
+        // dead-letter depth alert: transform failures are deterministic and
+        // un-replayable (they need a feed fix + re-ingest, or an explicit
+        // `retry-failed --retire-unreplayable`), so they must not trip the
+        // replay-queue alert forever. They stay visible via their own gauge.
+        var deadLetters = _state.ReadDeadLetters();
+        var replayableDepth = deadLetters.Count(r => r.IsReplayable);
+        Metrics.SetDeadLetterDepth(replayableDepth);
+        Metrics.Set("altrata_deadletter_unreplayable", deadLetters.Count - replayableDepth);
+        await _alerts.CheckDeadLetterDepthAsync(replayableDepth);
 
         // 7. Close (pinned close-with-failed-claims semantics — docs/HA.md):
         //    a crawl with failed claims still CLOSES (status 'failed', never
@@ -360,7 +366,28 @@ public sealed class CrawlEngine
             Progress.CurrentDataset = dataset;
 
             var path = Path.Combine(delivery.Directory, file.Name);
-            var records = FeedReader.ReadRecords(path, dataset);
+            IReadOnlyList<FeedRecord> records;
+            try
+            {
+                // Re-verify the manifest SHA-256 against the SAME open handle
+                // the records are parsed from: a file swapped after the 4a gate
+                // (TOCTOU) is rejected here instead of being ingested under the
+                // manifest's hash.
+                records = FeedReader.ReadRecords(path, dataset, file.Sha256);
+            }
+            catch (Exception exc) when (exc is ChecksumMismatchException or FileNotFoundException
+                                            or FeedFileTooLargeException)
+            {
+                _state.ClearCheckpoint();
+                Telemetry.SetTag(deliverySpan, "altrata.delivery.status", Reconciliation.StatusRejected);
+                Logger.Error($"Delivery '{delivery.Id}' REJECTED at read time: {exc.Message}");
+                Metrics.Increment("altrata_deliveries_rejected_total");
+                await _alerts.SendAsync("critical", "delivery_rejected", exc.Message,
+                    new Dictionary<string, object?> { ["deliveryId"] = delivery.Id });
+                var readRejected = Reconciliation.Summarize(delivery.Id, fileResults, exc.Message);
+                Reconciliation.WriteReport(_config.ConnectorId, readRejected);
+                return readRejected;
+            }
             if (records.Count != file.RecordCount)
                 Logger.Warning($"'{file.Name}': manifest says {file.RecordCount} records, parsed {records.Count}");
 
@@ -562,12 +589,18 @@ public sealed class CrawlEngine
                 }
                 catch (Exception exc)
                 {
+                    // Transform failures are deterministic (no item exists to
+                    // PUT), so they are marked with the un-replayable op:
+                    // retry-failed reports/retires them instead of throwing on
+                    // a missing payload forever, and they don't count toward
+                    // the replay-queue alert depth.
                     deadLetters.Add(new DeadLetterRecord
                     {
                         ItemId = ItemTransformer.BuildItemId(dataset, record.Id ?? $"row{i}"),
                         Dataset = dataset,
                         DeliveryId = delivery.Id,
                         Error = exc.Message,
+                        Op = DeadLetterOps.Transform,
                         PayloadJson = "",
                     });
                     if (Logger.IsDebugEnabled)
@@ -828,21 +861,23 @@ public sealed class CrawlEngine
                 try
                 {
                     FeedReader.ValidateChecksums(delivery);
+                    foreach (var file in delivery.Manifest.Files)
+                    {
+                        var dataset = Datasets.Canonical(file.Dataset);
+                        if (!pass.Contains(dataset))
+                            continue;
+                        // Verified read: hash + parse from one open handle
+                        // (see ProcessDeliveryAsync — same TOCTOU guard).
+                        var records = FeedReader.ReadRecords(
+                            Path.Combine(delivery.Directory, file.Name), dataset, file.Sha256);
+                        PathExtractor.Accumulate(build, dataset, records);
+                    }
                 }
-                catch (Exception exc) when (exc is ChecksumMismatchException or FileNotFoundException)
+                catch (Exception exc) when (exc is ChecksumMismatchException or FileNotFoundException
+                                                or FeedFileTooLargeException)
                 {
                     // Rejected deliveries never feed the index (consistent with ingestion).
                     Logger.Warning($"Path index: skipping delivery '{delivery.Id}' ({exc.Message})");
-                    continue;
-                }
-                foreach (var file in delivery.Manifest.Files)
-                {
-                    var dataset = Datasets.Canonical(file.Dataset);
-                    if (!pass.Contains(dataset))
-                        continue;
-                    var records = FeedReader.ReadRecords(
-                        Path.Combine(delivery.Directory, file.Name), dataset);
-                    PathExtractor.Accumulate(build, dataset, records);
                 }
             }
         }

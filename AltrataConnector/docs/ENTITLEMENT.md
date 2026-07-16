@@ -25,6 +25,11 @@ Exactly one of:
   seat set — a crawl aborts **before any item is PUT**.
 * `AssertNeverEveryone` re-checks every ACL at transform time and again in
   `retry-failed` replay (defence in depth).
+* `retry-failed` never re-PUTs the ACL captured at dead-letter time: the ACL
+  is **rebuilt from the current seats** before replay (empty seat list ⇒ the
+  record stays queued — fail closed) and the hash of the ACL actually sent is
+  recorded, so a seat removed after the failure is never re-granted and the
+  re-ACL reconciliation stays truthful (docs/RETRY.md).
 * An entitlement violation is never dead-lettered; it aborts the run and fires
   a `critical` alert.
 

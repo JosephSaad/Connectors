@@ -53,12 +53,31 @@ live so each cycle/shard sees current env state.
 
 ## Interaction with dead-letter
 
-A record that fails transform or exhausts Graph retries is appended to the
-dead-letter queue (batch-append, corruption-safe under concurrent writers)
-with the fully transformed item payload; `retry-failed` replays it through
-the same retry pipeline. `altrata_graph_retries_total` counts every retry;
+A record that exhausts Graph retries is appended to the dead-letter queue
+(batch-append, corruption-safe under concurrent writers) with the fully
+transformed item payload; `retry-failed` replays it through the same retry
+pipeline. `altrata_graph_retries_total` counts every retry;
 `altrata_graph_throttle_429_total` counts throttle events;
 `altrata_items_failed_total` counts records that exhausted retries.
+
+**Replay entitlement**: an upsert replay never re-PUTs the ACL captured at
+dead-letter time — that ACL is stale by definition. The ACL is **rebuilt from
+the CURRENT seat list** (`everyone` grants remain structurally impossible, and
+an empty seat list fails closed: the record stays queued), and the identity
+record stores the hash of the ACL actually sent, so the seat-change re-ACL
+reconciliation stays truthful. A seat removed after an item dead-lettered is
+therefore never re-granted by `retry-failed`.
+
+**Un-replayable entries**: transform failures dead-letter with
+`op: transform` and no payload (no item ever existed to PUT — the failure is
+deterministic). `retry-failed` reports them without bumping their attempt
+count, and they are **excluded from `altrata_deadletter_depth` and the
+`ALERT_DEADLETTER_THRESHOLD` alert** (they get their own gauge,
+`altrata_deadletter_unreplayable`). Resolve them by fixing the source feed
+and re-ingesting, or drop them with `retry-failed --retire-unreplayable`.
+Legacy queue entries written before the `transform` op existed (upsert with
+an empty payload) are treated the same way instead of failing forever with
+"no payload captured".
 
 The Altrata REST API client is separate: it is throttled client-side
 (`ALTRATA_API_CALLS_PER_MINUTE`, sliding window) *before* the call, because

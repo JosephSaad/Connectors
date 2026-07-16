@@ -43,6 +43,11 @@ Datasets: `PersonProfile`, `Organization`, `BoardMembership`,
 `config/schema.json`). Data files are JSON arrays of objects, JSONL, or CSV
 with a header row.
 
+`.jsonl` and `.csv` files are streamed line-by-line (uncapped). A `.json`
+ARRAY must be parsed in memory, so it is capped at `FEED_JSON_MAX_MB`
+(default 256 MB) — an oversized `.json` rejects the delivery with guidance to
+re-deliver the dataset as `.jsonl`.
+
 ## Checksum gate
 
 Before anything is ingested, every file's SHA-256 is recomputed and compared
@@ -51,6 +56,23 @@ delivery**: nothing is ingested, a `critical` `delivery_rejected` alert fires,
 `altrata_deliveries_rejected_total` increments, a `rejected` reconciliation
 report is written, and the delivery is NOT marked processed (a corrected
 re-drop with the same delivery id is picked up by the next crawl).
+
+The gate is enforced **twice**: once up front over the whole delivery, and
+again at read time — each data file's records are parsed from the **same open
+handle** its SHA-256 was just recomputed on, so a file swapped between the
+upfront gate and the read (TOCTOU) is rejected instead of being ingested
+under the manifest's hash.
+
+## Item ids
+
+Every record becomes externalItem id `{dataset}-{recordId}`. Record ids that
+are already Graph-safe (alphanumeric plus `-`) keep exactly that shape; ids
+containing any other character are sanitized (char → `-`) **and suffixed with
+a short stable SHA-256 of the raw id**, so two distinct raw ids can never
+collide onto one item id (e.g. `acct:12/3` vs `acct-12-3` — a collision would
+let one subject's PUT overwrite another's item, or a tombstone/DSAR erasure
+mis-target). The mapping is deterministic: tombstones and `forget-subject`
+recompute the same id from the same raw id.
 
 ## Delta deliveries & tombstones
 
@@ -88,10 +110,14 @@ or `is_deleted` / `deleted` = `true`:
   exactly there (PUTs are idempotent, so a partially shipped superchunk
   re-PUTs safely). Files before the checkpoint are counted as already
   ingested, not re-PUT.
-* Records that fail transform or exhaust Graph retries are dead-lettered
+* Records that exhaust Graph retries are dead-lettered
   (`logs/failed_records_{CONNECTOR_ID}.jsonl` or the SQL table) with the full
-  item payload for `retry-failed` replay. Appends are batch-atomic and safe
-  under concurrent $batch workers (process-wide per-file lock).
+  item payload for `retry-failed` replay. Records that fail **transform** are
+  dead-lettered with `op: transform` (no item payload exists) — they are
+  un-replayable by design: fix the source feed and re-ingest, or drop them
+  with `retry-failed --retire-unreplayable`; they never count toward the
+  dead-letter alert depth (see docs/RETRY.md). Appends are batch-atomic and
+  safe under concurrent $batch workers (process-wide per-file lock).
 
 ## Reconciliation
 

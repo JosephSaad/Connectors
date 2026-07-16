@@ -173,6 +173,9 @@ public class DeadLetterTests
         var config = TestFixtures.NewConfig();
         var graph = new FakeGraphClient();
         using var runtime = TestFixtures.NewRuntime(config, graph, root);
+        // Upsert replays rebuild the ACL from the CURRENT seats (fail closed
+        // when empty), so the store must hold a seat list.
+        runtime.Identity.ReplaceSeats(TestFixtures.DefaultSeats());
 
         var goodPayload = System.Text.Json.JsonSerializer.Serialize(new AltrataConnector.Graph.ExternalItem
         {
@@ -209,6 +212,7 @@ public class DeadLetterTests
         var config = TestFixtures.NewConfig();
         var graph = new FakeGraphClient();
         using var runtime = TestFixtures.NewRuntime(config, graph, root);
+        runtime.Identity.ReplaceSeats(TestFixtures.DefaultSeats());
 
         var payload = System.Text.Json.JsonSerializer.Serialize(new AltrataConnector.Graph.ExternalItem
         {

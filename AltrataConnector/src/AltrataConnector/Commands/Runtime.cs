@@ -96,15 +96,16 @@ public sealed class Runtime : IDisposable
         CreateFor(ShardingConfig.ForShard(Config, shard));
 
     /// <summary>
-    /// Dead-letter depth for /metrics. Under connection sharding each shard
-    /// dead-letters against its own connection id, so the depth is the sum
-    /// across shard stores; otherwise the base connector's queue is the whole
-    /// story.
+    /// Dead-letter depth for /metrics — REPLAYABLE records only (transform
+    /// failures have their own gauge and never trip the replay alert). Under
+    /// connection sharding each shard dead-letters against its own connection
+    /// id, so the depth is the sum across shard stores; otherwise the base
+    /// connector's queue is the whole story.
     /// </summary>
     public int DeadLetterDepth()
     {
         if (!ShardingConfig.TryLoad(out var shards, out _) || shards.Count == 0)
-            return State.ReadDeadLetters().Count;
+            return State.ReadDeadLetters().Count(r => r.IsReplayable);
 
         var depth = 0;
         foreach (var shard in shards)
@@ -113,7 +114,7 @@ public sealed class Runtime : IDisposable
                 ? new SqlStateStore(Config.SqlConnectionString!, shard.ConnectionId,
                     Config.SqlUseManagedIdentity, Config.SqlMaxRetries)
                 : new FileStateStore(shard.ConnectionId);
-            depth += shardState.ReadDeadLetters().Count;
+            depth += shardState.ReadDeadLetters().Count(r => r.IsReplayable);
         }
         return depth;
     }

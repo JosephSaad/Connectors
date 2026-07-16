@@ -48,7 +48,11 @@ public static class Guide
               altrata-connector ingest-object --type WealthIndicator
               altrata-connector ingest-item --id P123456 --purpose "RFP for client X"
               altrata-connector retry-failed --clear-on-success
-                # shard-aware; replays upserts (PUT) and delta tombstones (DELETE)
+                # shard-aware; replays upserts (PUT, ACL rebuilt from the
+                # CURRENT seats) and delta tombstones (DELETE)
+              altrata-connector retry-failed --retire-unreplayable
+                # drop transform-failure entries (no payload to replay;
+                # fix the feed and re-ingest instead — docs/RETRY.md)
               altrata-connector seat-sync               # refresh seats; re-ACLs on change
               altrata-connector identity-dry-run --save
               altrata-connector forget-subject --id P123456          # DSAR dry-run
@@ -70,7 +74,8 @@ public static class Guide
         5b. ENTITY RESOLUTION (docs/MATCHING.md)
           Deterministic email → name+employer, then the opt-in fuzzy tier
           (ENTITY_FUZZY_MATCHING=true; threshold ENTITY_MATCH_THRESHOLD).
-          Near-misses queue in logs/match_review_{connector}.jsonl; every link
+          Near-misses queue in logs/match_review_{connector}.jsonl (ids,
+          scores and hashes only — never raw names/employers); every link
           carries crmMatchRule + crmMatchConfidence provenance.
 
         5c. RELATIONSHIP PATHS (docs/RELATIONSHIP_PATHS.md)

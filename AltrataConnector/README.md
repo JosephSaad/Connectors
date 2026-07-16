@@ -69,7 +69,10 @@ ingest               # full crawl only
 ingest --incremental # only deliveries not yet processed
 ingest-object --type WealthIndicator
 ingest-item --id P123456 --purpose "RFP for client X" [--requested-by joseph]
-retry-failed [--clear-on-success]   # shard-aware; replays upserts AND tombstone deletes
+retry-failed [--clear-on-success] [--retire-unreplayable]
+                     # shard-aware; replays upserts (ACL rebuilt from CURRENT
+                     # seats) AND tombstone deletes; --retire-unreplayable
+                     # drops transform-failure entries (docs/RETRY.md)
 identity-dry-run [--save]
 seat-sync            # refresh seats; changed list → re-ACL pass
 validate-config [--strict]
@@ -236,7 +239,7 @@ hashes/enums (allowlist-enforced) — never names, emails or wealth figures. See
 ## Tests
 
 ```bash
-dotnet test        # 324 tests: CLI parsing, checkpoint resume, dead-letter
+dotnet test        # 371 tests: CLI parsing, checkpoint resume, dead-letter
                    # (incl. 16-writer concurrency corruption stress),
                    # retry/backoff math (Retry-After honoured exactly + 60s clamp,
                    # ±20% jitter), $batch pipeline (429 ladder, adaptive

@@ -70,7 +70,8 @@ on Windows it falls back to localhost-only and logs a warning.
 | `altrata_items_deleted_total` | counter | items withdrawn (delta tombstones, purge, retry-failed delete replays) |
 | `altrata_graph_requests_total` / `altrata_graph_retries_total` | counter | Graph traffic / retries |
 | `altrata_graph_throttle_429_total` | counter | 429 throttle events (single-request + $batch ladder + adaptive dial-downs) |
-| `altrata_deadletter_depth` | gauge | live queue depth (refreshed per scrape; sums across shard queues under GRAPH_CONNECTION_SHARDS) |
+| `altrata_deadletter_depth` | gauge | live REPLAYABLE queue depth (refreshed per scrape; sums across shard queues under GRAPH_CONNECTION_SHARDS; drives ALERT_DEADLETTER_THRESHOLD) |
+| `altrata_deadletter_unreplayable` | gauge | un-replayable dead-letters (transform failures) awaiting feed fix + re-ingest, or `retry-failed --retire-unreplayable` |
 | `altrata_deliveries_processed_total` / `altrata_deliveries_rejected_total` | counter | reconciled / checksum-rejected deliveries |
 | `altrata_api_billable_lookups_total` | counter | lifetime billable API lookups (persisted in state, survives restarts) |
 | `altrata_seat_count` | gauge | current seat principals |
