@@ -41,6 +41,11 @@ All five share one tenant's Graph quotas (30 connections, 50M indexed items):
 [TENANT_GOVERNANCE.md](TENANT_GOVERNANCE.md) allocates connections, item
 budgets, app registrations and crawl windows across the fleet.
 
+Operator documentation (deploy / monitor / troubleshoot / support), written for
+IT operators, lives in [Operator_Guides/](Operator_Guides/) — start with
+`00_START_HERE.pdf`, then the Tenant & Common Concepts guide, then your
+connector's guide.
+
 ## Build & test a connector
 
 ```bash
