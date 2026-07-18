@@ -9,6 +9,11 @@ checklists, "information to request" callouts, and glossaries.
 [Tenant & Common Concepts Guide](00_Tenant_and_Common_Concepts_Guide.docx), then
 the guide for the connector you are deploying.
 
+The one-page architecture picture —
+[Connectors_Architecture_Diagram.svg](Connectors_Architecture_Diagram.svg) —
+shows all five connectors, their source systems, the Microsoft Graph API,
+Entra ID, the Copilot semantic index and the supporting services on one canvas.
+
 | # | Full guide (Word) | Quick reference (PDF) | Covers |
 |---|---|---|---|
 | 00 | [Tenant & Common Concepts Guide](00_Tenant_and_Common_Concepts_Guide.docx) | [Start Here](00_START_HERE.pdf) | Shared theory: Copilot & the index, Microsoft Graph, identity/ACLs, the connector engine, security, tenant quotas, deployment, monitoring, DR, master glossary |

@@ -5,6 +5,8 @@ on a shared, production-hardened C#/.NET 10 chassis. Each connector is
 self-contained (its own solution, tests, config, docs, Docker image and CI) and
 lives in its own top-level folder.
 
+![Deployment & data flow — five connectors](Operator_Guides/Connectors_Architecture_Diagram.svg)
+
 | Connector | Source system | Highlights | Tests |
 |---|---|---|---|
 | [SalesforceConnector](SalesforceConnector/) | Salesforce CRM | Sharing-model ACLs, standard + custom objects, sovereign-cloud ready | 899 |
