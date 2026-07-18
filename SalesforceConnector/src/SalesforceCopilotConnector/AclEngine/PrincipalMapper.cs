@@ -426,7 +426,12 @@ public class PrincipalMapper
         }
         catch (Exception exc)
         {
-            Logger.Debug($"[PrincipalMapper] Graph direct lookup error for {identifier}: {exc.Message}");
+            // Not a Graph API status — a transport/parse fault. Warn (not Debug):
+            // the identifier will be reported "No AAD user found" below, and without
+            // this line that reads as a missing account rather than an outage.
+            Logger.Warning(
+                $"[PrincipalMapper] Graph direct lookup failed for {identifier} "
+                + $"({exc.GetType().Name}: {exc.Message}) — trying filter lookup");
         }
 
         // Attempt 2 – filter by UPN, mail, on-premises UPN, or employeeId.
@@ -464,7 +469,10 @@ public class PrincipalMapper
         }
         catch (Exception exc)
         {
-            Logger.Debug($"[PrincipalMapper] Graph filter lookup exception for {identifier}: {exc.Message}");
+            // See the direct-lookup catch above: transport/parse fault, not a 404.
+            Logger.Warning(
+                $"[PrincipalMapper] Graph filter lookup failed for {identifier} "
+                + $"({exc.GetType().Name}: {exc.Message}) — treating identifier as unresolved");
         }
 
         Logger.Warning($"[PrincipalMapper] No AAD user found for '{identifier}' (tried direct + filter on UPN/mail/onPremisesUPN/employeeId)");

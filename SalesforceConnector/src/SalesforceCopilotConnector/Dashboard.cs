@@ -174,6 +174,8 @@ public class IngestionDashboard
             }
             catch
             {
+                // Best-effort join during console teardown — the render thread is
+                // a daemon; a Join fault must not block command completion.
             }
             _liveThread = null;
         }

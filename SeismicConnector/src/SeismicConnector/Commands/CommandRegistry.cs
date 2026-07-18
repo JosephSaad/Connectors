@@ -100,7 +100,9 @@ public static class CommandRegistry
         }
         catch (Exception exc)
         {
-            Logging.GetLogger("seismic_connector").Warning($"Could not write summary file: {exc.Message}");
+            Logging.GetLogger("seismic_connector").Warning(
+                $"Could not write summary file {summaryFile}: {exc.Message} "
+                + "(the summary is still printed below and the run log is unaffected).");
         }
         Logging.GetLogger("progress").Info(text);
     }

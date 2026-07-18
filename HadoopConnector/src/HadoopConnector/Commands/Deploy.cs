@@ -91,6 +91,9 @@ public static class Deploy
                     }
                     catch (TaskCanceledException)
                     {
+                        // Graceful stop fired mid-wait — pure flow control, not a
+                        // failure: exit the schedule loop (logged as "Continuous
+                        // mode stopped" below).
                         break;
                     }
                 }

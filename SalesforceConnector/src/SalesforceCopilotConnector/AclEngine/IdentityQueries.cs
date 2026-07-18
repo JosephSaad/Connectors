@@ -121,9 +121,11 @@ public class IdentityQueryClient
         {
             return Settings.BuildOwdFieldMap();
         }
-        catch (Exception)
+        catch (Exception exc)
         {
-            Logger.Warning("[IdentityQuery] Could not load owd_field_map from config");
+            Logger.Warning(
+                $"[IdentityQuery] Could not load owd_field_map from config/schema.json "
+                + $"({exc.GetType().Name}: {exc.Message}) — OWD lookups will use defaults");
             return new Dictionary<string, string>();
         }
     }
@@ -135,9 +137,11 @@ public class IdentityQueryClient
         {
             return Settings.BuildObjectNameList();
         }
-        catch (Exception)
+        catch (Exception exc)
         {
-            Logger.Warning("[IdentityQuery] Could not load object names from config");
+            Logger.Warning(
+                $"[IdentityQuery] Could not load object names from config/schema.json "
+                + $"({exc.GetType().Name}: {exc.Message}) — identity crawl object list will be empty");
             return new List<string>();
         }
     }
@@ -622,6 +626,8 @@ public class IdentityQueryClient
                 }
                 catch (ArgumentException)
                 {
+                    // Unknown Group.Type value (new Salesforce group kind) — treat as a
+                    // Regular group so its members still expand; no log needed per row.
                     groupType = UserOrGroupType.Regular;
                 }
 
@@ -767,9 +773,10 @@ public class IdentityQueryClient
         {
             records = await _sf.QueryAllAsync(soql);
         }
-        catch (InvalidOperationException)
+        catch (InvalidOperationException exc)
         {
-            Logger.Warning($"[IdentityQuery] Could not query territory users for {territoryId}");
+            Logger.Warning(
+                $"[IdentityQuery] Could not query territory users for {territoryId}: {exc.Message}");
             return new List<string>();
         }
         return records
@@ -800,9 +807,10 @@ public class IdentityQueryClient
         {
             records = await _sf.QueryAllAsync(soql);
         }
-        catch (InvalidOperationException)
+        catch (InvalidOperationException exc)
         {
-            Logger.Warning($"[IdentityQuery] Could not query child territories for {territoryId}");
+            Logger.Warning(
+                $"[IdentityQuery] Could not query child territories for {territoryId}: {exc.Message}");
             return new List<string>();
         }
         return records

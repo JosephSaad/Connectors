@@ -841,6 +841,8 @@ public sealed class ArgumentParser
         }
         catch
         {
+            // Console.WindowWidth throws on redirected/headless consoles —
+            // fall through to argparse's default 80-column layout (78 usable).
         }
         return 78;
     }

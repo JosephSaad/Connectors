@@ -31,6 +31,8 @@ namespace ClarizenConnector;
 
 public static class Program
 {
+    private static readonly IAppLogger Logger = Logging.GetLogger("clarizen_connector.cli");
+
     public static async Task<int> Main(string[] args)
     {
         if (WindowsServiceHelpers.IsWindowsService())
@@ -85,7 +87,11 @@ public static class Program
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine(ex);
+            // Final backstop: nothing above handled this. Emit one structured
+            // ERROR naming the command with the full exception (type + stack) —
+            // Logger.Error reaches stderr AND the run's connector.log/JSON sink,
+            // so the failure is diagnosable from logs alone — and exit nonzero.
+            Logger.Error($"Command '{parsedArgs.Command}' failed with an unhandled exception", ex);
             return 1;
         }
     }

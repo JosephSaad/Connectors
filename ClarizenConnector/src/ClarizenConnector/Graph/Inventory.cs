@@ -57,18 +57,29 @@ public sealed class ItemInventory : IItemInventory
             Directory.CreateDirectory(dir);
 
         _connection = new SqliteConnection($"Data Source={path}");
-        _connection.Open();
-        using var command = _connection.CreateCommand();
-        command.CommandText =
-            """
-            CREATE TABLE IF NOT EXISTS items (
-                item_id       TEXT PRIMARY KEY,
-                object_type   TEXT NOT NULL,
-                last_seen_utc TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_items_object ON items(object_type);
-            """;
-        command.ExecuteNonQuery();
+        try
+        {
+            _connection.Open();
+            using var command = _connection.CreateCommand();
+            command.CommandText =
+                """
+                CREATE TABLE IF NOT EXISTS items (
+                    item_id       TEXT PRIMARY KEY,
+                    object_type   TEXT NOT NULL,
+                    last_seen_utc TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_items_object ON items(object_type);
+                """;
+            command.ExecuteNonQuery();
+        }
+        catch (Exception exc)
+        {
+            // Log-and-rethrow: SqliteException says "unable to open database
+            // file" without saying WHICH file — name the path, keep failing.
+            Logger.Error($"Failed to open item inventory database '{path}'", exc);
+            _connection.Dispose();
+            throw;
+        }
         Logger.Debug($"Item inventory opened: {path}");
     }
 

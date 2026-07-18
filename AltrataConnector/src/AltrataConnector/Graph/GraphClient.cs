@@ -608,6 +608,8 @@ public sealed class GraphClient : IGraphClient
             }
             catch (OperationCanceledException)
             {
+                // Graceful stop / cancellation — propagate untouched; the crawl
+                // saves its checkpoint and exits at the superchunk boundary.
                 throw;
             }
             catch (CircuitOpenException)
@@ -618,7 +620,9 @@ public sealed class GraphClient : IGraphClient
             }
             catch (Exception exc)
             {
-                Logger.Error($"Graph $batch call failed for {current.Count} items: {exc.Message}");
+                Logger.Error($"Graph $batch call failed for {current.Count} item(s) " +
+                             $"(op attempt {attempt}/{_config.GraphMaxRetries}): {exc.GetType().Name}: {exc.Message} " +
+                             "— all items in this sub-batch dead-letter for retry-failed.");
                 results.AddRange(current.Select(entry =>
                     new BatchOpResult(entry.ItemId, false, 0, $"[Graph] $batch POST failed: {exc.Message}")));
                 return results;
@@ -738,9 +742,15 @@ public sealed class GraphClient : IGraphClient
             if (parsed is JsonObject obj && obj["responses"] is JsonArray array)
                 return array.OfType<JsonObject>().ToList();
         }
-        catch (JsonException)
+        catch (JsonException exc)
         {
-            // fall through — treated as an empty response by the ladder
+            // Fall through — treated as an empty response by the ladder
+            // (unchanged), but distinguish "garbled body" from "genuinely
+            // empty" for the operator. Only the length and parser position are
+            // logged; the body itself is never logged (it can embed item
+            // payloads, and error text may quote them).
+            Logger.Warning($"Graph $batch response body did not parse as JSON " +
+                           $"({exc.Message}; body length {body.Length} chars) — treating as an empty response.");
         }
         return new List<JsonObject>();
     }

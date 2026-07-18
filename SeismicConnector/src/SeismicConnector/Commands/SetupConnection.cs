@@ -25,6 +25,7 @@ public static class SetupConnection
         catch (Exception ex)
         {
             progress.Error($"setup-connection failed: {ex.Message}");
+            Logging.GetLogger("seismic_connector").Error("setup-connection failed", ex);
             await Alerting.RaiseAsync("setup_failed", ex.Message);
             return false;
         }

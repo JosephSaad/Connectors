@@ -133,7 +133,9 @@ public static class Schema
                     return;
                 }
 
-                Logger.Warning($"Schema check failed for {config.Connector.Id}. Retrying...");
+                Logger.Warning(
+                    $"Schema check failed for {config.Connector.Id} "
+                    + $"(HTTP {error.StatusCode}: {error.Message}). Retrying in {config.Tuning.SchemaRetryIntervalSeconds}s...");
                 await Utils.DelayAsync(config.Tuning.SchemaRetryIntervalSeconds);
             }
         }

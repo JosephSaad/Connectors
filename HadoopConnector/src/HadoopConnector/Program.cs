@@ -31,6 +31,8 @@ namespace HadoopConnector;
 
 public static class Program
 {
+    private static readonly IAppLogger Logger = Logging.GetLogger("hadoop_connector");
+
     public static async Task<int> Main(string[] args)
     {
         if (WindowsServiceHelpers.IsWindowsService())
@@ -85,8 +87,23 @@ public static class Program
         }
         catch (Exception ex)
         {
+            // Final backstop for anything a command let escape (typically a
+            // config/auth error thrown before the command's own try/catch, e.g.
+            // from Runtime.Create). Log a structured record — command, args,
+            // exception WITH stack — so the failure is diagnosable from the run
+            // log alone, then mirror it to stderr and exit nonzero.
+            Logger.Error(
+                $"Command '{parsedArgs.Command}' failed with an unhandled exception "
+                + $"(args: {SummarizeArgs(args)})",
+                ex);
             Console.Error.WriteLine(ex);
             return 1;
         }
     }
+
+    /// <summary>Space-joined argv for the final error log. Argument VALUES are
+    /// included — the CLI takes no secrets on the command line (all secrets are
+    /// SECRET_* env vars / Key Vault), so this cannot leak credentials.</summary>
+    internal static string SummarizeArgs(IReadOnlyList<string> args) =>
+        args.Count == 0 ? "(none)" : string.Join(' ', args);
 }

@@ -305,6 +305,20 @@ public sealed class SqliteIdentityStore : IIdentityStore
         }
     }
 
+    public bool TryUpdateAclHash(string itemId, string aclHash, DateTime lastIngestedUtc)
+    {
+        lock (_sync)
+        {
+            using var command = _connection.CreateCommand();
+            command.CommandText =
+                "UPDATE ingested_items SET acl_hash = @h, last_ingested_utc = @u WHERE item_id = @i";
+            command.Parameters.AddWithValue("@h", aclHash);
+            command.Parameters.AddWithValue("@u", lastIngestedUtc.ToString("o"));
+            command.Parameters.AddWithValue("@i", itemId);
+            return command.ExecuteNonQuery() > 0;
+        }
+    }
+
     public void RemoveIngestedItem(string itemId)
     {
         lock (_sync)

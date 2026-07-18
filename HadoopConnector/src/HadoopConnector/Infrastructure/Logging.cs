@@ -116,10 +116,16 @@ public static class Logging
                     AutoFlush = true,
                 };
             }
-            catch
+            catch (Exception exc)
             {
                 // Console-only logging when the log directory cannot be created.
+                // The Logger itself is what just failed, so stderr is the only
+                // sink left — without this line an operator sees no connector.log
+                // and has no way to know it was a permissions/path problem.
                 _fileWriter = null;
+                Console.Error.WriteLine(
+                    $"WARNING: could not create log directory under '{LogsRoot}' "
+                    + $"({exc.GetType().Name}: {exc.Message}); continuing with console-only logging.");
             }
         }
     }

@@ -168,3 +168,133 @@ internal sealed class SyntheticBdhSource : IBdhSource
 
     public void Dispose() { }
 }
+
+/// <summary>
+/// Lazy in-memory BDH source with per-file control: each registered file has
+/// its own row count, REPORTED length (so oversize files can lie small or big
+/// independently of content) and row factory. Directory structure is inferred
+/// from the registered relative paths — arbitrary Hive layouts, gaps and
+/// malformed dt names included. Rows are generated lazily.
+/// </summary>
+internal sealed class ScatterBdhSource : IBdhSource
+{
+    private sealed record Entry(int Rows, long ReportedBytes, Func<int, string> RowFactory);
+
+    private readonly Dictionary<string, Entry> _files = new(StringComparer.Ordinal);
+    private int _opens;
+    private int _lists;
+
+    public int OpenCalls => Volatile.Read(ref _opens);
+    public int ListCalls => Volatile.Read(ref _lists);
+
+    public string Description => "scatter";
+
+    public ScatterBdhSource AddFile(
+        string relativePath, int rows, long reportedBytes, Func<int, string> rowFactory)
+    {
+        _files[relativePath.Trim('/')] = new Entry(rows, reportedBytes, rowFactory);
+        return this;
+    }
+
+    public Task<List<HdfsFileStatus>> ListAsync(string relativePath, CancellationToken ct = default)
+    {
+        Interlocked.Increment(ref _lists);
+        var prefix = relativePath.Trim('/');
+        var entries = new Dictionary<string, HdfsFileStatus>(StringComparer.Ordinal);
+        var found = false;
+        foreach (var (path, entry) in _files)
+        {
+            if (prefix.Length > 0 && !path.StartsWith(prefix + "/", StringComparison.Ordinal))
+                continue;
+            found = true;
+            var remainder = prefix.Length == 0 ? path : path[(prefix.Length + 1)..];
+            var slash = remainder.IndexOf('/');
+            if (slash < 0)
+                entries[remainder] = new HdfsFileStatus(remainder, false, entry.ReportedBytes, 1700000000000);
+            else
+                entries.TryAdd(remainder[..slash], new HdfsFileStatus(remainder[..slash], true, 0, 0));
+        }
+        if (!found && prefix.Length > 0)
+            throw new HdfsException($"Directory not found: '{relativePath}'.") { StatusCode = 404 };
+        return Task.FromResult(entries.Values.ToList());
+    }
+
+    public Task<bool> ExistsAsync(string relativePath, CancellationToken ct = default)
+    {
+        var prefix = relativePath.Trim('/');
+        return Task.FromResult(prefix.Length == 0
+            ? _files.Count > 0
+            : _files.Keys.Any(k => k.StartsWith(prefix + "/", StringComparison.Ordinal)));
+    }
+
+    public Task<Stream> OpenAsync(string relativePath, CancellationToken ct = default)
+    {
+        Interlocked.Increment(ref _opens);
+        if (!_files.TryGetValue(relativePath.Trim('/'), out var entry))
+            throw new HdfsException($"File not found: '{relativePath}'.") { StatusCode = 404 };
+        return Task.FromResult<Stream>(new LazyJsonlStream(entry.Rows, entry.RowFactory));
+    }
+
+    public void Dispose() { }
+}
+
+/// <summary>IBdhSource whose inner source can be swapped between syncs (a
+/// nightly export changing shape run-over-run).</summary>
+internal sealed class MutableBdhSource : IBdhSource
+{
+    public IBdhSource Inner { get; set; } = new ScatterBdhSource();
+    public string Description => "mutable";
+    public Task<List<HdfsFileStatus>> ListAsync(string p, CancellationToken ct = default) =>
+        Inner.ListAsync(p, ct);
+    public Task<bool> ExistsAsync(string p, CancellationToken ct = default) => Inner.ExistsAsync(p, ct);
+    public Task<Stream> OpenAsync(string p, CancellationToken ct = default) => Inner.OpenAsync(p, ct);
+    public void Dispose() { }
+}
+
+/// <summary>Thread-safe scripted HTTP handler keyed on request path with a
+/// per-path attempt counter — drives WebHdfsClient retry ladders under many
+/// concurrent OPENs.</summary>
+internal sealed class FlappingHandler : HttpMessageHandler
+{
+    private readonly Func<string, int, HttpResponseMessage> _script;
+    private readonly Dictionary<string, int> _attempts = new(StringComparer.Ordinal);
+    private readonly object _lock = new();
+    private int _requests;
+
+    public FlappingHandler(Func<string, int, HttpResponseMessage> script) => _script = script;
+
+    public int Requests => Volatile.Read(ref _requests);
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _requests);
+        var path = request.RequestUri!.AbsolutePath;
+        int attempt;
+        lock (_lock)
+        {
+            _attempts.TryGetValue(path, out attempt);
+            _attempts[path] = attempt + 1;
+        }
+        return Task.FromResult(_script(path, attempt));
+    }
+}
+
+/// <summary>In-memory identity store recording every upsert.</summary>
+internal sealed class RecordingIdentityStore : IIdentityStore
+{
+    private readonly Dictionary<string, PrincipalMapping> _rows = new(StringComparer.Ordinal);
+    public int UpsertCalls { get; private set; }
+
+    public void Upsert(PrincipalMapping mapping)
+    {
+        UpsertCalls++;
+        _rows[mapping.SourceId] = mapping;
+    }
+
+    public PrincipalMapping? Find(string sourceId) => _rows.GetValueOrDefault(sourceId);
+    public List<PrincipalMapping> All() => _rows.Values.ToList();
+    public int ResolvedCount() => _rows.Values.Count(m => m.EntraId is not null);
+    public int Count() => _rows.Count;
+    public void Clear() => _rows.Clear();
+    public void Dispose() { }
+}

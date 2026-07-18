@@ -21,7 +21,7 @@ SQLite identity store) so it can pick up where the Python version left off.
 | `src/SalesforceCopilotConnector/Config/` | `config/sync_state.py` — checkpoints & dead-letter files |
 | `src/SalesforceCopilotConnector/Commands/` + `Program.cs` | `commands/` + `run.py` — CLI (argparse replica) |
 | `src/SalesforceCopilotConnector/Dashboard.cs` | `dashboard.py` (rich → Spectre.Console) |
-| `tests/SalesforceCopilotConnector.Tests/` | `tests/` — full pytest suite as xUnit + C# additions (825 tests) |
+| `tests/SalesforceCopilotConnector.Tests/` | `tests/` — full pytest suite as xUnit + C# additions (845 tests) |
 | `config/` | schema.json, graph-schema.json, template.json (same files) |
 
 ## Install from a release
@@ -168,7 +168,7 @@ schema/proc contract: `docs/SQL_CONTRACT.md`; retry/throttling behavior:
 dotnet test
 ```
 
-825 tests — a 1:1 port of the Python suite plus C#-side additions (SQL/HA,
+845 tests — a 1:1 port of the Python suite plus C#-side additions (SQL/HA,
 log pruning, retry jitter). Test collections run serially
 (`xunit.runner.json`) because several tests swap process-global seams
 (ingest hooks, sync-state paths, HTTP session, env vars), mirroring the

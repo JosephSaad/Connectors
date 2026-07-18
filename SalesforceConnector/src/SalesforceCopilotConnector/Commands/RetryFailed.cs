@@ -211,6 +211,8 @@ public static class RetryFailed
                 }
                 catch (DirectoryNotFoundException)
                 {
+                    // Parent directory already gone — the dead-letter file is
+                    // by definition cleared; nothing to report.
                 }
                 logger.Info("✓ Dead-letter file cleared (all retries succeeded).");
             }

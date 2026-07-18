@@ -19,6 +19,7 @@
 using System.Text;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using AltrataConnector.Commands;
+using AltrataConnector.Config;
 using AltrataConnector.Infrastructure;
 
 namespace AltrataConnector;
@@ -76,9 +77,25 @@ public static class Program
         {
             return exit.Code;
         }
+        catch (ConfigurationError exc)
+        {
+            // Config problems already name the offending setting/file in their
+            // message (fail fast); a stack trace adds nothing. Routed through
+            // the logger so the failure reaches the run log (and stays one-line
+            // structured JSON under LOG_FORMAT=json) as well as stderr.
+            Logging.GetLogger("altrata_connector").Error(
+                $"Command '{parsedArgs.Command}' aborted by a configuration error: {exc.Message}");
+            return 1;
+        }
         catch (Exception ex)
         {
-            Console.Error.WriteLine(ex);
+            // Structured final error for anything unhandled: command name +
+            // exception type + message + full stack, to the run log file AND
+            // stderr (the logger's ERROR sink always writes to stderr), with a
+            // nonzero exit code. This is the last line an operator has when a
+            // command dies, so it must say WHAT failed and in WHICH command.
+            Logging.GetLogger("altrata_connector").Error(
+                $"Command '{parsedArgs.Command}' failed with unhandled {ex.GetType().Name}: {ex.Message}", ex);
             return 1;
         }
     }

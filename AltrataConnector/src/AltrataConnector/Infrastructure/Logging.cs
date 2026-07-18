@@ -87,10 +87,16 @@ public static class Logging
                     new UTF8Encoding(false))
                 { AutoFlush = true };
             }
-            catch
+            catch (Exception exc)
             {
-                // Logging must never take the process down; fall back to console-only.
+                // Logging must never take the process down; fall back to
+                // console-only — but SAY so on stderr (the file sink is the
+                // thing that just failed), or the operator hunts for a run log
+                // that was never written.
                 _fileWriter = null;
+                Console.Error.WriteLine(
+                    $"WARNING: could not open a run log directory under '{LogsRoot}' " +
+                    $"({exc.GetType().Name}: {exc.Message}) — file logging disabled for this run, console only.");
             }
         }
     }

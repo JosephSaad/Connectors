@@ -59,9 +59,22 @@ public sealed class ItemConverter
             item.Properties[property] = ToPropertyValue(record.Get(field));
         }
 
-        item.Content = BuildContent(record, objectConfig);
+        // Financial fields routed to the CONTENT body (_cz_*) never become
+        // properties, so property stripping cannot govern them. Detect them on
+        // the source record: filter mode redacts the value from the content
+        // body; every mode still classifies (and acl mode restricts) the item.
+        var contentFinancial =
+            FinancialFieldClassifier.RecordHasContentFinancial(record, objectConfig);
+        var redactContent = contentFinancial
+            && string.Equals(_config.FinancialDataMode, "filter", StringComparison.OrdinalIgnoreCase);
+        item.Content = BuildContent(
+            record, objectConfig,
+            redactContent
+                ? FinancialFieldClassifier.ContentFinancialFields(objectConfig)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase)
+                : null);
 
-        FinancialFieldClassifier.Apply(item, objectConfig, _config);
+        FinancialFieldClassifier.Apply(item, objectConfig, _config, contentFinancial);
         return item;
     }
 
@@ -101,8 +114,12 @@ public sealed class ItemConverter
         }
     }
 
-    /// <summary>Searchable text body: name, description and _cz_ content fields.</summary>
-    internal string BuildContent(ClarizenRecord record, ObjectConfig objectConfig)
+    /// <summary>Searchable text body: name, description and _cz_ content fields.
+    /// Fields in <paramref name="redactFields"/> (financial fields under
+    /// FINANCIAL_DATA_MODE=filter) are omitted so their values never reach the
+    /// index through the content body.</summary>
+    internal string BuildContent(
+        ClarizenRecord record, ObjectConfig objectConfig, IReadOnlySet<string>? redactFields = null)
     {
         var sb = new StringBuilder();
         var title = record.GetString("Name") ?? record.ItemId;
@@ -112,6 +129,8 @@ public sealed class ItemConverter
         {
             if (!property.StartsWith("_cz_", StringComparison.Ordinal))
                 continue;
+            if (redactFields is not null && redactFields.Contains(field))
+                continue;  // governance says redact — never index the value
             var value = record.GetString(field);
             if (string.IsNullOrWhiteSpace(value))
                 continue;

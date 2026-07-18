@@ -17,6 +17,18 @@ public static class RetryFailed
 {
     private static readonly IAppLogger Logger = Logging.GetLogger("hadoop_connector");
 
+    /// <summary>Error recorded when a dead-letter entry is KEPT because its
+    /// lookup skipped an oversize file (the miss is unproven).</summary>
+    internal const string IncompleteLookupError =
+        "lookup incomplete: an oversize file (> BDH_MAX_FILE_BYTES) was skipped while "
+        + "searching, so the record cannot be confirmed gone from BDH";
+
+    /// <summary>A missing record may be dropped from the dead-letter queue only
+    /// when the search was COMPLETE — a lookup that skipped an oversize file
+    /// must never be treated as "gone from BDH".</summary>
+    internal static bool ShouldDropMissing(FindByIdResult find) =>
+        find.Record is null && !find.SkippedOversize;
+
     public static async Task<object?> RunAsync(ParsedArgs args)
     {
         using var context = Runtime.Create(args, "retry_failed");
@@ -49,16 +61,28 @@ public static class RetryFailed
 
             try
             {
-                var record = await context.Fetcher.FindByIdAsync(
+                var find = await context.Fetcher.FindByIdDetailedAsync(
                     objectConfig, itemId, ServiceStop.Token);
-                if (record is null)
+                if (find.Record is null)
                 {
+                    if (!ShouldDropMissing(find))
+                    {
+                        // The search skipped an oversize file, so the miss is NOT
+                        // proof the record is gone — keep the entry for a later
+                        // retry instead of silently dropping it.
+                        Logger.Warning(
+                            $"{itemId}: not found, but the lookup skipped an oversize file "
+                            + "(> BDH_MAX_FILE_BYTES) — keeping the dead-letter entry.");
+                        stillFailing.Add((itemId, IncompleteLookupError, objectConfig.ObjectName));
+                        continue;
+                    }
                     // Record gone from BDH (deleted upstream, or pruned out of the
                     // filtered partitions) — drop it from the queue.
                     Logger.Info($"{itemId}: no longer present in BDH; dropping from dead-letter.");
                     succeeded++;
                     continue;
                 }
+                var record = find.Record;
                 var (ok, error) = await pipeline.IngestSingleAsync(
                     record, objectConfig, ServiceStop.Token);
                 if (ok)
@@ -72,6 +96,14 @@ public static class RetryFailed
             }
             catch (Exception exc)
             {
+                // Keep the entry in the queue (re-queued below with exc.Message),
+                // but ALSO log the full exception — the queue entry only stores
+                // the message, and for an unexpected type the stack is the only
+                // way to tell a BDH read failure from a converter/Graph bug.
+                Logger.Error(
+                    $"retry-failed: retry crashed for item {itemId} "
+                    + $"(object '{objectConfig.ObjectName}') — entry kept in the dead-letter queue",
+                    exc);
                 stillFailing.Add((itemId, exc.Message, objectConfig.ObjectName));
             }
         }

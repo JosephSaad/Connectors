@@ -56,6 +56,7 @@ public static class Reconcile
         catch (Exception ex)
         {
             progress.Error($"reconcile failed: {ex.Message}");
+            Logging.GetLogger("seismic_connector").Error("reconcile failed", ex);
             return false;
         }
     }

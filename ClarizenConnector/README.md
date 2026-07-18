@@ -30,7 +30,7 @@ here as an independent, self-contained copy.
 | `env/.env.local.example` | every knob, documented |
 | `docs/` | `HA.md`, `RETRY.md`, `OBSERVABILITY.md`, `SQL_CONTRACT.md`, `SHARDING.md`, `DELETION_SYNC.md`, `ATTACHMENTS.md`, `WEBHOOKS.md`, `TRACING.md`, `RESILIENCE.md` |
 | `scripts/` | `install-windows-service.ps1`, `sql/create-database.sql` |
-| `tests/ClarizenConnector.Tests/` | xUnit suite (491 tests, mock HTTP — no network) |
+| `tests/ClarizenConnector.Tests/` | xUnit suite (516 tests, mock HTTP — no network) |
 | `Dockerfile` / `docker-compose.yml` | container image + local SQL/HA dev topology |
 | `.github/workflows/` | `ci.yml` (ubuntu + windows, SQL provisioning, docker), `codeql.yml`, `release.yml` (test-gated, checksummed bundles + GHCR image) |
 
@@ -264,7 +264,7 @@ timestamp. Details: `docs/HA.md`; schema contract: `docs/SQL_CONTRACT.md`.
 dotnet test
 ```
 
-491 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
+516 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
 shape **and concurrency invariants** (16 parallel writers, zero corrupt lines),
 retry/backoff math (numeric Retry-After, 60 s clamp, jitter), Graph client
 throttling/hardening (mock HTTP), adaptive concurrency, connection-sharding

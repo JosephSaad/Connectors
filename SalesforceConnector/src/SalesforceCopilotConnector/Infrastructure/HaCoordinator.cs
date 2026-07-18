@@ -303,7 +303,8 @@ public static class HaCoordinator
                     // A missed heartbeat is survivable until the claim timeout —
                     // log and keep trying.
                     Logger.Warning(
-                        $"[HA] Heartbeat failed for {objectType} (crawl {crawlId}): {exc.Message}");
+                        $"[HA] Heartbeat failed for {objectType} (crawl {crawlId}, node {node}) — "
+                        + $"claim expires after {ClaimTimeoutSeconds}s without one: {exc.GetType().Name}: {exc.Message}");
                 }
             }
         }, CancellationToken.None);

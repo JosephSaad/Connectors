@@ -21,7 +21,7 @@ namespace StressHarness;
 public static class Program
 {
     private static readonly string[] AllScenarios =
-        { "throughput", "throttle", "failures", "stop-resume" };
+        { "throughput", "throttle", "oscillate", "failures", "stop-resume" };
 
     public static async Task<int> Main(string[] args)
     {
@@ -29,6 +29,7 @@ public static class Program
         int? latencyMs = null;
         var scenario = "all";
         var workdir = "stress-out";
+        var countOnlyAcks = false;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -45,6 +46,11 @@ public static class Program
                     break;
                 case "--workdir":
                     workdir = args[++i];
+                    break;
+                case "--count-only-acks":
+                    // Long-soak leak attribution: skip the harness's per-item ack
+                    // dictionary so the RSS measured is the pipeline's alone.
+                    countOnlyAcks = true;
                     break;
                 default:
                     Console.Error.WriteLine($"Unknown argument: {args[i]}");
@@ -84,7 +90,7 @@ public static class Program
         Console.WriteLine($"Scenario(s): {scenario}, items override: {(items?.ToString() ?? "per-scenario default")}, " +
                           $"latency override: {(latencyMs?.ToString() ?? "per-scenario default")} ms");
 
-        var runner = new ScenarioRunner(workdir, latencyMs);
+        var runner = new ScenarioRunner(workdir, latencyMs, countOnlyAcks);
         var toRun = scenario == "all" ? AllScenarios : new[] { scenario };
         var results = new List<ScenarioResult>();
 
@@ -96,6 +102,7 @@ public static class Program
             {
                 "throughput" => await runner.RunThroughputAsync(items ?? 100_000),
                 "throttle" => await runner.RunThrottleAsync(items ?? 50_000),
+                "oscillate" => await runner.RunOscillateAsync(items ?? 60_000),
                 "failures" => await runner.RunFailuresAsync(items ?? 20_000),
                 "stop-resume" => await runner.RunStopResumeAsync(items ?? 50_000),
                 _ => throw new InvalidOperationException(name),

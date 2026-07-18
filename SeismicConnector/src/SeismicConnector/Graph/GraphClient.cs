@@ -350,8 +350,15 @@ public class GraphClient
         {
             return JsonNode.Parse(body);
         }
-        catch (JsonException)
+        catch (JsonException ex)
         {
+            // A 2xx response with an unparseable body. Returning null is safe —
+            // every caller treats a null body as "no data" (e.g. a $batch round
+            // then marks its items "missing from $batch response") — but leave a
+            // trail: this is the only place the malformed payload is visible.
+            Logger.Warning(
+                $"Graph returned a 2xx response with an unparseable JSON body ({ex.Message}); "
+                + $"body starts: '{body[..Math.Min(200, body.Length)]}'");
             return null;
         }
     }

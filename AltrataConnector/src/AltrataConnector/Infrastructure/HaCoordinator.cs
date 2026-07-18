@@ -127,6 +127,8 @@ public sealed class SqlLeaseStore : ILeaseStore
 /// <summary>Node-level coordinator wrapping a lease store.</summary>
 public sealed class HaCoordinator
 {
+    private static readonly IAppLogger Logger = Logging.GetLogger("altrata_connector.ha");
+
     public static readonly TimeSpan DefaultLeaseTtl = TimeSpan.FromMinutes(5);
 
     private readonly ILeaseStore _leases;
@@ -141,13 +143,53 @@ public sealed class HaCoordinator
             ?? $"{Environment.MachineName}:{Environment.ProcessId}";
     }
 
-    public bool TryAcquire(string unit, TimeSpan? ttl = null, DateTime? utcNow = null) =>
-        _leases.TryAcquire(unit, NodeId, ttl ?? DefaultLeaseTtl, utcNow ?? DateTime.UtcNow);
+    // Lease ops fail fast when the shared SQL backend is down (HA cannot
+    // coordinate without it — unchanged), but each op logs WHICH unit and node
+    // failed before the raw SqlException flies: a bare "login failed" stack
+    // does not say the crawl died acquiring "delivery:D42".
 
-    public bool Renew(string unit, TimeSpan? ttl = null, DateTime? utcNow = null) =>
-        _leases.Renew(unit, NodeId, ttl ?? DefaultLeaseTtl, utcNow ?? DateTime.UtcNow);
+    public bool TryAcquire(string unit, TimeSpan? ttl = null, DateTime? utcNow = null)
+    {
+        try
+        {
+            return _leases.TryAcquire(unit, NodeId, ttl ?? DefaultLeaseTtl, utcNow ?? DateTime.UtcNow);
+        }
+        catch (Exception exc)
+        {
+            Logger.Error($"[HA] Lease acquire FAILED for '{unit}' (node {NodeId}): {exc.GetType().Name}: {exc.Message}");
+            throw;
+        }
+    }
 
-    public void Release(string unit) => _leases.Release(unit, NodeId);
+    public bool Renew(string unit, TimeSpan? ttl = null, DateTime? utcNow = null)
+    {
+        try
+        {
+            return _leases.Renew(unit, NodeId, ttl ?? DefaultLeaseTtl, utcNow ?? DateTime.UtcNow);
+        }
+        catch (Exception exc)
+        {
+            Logger.Error($"[HA] Lease renew FAILED for '{unit}' (node {NodeId}): {exc.GetType().Name}: {exc.Message}");
+            throw;
+        }
+    }
+
+    public void Release(string unit)
+    {
+        try
+        {
+            _leases.Release(unit, NodeId);
+        }
+        catch (Exception exc)
+        {
+            // Still rethrows (release runs in finally blocks; masking rules are
+            // the caller's) — but the log records that the lease was left to
+            // EXPIRE on its TTL rather than being released.
+            Logger.Error($"[HA] Lease release FAILED for '{unit}' (node {NodeId}): {exc.GetType().Name}: {exc.Message} " +
+                         "— the lease will expire on its TTL instead.");
+            throw;
+        }
+    }
 
     /// <summary>How long a crawl-close lease is pinned to the closing node.</summary>
     public static readonly TimeSpan CloseLeaseTtl = TimeSpan.FromHours(24);
@@ -169,13 +211,22 @@ public sealed class HaCoordinator
     public bool TryCloseCrawl(string crawlId, bool anyFailedClaims, State.IStateStore state,
         DateTime? utcNow = null)
     {
-        var won = _leases.TryAcquire($"crawl-close:{crawlId}", NodeId, CloseLeaseTtl,
-            utcNow ?? DateTime.UtcNow);
-        if (won)
+        try
         {
-            state.SetValue($"crawl_status_{crawlId}", anyFailedClaims ? "failed" : "closed");
-            state.SetValue($"crawl_closed_by_{crawlId}", NodeId);
+            var won = _leases.TryAcquire($"crawl-close:{crawlId}", NodeId, CloseLeaseTtl,
+                utcNow ?? DateTime.UtcNow);
+            if (won)
+            {
+                state.SetValue($"crawl_status_{crawlId}", anyFailedClaims ? "failed" : "closed");
+                state.SetValue($"crawl_closed_by_{crawlId}", NodeId);
+            }
+            return won;
         }
-        return won;
+        catch (Exception exc)
+        {
+            Logger.Error($"[HA] Crawl close FAILED for '{crawlId}' (node {NodeId}): {exc.GetType().Name}: {exc.Message} " +
+                         "— no sync timestamp recorded; the crawl close retries on the next run.");
+            throw;
+        }
     }
 }

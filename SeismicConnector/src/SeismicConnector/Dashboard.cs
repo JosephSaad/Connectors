@@ -94,6 +94,8 @@ public sealed class Dashboard : IDisposable
         }
         catch
         {
+            // Cosmetic teardown: a wedged render thread must not block or fail
+            // process shutdown (it is a background thread either way).
         }
         _cts.Dispose();
     }

@@ -938,7 +938,9 @@ public class SalesforceObjectHandler
             catch (Exception error) when (
                 error is FormatException or OverflowException or InvalidOperationException or InvalidCastException)
             {
-                Converter.Logger.Error($"Could not parse {ObjectName}.{fieldKey}: {error.Message}");
+                Converter.Logger.Error(
+                    $"Could not parse {ObjectName}.{fieldKey} for record "
+                    + $"{record["Id"]?.ToString() ?? "(no Id)"}: {error.Message}");
                 props[propertyName] = typeTag switch
                 {
                     "bool" => JsonValue.Create(false),
@@ -1034,7 +1036,9 @@ public class SalesforceObjectHandler
             }
             catch (Exception error)  // pragma: no cover - defensive fallback
             {
-                Converter.Logger.Error($"Could not parse {ObjectName}.{fieldKey}: {error.Message}");
+                Converter.Logger.Error(
+                    $"Could not parse {ObjectName}.{fieldKey} for record "
+                    + $"{record["Id"]?.ToString() ?? "(no Id)"}: {error.Message}");
                 props[propertyName] = "";
             }
         }

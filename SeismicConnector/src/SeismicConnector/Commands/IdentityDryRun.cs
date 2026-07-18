@@ -47,6 +47,7 @@ public static class IdentityDryRun
         catch (Exception ex)
         {
             progress.Error($"identity-dry-run failed: {ex.Message}");
+            Logging.GetLogger("seismic_connector").Error("identity-dry-run failed", ex);
             return false;
         }
     }

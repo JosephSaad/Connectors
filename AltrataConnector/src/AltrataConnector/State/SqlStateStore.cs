@@ -134,6 +134,16 @@ public sealed class SqlStateStore : IStateStore
                     Logger.Warning($"SQL transient error {exc.Number} (attempt {attempt}/{_maxRetries}), retrying in {delay.TotalSeconds:0}s");
                     Thread.Sleep(delay);
                 }
+                catch (SqlException exc)
+                {
+                    // Non-transient, or transient retries exhausted: still fail
+                    // fast (unchanged — shared state must not be guessed at),
+                    // but record WHICH connector's state store died and the SQL
+                    // error number before the exception unwinds the command.
+                    Logger.Error($"SQL state operation FAILED for connector '{_connectorId}' " +
+                                 $"(SQL error {exc.Number}, after {attempt} retry(ies)): {exc.Message}");
+                    throw;
+                }
             }
         }
     }

@@ -423,7 +423,12 @@ public sealed class IngestPipeline
                 }
                 catch (Exception exc)
                 {
-                    Logger.Warning($"HA heartbeat failed for '{objectType}': {exc.Message}");
+                    // Non-fatal (the claim survives until HA_CLAIM_TIMEOUT_SECONDS),
+                    // but the exception type matters for diagnosis — a SQL outage
+                    // here foreshadows the claim being reclaimed by another node.
+                    Logger.Warning(
+                        $"HA heartbeat failed for crawl '{crawlKey}' object '{objectType}': "
+                        + $"{exc.GetType().Name}: {exc.Message}");
                 }
             },
             null, interval, interval);
@@ -781,8 +786,39 @@ public sealed class IngestPipeline
                 Metrics.IncItemsSkipped();
                 continue;
             }
-            var item = _converter.Convert(record, objectConfig, acl);
-            ApplyClassification(item, objectConfig);
+            // Per-RECORD isolation for the pure transform: a conversion crash is
+            // caused by THIS record's data shape (e.g. a field value the property
+            // flattener cannot coerce), so one bad record is dead-lettered and the
+            // chunk continues. ACL resolution stays OUTSIDE this catch on purpose:
+            // a resolver failure is an identity-store/infrastructure problem and
+            // must keep failing the whole object (one WORKER_CRASH record), not
+            // dead-letter every record while hammering a dead store.
+            ExternalItem item;
+            try
+            {
+                item = _converter.Convert(record, objectConfig, acl);
+                ApplyClassification(item, objectConfig);
+            }
+            catch (Exception exc) when (exc is not OperationCanceledException)
+            {
+                Logger.Error(
+                    $"[{objectConfig.ObjectName}] conversion failed for record {record.ItemId} "
+                    + $"(source file '{record.SourcePath}') — dead-lettered, chunk continues",
+                    exc);
+                lock (_statsLock)
+                {
+                    summary.Failed++;
+                }
+                Metrics.IncItemsFailed();
+                SyncState.AppendFailedRecords(
+                    cfg.ConnectorId,
+                    new List<(string, string)>
+                    {
+                        (record.ItemId, $"[Convert] {exc.GetType().Name}: {exc.Message}"),
+                    },
+                    objectConfig.ObjectName);
+                continue;
+            }
             if (debugEnabled)
             {
                 Logger.Debug(

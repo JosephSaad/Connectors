@@ -118,6 +118,17 @@ public sealed class IdentitySync
             Logger.Info($"No Entra user for '{email}'");
             return null;
         }
+        catch (GraphApiError ex) when (ex.StatusCode == 400)
+        {
+            // One malformed address (e.g. "DOMAIN\jdoe" stored as a Seismic
+            // username) is a per-principal data problem: leave THAT principal
+            // unmapped rather than abort the whole identity crawl mid-way.
+            // Auth/permission errors (401/403) still fail fast.
+            Logger.Warning(
+                $"Entra user lookup for '{email}' rejected as a bad request ({ex.Message}) — "
+                + "left unmapped; fix the Seismic email/username to map this principal.");
+            return null;
+        }
     }
 
     /// <summary>Entra group object id by display name; null when missing or ambiguous.</summary>
@@ -126,7 +137,21 @@ public sealed class IdentitySync
         if (string.IsNullOrWhiteSpace(name))
             return null;
         var filter = Uri.EscapeDataString($"displayName eq '{name.Replace("'", "''")}'");
-        var result = await _graph.GetAsync($"/groups?$filter={filter}&$select=id", ct).ConfigureAwait(false);
+        JsonNode? result;
+        try
+        {
+            result = await _graph.GetAsync($"/groups?$filter={filter}&$select=id", ct).ConfigureAwait(false);
+        }
+        catch (GraphApiError ex) when (ex.StatusCode == 400)
+        {
+            // A group name Graph's $filter grammar rejects: per-principal data
+            // problem — leave it unmapped and continue the crawl (401/403 and
+            // 5xx still propagate: those are auth/outage, not this group).
+            Logger.Warning(
+                $"Entra group lookup for '{name}' rejected as a bad request ({ex.Message}) — "
+                + "left unmapped.");
+            return null;
+        }
         if (result?["value"] is not JsonArray matches)
             return null;
         if (matches.Count != 1)

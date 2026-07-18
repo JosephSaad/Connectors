@@ -222,6 +222,8 @@ public static class IdentityDryRun
             }
             catch
             {
+                // Best-effort close on the way out — a dispose failure must not
+                // mask the command's real result (or its real exception).
             }
         }
     }

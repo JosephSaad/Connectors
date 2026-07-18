@@ -6,6 +6,7 @@
 // concurrency, checkpointing, dead-letter) with fakes only at the documented
 // internal seams.
 
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json.Nodes;
@@ -37,16 +38,18 @@ internal sealed class ScenarioRunner
 
     private readonly string _workdir;
     private readonly int? _latencyOverride;
+    private readonly bool _countOnlyAcks;
     private readonly ConcurrencyCapture _capture = new();
 
     private CancellationTokenSource? _memCts;
     private Task? _memTask;
     private long _peakRss;
 
-    public ScenarioRunner(string workdir, int? latencyOverride)
+    public ScenarioRunner(string workdir, int? latencyOverride, bool countOnlyAcks = false)
     {
         _workdir = workdir;
         _latencyOverride = latencyOverride;
+        _countOnlyAcks = countOnlyAcks;
 
         // Observe the pipeline's internal AdaptiveConcurrency + retry logging.
         // Propagate=false keeps the (very chatty) INFO/ERROR stream off the console;
@@ -233,7 +236,9 @@ internal sealed class ScenarioRunner
         var perType = SyntheticData.Split(items);
         InstallStandardHooks(perType);
         var cfg = BuildConfig();
-        var client = new HarnessGraphClient { LatencyMs = latency };
+        var client = new HarnessGraphClient { LatencyMs = latency, CountOnlyAcks = _countOnlyAcks };
+        if (_countOnlyAcks)
+            result.Notes.Add("count-only-acks soak mode: harness does not retain per-item ack ids");
 
         StartMeasurement();
         var allocBefore = GC.GetTotalAllocatedBytes();
@@ -256,8 +261,11 @@ internal sealed class ScenarioRunner
         Check(result, Reconciles(stats), $"stats reconcile ({StatLine(stats)})");
         Check(result, stats.FailedCount == 0, $"zero failures (actual {stats.FailedCount})");
         Check(result, stats.SuccessCount == items, $"success == {items} (actual {stats.SuccessCount})");
-        Check(result, client.Acked.Count == items && client.Acked.Values.All(v => v == 1),
-            "every item PUT exactly once");
+        if (_countOnlyAcks)
+            Check(result, client.AckedTotal == items, $"acked total == {items} (count-only soak mode)");
+        else
+            Check(result, client.Acked.Count == items && client.Acked.Values.All(v => v == 1),
+                "every item PUT exactly once");
         Check(result, SyncState.ReadCheckpoint(ConnectorId) == null, "checkpoint cleared on completion");
         return result;
     }
@@ -352,6 +360,124 @@ internal sealed class ScenarioRunner
         if (stats.FailedCount > 0)
             result.Notes.Add($"{stats.FailedCount} item(s) exhausted 4 retries inside the burst " +
                              "(counted failed + dead-lettered — expected under sustained 429)");
+        return result;
+    }
+
+    // ── Scenario 2b: adaptive-concurrency oscillation (flapping 429 waves) ───
+
+    public async Task<ScenarioResult> RunOscillateAsync(int items)
+    {
+        // Flapping throttle waves: every batch 429s during t∈[3,5), [8,10),
+        // [13,15), … (2s bad / 3s clean, forever) — the pattern that provokes
+        // livelock or dial thrash in adaptive controllers. The pipeline must
+        // keep making progress through every wave, dial down in each wave, ramp
+        // fully back between/after them, and finish with zero failed items.
+        var result = new ScenarioResult { Name = "oscillate", Items = items };
+        var latency = Latency(100);
+        result.Notes.Add($"{items} items, {latency}ms latency; ALL batches 429 (Retry-After: 1) during " +
+                         "t∈[3,5)+5k s — flapping 2s-bad/3s-clean waves for the whole run");
+
+        FreshLogsDir("oscillate");
+        ServiceStop.Reset();
+        var perType = SyntheticData.Split(items);
+        InstallStandardHooks(perType);
+        var cfg = BuildConfig();
+
+        // windowIndex k covers t ∈ [3+5k, 5+5k)
+        static bool InBadWindow(double t, out int window)
+        {
+            window = -1;
+            if (t < 3)
+                return false;
+            window = (int)((t - 3) / 5);
+            return (t - 3) % 5 < 2;
+        }
+
+        var badBatchesByWave = new ConcurrentDictionary<int, int>();
+        var runClock = new Stopwatch();
+        var client = new HarnessGraphClient { LatencyMs = latency };
+        client.OnBatch = (_, payload) =>
+        {
+            if (InBadWindow(runClock.Elapsed.TotalSeconds, out var wave))
+            {
+                badBatchesByWave.AddOrUpdate(wave, 1, (_, v) => v + 1);
+                return payload.Select(HarnessGraphClient.Throttled).ToList();
+            }
+            return HarnessGraphClient.AllOk(payload);
+        };
+
+        StartMeasurement();
+        var allocBefore = GC.GetTotalAllocatedBytes();
+        runClock.Start();
+        var sw = Stopwatch.StartNew();
+        var stats = await AwaitBoundedAsync(Ingest.IngestContentAsync(cfg, client), ScenarioTimeout);
+        sw.Stop();
+        result.AllocMb = (GC.GetTotalAllocatedBytes() - allocBefore) / (1024.0 * 1024.0);
+        result.PeakRssMb = await StopMeasurementAsync();
+        result.WallSecs = sw.Elapsed.TotalSeconds;
+
+        Check(result, stats != null, "run completed within bounded wait (no livelock under flapping 429s)");
+        if (stats == null)
+            return result;
+
+        result.ItemsPerSec = items / result.WallSecs;
+        result.Notes.Add(StatLine(stats));
+
+        var events = _capture.Events;
+        var downs = events.Where(e => e.Kind == "down").ToList();
+        var ups = events.Where(e => e.Kind == "up").ToList();
+        var engagedWaves = badBatchesByWave.Keys.OrderBy(w => w).ToList();
+        var finalLevel = events.Count > 0 ? events[^1].Level : 8;
+
+        // Per-wave dial behavior: first dial-down inside the wave, the minimum
+        // level reached before the next wave, and when the dial was back at max.
+        var waveNotes = new List<string>();
+        var wavesWithDialDown = 0;
+        var recoveredAfterEachWave = 0;
+        foreach (var wave in engagedWaves)
+        {
+            double start = 3 + 5.0 * wave, end = start + 2;
+            var nextStart = start + 5;
+            var inWave = downs.Where(e => e.AtSecs >= start && e.AtSecs < nextStart).ToList();
+            var levelsUntilNext = events.Where(e => e.AtSecs >= start && e.AtSecs < nextStart).ToList();
+            var minLevel = levelsUntilNext.Count > 0 ? levelsUntilNext.Min(e => e.Level) : 8;
+            var recovery = events.FirstOrDefault(e => e.AtSecs >= end && e.Kind == "up" && e.Level == 8);
+            if (inWave.Count > 0)
+                wavesWithDialDown++;
+            if (recovery != null)
+                recoveredAfterEachWave++;
+            waveNotes.Add(string.Format(
+                CultureInfo.InvariantCulture,
+                "wave{0} t=[{1:F0},{2:F0}): {3} 429-batches, first dial-down t={4}, min level {5}, back at 8 t={6}",
+                wave, start, end, badBatchesByWave[wave],
+                inWave.Count > 0 ? inWave[0].AtSecs.ToString("F1", CultureInfo.InvariantCulture) + "s" : "n/a",
+                minLevel,
+                recovery != null ? recovery.AtSecs.ToString("F1", CultureInfo.InvariantCulture) + "s" : "n/a"));
+        }
+        result.Notes.Add(
+            $"oscillation: {engagedWaves.Count} waves engaged over {result.WallSecs:F1}s " +
+            $"({engagedWaves.Count / Math.Max(result.WallSecs, 1) * 60:F1} waves/min); " +
+            $"dial-downs={downs.Count}, ramp-ups={ups.Count}, final level {finalLevel}");
+        foreach (var note in waveNotes)
+            result.Notes.Add(note);
+        result.Notes.Add(
+            $"retry waves: {_capture.RetryEvents} sub-batch retries, {_capture.ThrottledItemRetries} item retries, " +
+            $"total added retry delay {_capture.RetryDelaySecs:F0}s (overlapping)");
+
+        Check(result, stats.TotalFetched == items, $"fetched == {items} (actual {stats.TotalFetched})");
+        Check(result, Reconciles(stats), $"stats reconcile ({StatLine(stats)})");
+        Check(result, engagedWaves.Count >= 2,
+            $"at least 2 throttle waves engaged (actual {engagedWaves.Count} — run long enough to flap)");
+        Check(result, wavesWithDialDown == engagedWaves.Count,
+            $"concurrency dialled down in every engaged wave ({wavesWithDialDown}/{engagedWaves.Count})");
+        Check(result, recoveredAfterEachWave == engagedWaves.Count,
+            $"concurrency ramped back to max after every wave ({recoveredAfterEachWave}/{engagedWaves.Count} — no thrash lock-in)");
+        Check(result, finalLevel == 8, $"final concurrency recovered to max 8 (actual {finalLevel})");
+        Check(result, stats.FailedCount == 0,
+            $"zero items failed — every throttled item survived the flapping (actual {stats.FailedCount})");
+        Check(result, stats.SuccessCount == items, $"success == {items} (actual {stats.SuccessCount})");
+        Check(result, client.Acked.Count == items && client.Acked.Values.All(v => v == 1),
+            "every item PUT exactly once (no duplicate acks under retry waves)");
         return result;
     }
 

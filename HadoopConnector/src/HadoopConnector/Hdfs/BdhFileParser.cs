@@ -185,12 +185,22 @@ public sealed class BdhFileParser
             _ => throw new InvalidDataException(
                 $"{fileName}: JSON export must be an array of objects or {{\"entities\": [...]}}."),
         };
+        var index = 0;
         foreach (var element in array)
         {
             if (element is JsonObject obj)
+            {
                 yield return (JsonObject)obj.DeepClone();
+            }
             else
+            {
+                // Same first-5 visibility as malformed JSONL lines / short CSV
+                // rows: counted AND named, never silently absorbed.
                 ParseErrors++;
+                if (ParseErrors <= 5)
+                    Logger.Warning($"{fileName}: skipping non-object JSON array element at index {index}.");
+            }
+            index++;
         }
     }
 

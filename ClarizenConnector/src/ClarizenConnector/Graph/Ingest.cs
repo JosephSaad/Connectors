@@ -357,7 +357,7 @@ public sealed class IngestPipeline
             }
             catch (ClarizenQuotaExceededException exc)
             {
-                Logger.Warning(exc.Message);
+                Logger.Warning($"[{objectConfig.ObjectName}] {exc.Message}");
                 summary.QuotaExhausted = true;
                 break;
             }
@@ -367,7 +367,21 @@ public sealed class IngestPipeline
                 // not a crash. Nothing dead-lettered; checkpoint retained.
                 summary.Degraded = true;
                 Logger.Warning(
-                    $"Degraded mode: {exc.Message} Checkpoint retained; the next cycle resumes.");
+                    $"[{objectConfig.ObjectName}] Degraded mode: {exc.Message} "
+                    + "Checkpoint retained; the next cycle resumes.");
+                break;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // A cancellation that lands MID-CHUNK (between the chunk-boundary
+                // checks) is a graceful stop, not a worker crash: nothing is
+                // dead-lettered, the last completed chunk's checkpoint stands,
+                // and the sync cursor is not advanced. In HA the claim simply
+                // goes stale and is reclaimed after the lease timeout.
+                summary.Stopped = true;
+                Logger.Warning(
+                    $"[{objectConfig.ObjectName}] cancelled mid-chunk — graceful stop; "
+                    + "checkpoint retained, nothing dead-lettered.");
                 break;
             }
             catch (Exception exc)
@@ -379,7 +393,11 @@ public sealed class IngestPipeline
                     exc);
                 SyncState.AppendFailedRecords(
                     cfg.ConnectorId,
-                    new List<(string, string)> { ("WORKER_CRASH", $"[{objectConfig.ObjectName}] {exc.Message}") },
+                    new List<(string, string)>
+                    {
+                        ("WORKER_CRASH",
+                         $"[{objectConfig.ObjectName}] {exc.GetType().Name}: {exc.Message}"),
+                    },
                     objectConfig.ObjectName);
                 summary.FailedObjects.Add(objectConfig.ObjectName);
                 if (_ha is not null && crawlKey is not null)
@@ -421,7 +439,12 @@ public sealed class IngestPipeline
                 }
                 catch (Exception exc)
                 {
-                    Logger.Warning($"HA heartbeat failed for '{objectType}': {exc.Message}");
+                    // Best-effort: a missed beat only matters if it persists past
+                    // the lease timeout, so warn (with the exception type — SQL
+                    // faults here are the classic cause) and keep crawling.
+                    Logger.Warning(
+                        $"HA heartbeat failed for '{objectType}' (crawl '{crawlKey}'): "
+                        + $"{exc.GetType().Name}: {exc.Message}");
                 }
             },
             null, interval, interval);
@@ -465,7 +488,8 @@ public sealed class IngestPipeline
                 continue;
             }
 
-            await IngestChunkAsync(cfg, objectConfig, chunk, inventory, summary, ct).ConfigureAwait(false);
+            await IngestChunkAsync(cfg, objectConfig, chunk, chunkIndex, inventory, summary, ct)
+                .ConfigureAwait(false);
             if (summary.Degraded)
             {
                 // The Graph breaker opened mid-chunk (some sub-batches failed
@@ -781,6 +805,7 @@ public sealed class IngestPipeline
         AppConfig cfg,
         ObjectConfig objectConfig,
         List<ClarizenRecord> chunk,
+        int chunkIndex,
         IItemInventory inventory,
         IngestSummary summary,
         CancellationToken ct)
@@ -791,36 +816,71 @@ public sealed class IngestPipeline
 
         var transformSpan = Tracing.StartTransform(objectConfig.ObjectName, chunk.Count);
         var items = new List<ExternalItem>();
+        // Per-row error isolation: a malformed source row (a value the
+        // converter/enricher/classifier cannot process) is dead-lettered
+        // INDIVIDUALLY and the rest of the chunk continues — one poisoned row
+        // in a 100k-row TDW export must never abort the whole object crawl.
+        var transformFailures = new List<(string ItemId, string Error)>();
         foreach (var record in chunk)
         {
-            var acl = _aclResolver.Resolve(record, objectConfig);
-            if (acl.Count == 0)
+            try
             {
-                // Never ingest an item nobody is allowed to see — and never
-                // ingest it world-readable by accident either.
-                Logger.Warning(
-                    $"Skipping {record.ItemId}: no resolvable ACL principals "
-                    + "(set FALLBACK_ACL_GROUP_ID to grant a default group).");
-                summary.NoAclSkipped++;
-                Metrics.IncItemsSkipped();
-                continue;
+                var acl = _aclResolver.Resolve(record, objectConfig);
+                if (acl.Count == 0)
+                {
+                    // Never ingest an item nobody is allowed to see — and never
+                    // ingest it world-readable by accident either.
+                    Logger.Warning(
+                        $"Skipping {record.ItemId}: no resolvable ACL principals "
+                        + "(set FALLBACK_ACL_GROUP_ID to grant a default group).");
+                    summary.NoAclSkipped++;
+                    Metrics.IncItemsSkipped();
+                    continue;
+                }
+                var item = _converter.Convert(record, objectConfig, acl);
+                if (_attachmentEnricher is not null && _attachmentEnricher.ShouldEnrich(objectConfig))
+                {
+                    await _attachmentEnricher.EnrichAsync(item, record, objectConfig, ct)
+                        .ConfigureAwait(false);
+                }
+                // Classify AFTER enrichment so attachment text is in the scan.
+                ApplyClassification(item, objectConfig);
+                if (debugEnabled)
+                {
+                    Logger.Debug(
+                        $"[{objectConfig.ObjectName}] converted {item.Id}: "
+                        + $"{item.Properties.Count} properties, {item.Acl.Count} ACL entries, "
+                        + $"content {item.Content.Length} chars");
+                }
+                items.Add(item);
             }
-            var item = _converter.Convert(record, objectConfig, acl);
-            if (_attachmentEnricher is not null && _attachmentEnricher.ShouldEnrich(objectConfig))
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                await _attachmentEnricher.EnrichAsync(item, record, objectConfig, ct)
-                    .ConfigureAwait(false);
+                throw;  // a real stop request — handled as a graceful stop upstream
             }
-            // Classify AFTER enrichment so attachment text is in the scan.
-            ApplyClassification(item, objectConfig);
-            if (debugEnabled)
+            catch (Exception exc)
             {
-                Logger.Debug(
-                    $"[{objectConfig.ObjectName}] converted {item.Id}: "
-                    + $"{item.Properties.Count} properties, {item.Acl.Count} ACL entries, "
-                    + $"content {item.Content.Length} chars");
+                // Full exception (type + stack) in the log: a transform crash is
+                // unexpected, and "which converter line threw on which record"
+                // is exactly what an operator needs to fix the source row.
+                Logger.Error(
+                    $"[{objectConfig.ObjectName}] record {record.ItemId} (chunk {chunkIndex}) "
+                    + "failed to transform — dead-lettered, continuing with the rest of the chunk",
+                    exc);
+                transformFailures.Add(
+                    (record.ItemId,
+                     $"[transform chunk {chunkIndex}] {exc.GetType().Name}: {exc.Message}"));
             }
-            items.Add(item);
+        }
+        if (transformFailures.Count > 0)
+        {
+            lock (_statsLock)
+            {
+                summary.Failed += transformFailures.Count;
+            }
+            Metrics.IncItemsFailed(transformFailures.Count);
+            SyncState.AppendFailedRecords(
+                cfg.ConnectorId, transformFailures, objectConfig.ObjectName);
         }
         transformSpan?.SetTag("clarizen.item_count", items.Count);
         transformSpan?.Dispose();
@@ -884,8 +944,9 @@ public sealed class IngestPipeline
         void HandleSubBatchCrash(List<ExternalItem> failedBatch, Exception exc)
         {
             Logger.Error(
-                $"[{objectConfig.ObjectName}] unexpected error sending a sub-batch — "
-                + $"{failedBatch.Count} item(s) dead-lettered: {exc.Message}",
+                $"[{objectConfig.ObjectName}] unexpected error sending a sub-batch of chunk {chunkIndex} — "
+                + $"{failedBatch.Count} item(s) dead-lettered ({failedBatch[0].Id}"
+                + $"{(failedBatch.Count > 1 ? $"..{failedBatch[^1].Id}" : string.Empty)}): {exc.Message}",
                 exc);
             lock (_statsLock)
             {
@@ -894,7 +955,10 @@ public sealed class IngestPipeline
             Metrics.IncItemsFailed(failedBatch.Count);
             SyncState.AppendFailedRecords(
                 cfg.ConnectorId,
-                failedBatch.Select(item => (item.Id, $"[Graph] sub-batch crash: {exc.Message}")).ToList(),
+                failedBatch
+                    .Select(item => (item.Id,
+                        $"[Graph chunk {chunkIndex}] sub-batch crash: {exc.GetType().Name}: {exc.Message}"))
+                    .ToList(),
                 objectConfig.ObjectName);
         }
 

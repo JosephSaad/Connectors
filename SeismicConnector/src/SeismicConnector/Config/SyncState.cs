@@ -376,12 +376,28 @@ public static class SyncState
         var entries = new List<JsonObject>();
         try
         {
+            var lineNumber = 0;
             foreach (var rawLine in File.ReadLines(path, Utf8NoBom))
             {
+                lineNumber++;
                 var line = rawLine.Trim();
-                if (line.Length > 0)
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+                try
                 {
                     entries.Add(JsonNode.Parse(line)!.AsObject());
+                }
+                catch (Exception exc) when (exc is JsonException or InvalidOperationException)
+                {
+                    // One torn/corrupt record (e.g. a crash mid-append) must not
+                    // make the whole queue unreadable: that would fail every
+                    // crawl's end-of-run dead-letter accounting AND retry-failed.
+                    // Skip the line, name it, keep the parseable records.
+                    Logger.Warning(
+                        $"Dead-letter file {path} line {lineNumber}: malformed record skipped "
+                        + $"({exc.Message}).");
                 }
             }
         }

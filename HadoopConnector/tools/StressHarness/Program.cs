@@ -10,7 +10,9 @@
 //   dotnet run -c Release --project tools/StressHarness -- [--scenario NAME] [--scale N] [--workdir DIR]
 //
 //   --scenario  all | filter-scale | memory-bounds | fail-closed | dead-letter |
-//               circuit-breaker | checkpoint-resume | batch-429   (default: all)
+//               circuit-breaker | checkpoint-resume | batch-429 | oversize-sweep |
+//               guard-matrix | open-retry | identity-churn | watermark-storm
+//               (default: all)
 //   --scale     integer volume multiplier (default 1 ≈ 1M-row filter scan,
 //               2M-row memory stream, 20k-item ingest). Use 3–5 for a heavier soak.
 //   --workdir   scratch dir for state/inventory (default: ./stress-out)
@@ -45,6 +47,12 @@ var all = new (string Name, Func<ScenarioRunner, Task<ScenarioResult>> Run)[]
     ("circuit-breaker", r => r.CircuitBreakerAsync()),
     ("checkpoint-resume", r => r.CheckpointResumeAsync()),
     ("batch-429", r => r.BatchThroughputAsync()),
+    // Round 2 — post-code-review-fix scenarios.
+    ("oversize-sweep", r => r.OversizeSweepAsync()),
+    ("guard-matrix", r => r.GuardMatrixAsync()),
+    ("open-retry", r => r.OpenRetryAsync()),
+    ("identity-churn", r => r.IdentityChurnAsync()),
+    ("watermark-storm", r => r.WatermarkStormAsync()),
 };
 
 if (scenario != "all" && all.All(s => s.Name != scenario))

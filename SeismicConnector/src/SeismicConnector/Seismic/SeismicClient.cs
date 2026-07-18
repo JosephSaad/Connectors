@@ -361,7 +361,9 @@ public class SeismicClient
         }
         catch (SeismicApiError ex)
         {
-            Logger.Warning($"Content {contentId}: download failed ({ex.Message}); metadata-only ingest.");
+            Logger.Warning(
+                $"Content {contentId} (teamsite {teamsiteId}): download failed ({ex.Message}); "
+                + "metadata-only ingest for this item — a later crawl retries the payload.");
             return null;
         }
     }
@@ -389,7 +391,11 @@ public class SeismicClient
         }
         catch (Exception ex)
         {
-            Logger.Warning($"Usage analytics fetch failed ({ex.Message}) — items indexed without engagement signals.");
+            // Best-effort by contract (see summary); include the exception TYPE
+            // because this broad catch also absorbs unexpected ones.
+            Logger.Warning(
+                $"Usage analytics fetch failed ({ex.GetType().Name}: {ex.Message}) — "
+                + "items indexed without engagement signals this crawl.");
             return new Dictionary<string, SeismicContentUsage>(StringComparer.Ordinal);
         }
     }
@@ -414,8 +420,11 @@ public class SeismicClient
         }
         catch (Exception ex)
         {
+            // Best-effort by contract (see summary); include the exception TYPE
+            // because this broad catch also absorbs unexpected ones.
             Logger.Warning(
-                $"LiveDoc field fetch failed for {contentId} ({ex.Message}) — indexed without field metadata.");
+                $"LiveDoc field fetch failed for {contentId} (teamsite {teamsiteId}) "
+                + $"({ex.GetType().Name}: {ex.Message}) — indexed without field metadata.");
             return new List<SeismicLiveDocField>();
         }
     }

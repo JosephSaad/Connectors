@@ -108,7 +108,9 @@ public abstract class LogHandler
     /// (<c>LOG_FORMAT=json</c>). Keys: <c>timestamp</c> (same
     /// <c>yyyy-MM-dd HH:mm:ss,fff</c> string the text format uses), <c>level</c>,
     /// <c>logger</c>, <c>message</c>; when an exception is attached, an
-    /// <c>exception</c> object carries its <c>type</c> and <c>message</c>.
+    /// <c>exception</c> object carries its <c>type</c>, <c>message</c>, and
+    /// <c>stack</c> (full <c>ToString()</c> including inner exceptions — the text
+    /// format has always emitted this, so JSON mode must not lose it).
     /// </summary>
     private static string FormatJson(LogRecord record)
     {
@@ -126,6 +128,7 @@ public abstract class LogHandler
                 writer.WriteStartObject("exception");
                 writer.WriteString("type", record.Exception.GetType().FullName);
                 writer.WriteString("message", record.Exception.Message);
+                writer.WriteString("stack", record.Exception.ToString());
                 writer.WriteEndObject();
             }
             writer.WriteEndObject();
@@ -211,6 +214,8 @@ public sealed class LineRotatingFileHandler : LogHandler
         }
         catch
         {
+            // Best-effort, like Python's handleError: a full disk / closed stream
+            // must never crash the code that was merely trying to log.
             return;
         }
         _lineCount++;
@@ -232,6 +237,8 @@ public sealed class LineRotatingFileHandler : LogHandler
         }
         catch
         {
+            // Best-effort close of the rotated-out file: a flush failure here must
+            // not lose the NEW log file (and logging about logging cannot recurse).
         }
         BaseFilename = newPath;
         _lineCount = 0;
@@ -246,6 +253,8 @@ public sealed class LineRotatingFileHandler : LogHandler
         }
         catch
         {
+            // Best-effort: Close runs during shutdown/reconfiguration; a dispose
+            // failure has nowhere useful to be reported (the handler IS the log).
         }
     }
 }
@@ -337,6 +346,7 @@ public sealed class LoggerObject : IAppLogger
             }
             catch
             {
+                // Last-resort emit to a possibly-closed stderr — nothing left to try.
             }
         }
     }

@@ -70,10 +70,20 @@ public static class SyncState
                 return ParseIso(node.GetValue<string>());
             }
         }
-        catch (Exception exc) when (
-            exc is FileNotFoundException or DirectoryNotFoundException or JsonException or FormatException)
+        catch (Exception exc) when (exc is FileNotFoundException or DirectoryNotFoundException)
         {
-            // no state yet
+            // no state yet — a first run is normal and silent
+        }
+        catch (Exception exc) when (exc is JsonException or FormatException)
+        {
+            // The file EXISTS but cannot be read — that is corruption, not a
+            // first run. The fallback (null → no watermark) is preserved, but
+            // it silently widens the next incremental to a much larger read, so
+            // the operator must be able to see why from the logs.
+            Logger.Warning(
+                $"Sync-state file '{SyncStateFile}' is corrupt ({exc.GetType().Name}: {exc.Message}); "
+                + $"treating connector '{connectorId}' as never-synced — the next incremental crawl "
+                + "reads without a watermark.");
         }
         return null;
     }
@@ -91,10 +101,18 @@ public static class SyncState
         {
             data = JsonNode.Parse(File.ReadAllText(SyncStateFile, Utf8NoBom))!.AsObject();
         }
-        catch (Exception exc) when (
-            exc is FileNotFoundException or DirectoryNotFoundException or JsonException)
+        catch (Exception exc) when (exc is FileNotFoundException or DirectoryNotFoundException)
         {
-            // start fresh
+            // start fresh — no file yet is normal and silent
+        }
+        catch (JsonException exc)
+        {
+            // Corrupt existing file: it is about to be REPLACED, which discards
+            // every other connector's timestamp stored in it — warn so the loss
+            // is attributable from the logs.
+            Logger.Warning(
+                $"Sync-state file '{SyncStateFile}' is corrupt ({exc.Message}); rewriting it — "
+                + "timestamps previously stored for other connector ids are lost.");
         }
         data[connectorId] = IsoFormat(timestampUtc);
         Directory.CreateDirectory(LogsDir);
@@ -118,10 +136,18 @@ public static class SyncState
             if (data is JsonObject obj && obj.ContainsKey("completed"))
                 return obj;
         }
-        catch (Exception exc) when (
-            exc is FileNotFoundException or DirectoryNotFoundException or JsonException)
+        catch (Exception exc) when (exc is FileNotFoundException or DirectoryNotFoundException)
         {
-            // no checkpoint
+            // no checkpoint — nothing to resume is normal and silent
+        }
+        catch (JsonException exc)
+        {
+            // A corrupt checkpoint is SAFE to ignore (PUTs are idempotent, the
+            // run just re-processes from chunk 0) but never silent: the operator
+            // should know why a resume re-did work.
+            Logger.Warning(
+                $"Checkpoint file '{CheckpointPath(connectorId)}' is corrupt ({exc.Message}); "
+                + "ignoring it — the crawl restarts from chunk 0 (idempotent re-processing).");
         }
         return null;
     }
@@ -161,10 +187,15 @@ public static class SyncState
                         data = existing;
                 }
             }
-            catch (Exception exc) when (
-                exc is FileNotFoundException or DirectoryNotFoundException or JsonException)
+            catch (Exception exc) when (exc is FileNotFoundException or DirectoryNotFoundException)
             {
-                // start fresh
+                // start fresh — first checkpoint of a run is normal and silent
+            }
+            catch (JsonException exc)
+            {
+                Logger.Warning(
+                    $"Checkpoint file '{CheckpointPath(connectorId)}' is corrupt ({exc.Message}); "
+                    + "starting a fresh completed-chunk map.");
             }
             var completed = data["completed"]!.AsObject();
             var current = completed.TryGetPropertyValue(objectType, out var node) && node is not null
@@ -261,13 +292,31 @@ public static class SyncState
         if (UseSqlServer)
             return SqlStateStore.ReadDeadLetter(connectorId);
         var entries = new List<JsonObject>();
+        var path = FailedRecordsPath(connectorId);
         try
         {
-            foreach (var rawLine in File.ReadLines(FailedRecordsPath(connectorId), Utf8NoBom))
+            var lineNumber = 0;
+            foreach (var rawLine in File.ReadLines(path, Utf8NoBom))
             {
+                lineNumber++;
                 var line = rawLine.Trim();
-                if (line.Length > 0)
+                if (line.Length == 0)
+                    continue;
+                try
+                {
                     entries.Add(JsonNode.Parse(line)!.AsObject());
+                }
+                catch (Exception exc) when (exc is JsonException or InvalidOperationException)
+                {
+                    // Per-LINE isolation: a torn line (process killed mid-append)
+                    // must corrupt ONE queue entry, not crash every reader of the
+                    // queue — the crawl-end depth gauge, /metrics and retry-failed
+                    // all read this file. The bad line is named so the operator
+                    // can inspect/repair it; all intact entries still load.
+                    Logger.Warning(
+                        $"Dead-letter file '{path}' line {lineNumber} is not valid JSON "
+                        + $"({exc.Message}); skipping that entry — inspect the file to recover it.");
+                }
             }
         }
         catch (Exception exc) when (exc is FileNotFoundException or DirectoryNotFoundException)

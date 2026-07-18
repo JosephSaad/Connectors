@@ -48,9 +48,11 @@ public sealed class PrincipalMapper
                 ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 : new Dictionary<string, string>(parsed, StringComparer.OrdinalIgnoreCase);
         }
-        catch (JsonException)
+        catch (JsonException exc)
         {
-            Logger.Warning("CLARIZEN_GROUP_MAPPING is not valid JSON; ignoring.");
+            Logger.Warning(
+                $"CLARIZEN_GROUP_MAPPING is not valid JSON ({exc.Message}); ignoring it — "
+                + "groups will resolve via the identity store or member expansion only.");
             return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
     }

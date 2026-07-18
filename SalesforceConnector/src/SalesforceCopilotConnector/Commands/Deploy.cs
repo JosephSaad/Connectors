@@ -238,6 +238,8 @@ public static class Deploy
                 }
                 catch
                 {
+                    // Cosmetic only: dashboard shows the absolute log path when a
+                    // relative path cannot be computed (different volume, bad root).
                 }
                 var dlRel = SyncState.FailedRecordsPath(config.Connector.Id);
                 try
@@ -248,6 +250,7 @@ public static class Deploy
                 }
                 catch
                 {
+                    // Cosmetic only — same as the log-path fallback above.
                 }
                 dashboard = new IngestionDashboard(config.Connector.Id, syncLabel, aclLabel, relLog, dlRel);
                 dashboard.Start();
@@ -499,8 +502,14 @@ public static class Deploy
                 var config = LoadConfigHook();
                 since = GetLastContentCrawlTimeHook(config);
             }
-            catch
+            catch (Exception exc)
             {
+                // Fall back to a FULL crawl (since == null), exactly as before —
+                // but say WHY, or a state-store outage silently masquerades as
+                // "no previous crawl found".
+                Logging.GetLogger("progress").Warning(
+                    $"--incremental: could not read the last crawl time ({exc.GetType().Name}: {exc.Message}) "
+                    + "— falling back to a full crawl");
             }
             if (since != null)
                 Logging.GetLogger("progress").Info($"--incremental: resuming from {CommandRegistry.PyIsoFormat(since.Value)}");
@@ -569,8 +578,13 @@ public static class Deploy
                     var config = LoadConfigHook();
                     since = GetLastContentCrawlTimeHook(config);
                 }
-                catch
+                catch (Exception exc)
                 {
+                    // Same fallback as the one-shot path: run this cycle as a FULL
+                    // crawl but make the degradation visible to operators.
+                    Logging.GetLogger("progress").Warning(
+                        $"Scheduled incremental crawl: could not read the last crawl time "
+                        + $"({exc.GetType().Name}: {exc.Message}) — running a full crawl this cycle");
                 }
                 _ = await RunDeploymentCycleAsync(args, since, cycleDue);
             }

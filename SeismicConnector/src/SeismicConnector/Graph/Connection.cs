@@ -104,6 +104,8 @@ public sealed class ConnectionManager
         }
         catch (GraphApiError ex) when (ex.StatusCode == 404)
         {
+            // No schema registered yet — expected on first deployment; fall
+            // through to registration with `existing` still null.
         }
 
         if (existing?["properties"] is JsonArray { Count: > 0 })

@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Globalization;
 using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -188,16 +189,30 @@ public static class ApiClient
             {
                 response = await SfSession.SendAsync(request, cts.Token);
             }
-            catch (Exception) when (attempt < totalRetries)
+            catch (Exception exc) when (attempt < totalRetries)
             {
-                await Task.Delay(TimeSpan.FromSeconds(backoffFactor * Math.Pow(2, attempt)));
+                // Transport fault (timeout, DNS, reset) — retried like the Python
+                // session's urllib3 Retry. Warn so retries are visible: on the final
+                // attempt the exception propagates to the caller unchanged.
+                var delaySeconds = backoffFactor * Math.Pow(2, attempt);
+                Logger.Warning(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[SF] GET failed ({0}: {1}) — retry {2}/{3} in {4:F1}s: {5}",
+                    exc.GetType().Name, exc.Message, attempt + 1, totalRetries, delaySeconds, url));
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
                 continue;
             }
 
             if ((int)response.StatusCode is 502 or 503 or 504 && attempt < totalRetries)
             {
+                var status = (int)response.StatusCode;
                 response.Dispose();
-                await Task.Delay(TimeSpan.FromSeconds(backoffFactor * Math.Pow(2, attempt)));
+                var delaySeconds = backoffFactor * Math.Pow(2, attempt);
+                Logger.Warning(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[SF] GET returned HTTP {0} — retry {1}/{2} in {3:F1}s: {4}",
+                    status, attempt + 1, totalRetries, delaySeconds, url));
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
                 continue;
             }
 

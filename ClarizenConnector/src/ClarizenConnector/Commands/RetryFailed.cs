@@ -6,6 +6,7 @@
 // EVERY retry succeeded; otherwise the queue is rewritten with only the
 // still-failing entries.
 
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using ClarizenConnector.Clarizen;
 using ClarizenConnector.Config;
@@ -83,7 +84,16 @@ public static class RetryFailed
             }
             catch (Exception exc)
             {
-                stillFailing.Add((itemId, exc.Message, objectConfig.ObjectName));
+                // Per-entry isolation: this record stays dead-lettered (with the
+                // exception type preserved) and the loop continues. Log the full
+                // exception so an operator can tell a transient fetch error from
+                // a converter bug without re-running.
+                Logger.Error(
+                    $"retry-failed: {itemId} ({objectConfig.ObjectName}) retry attempt crashed — "
+                    + "keeping it in the dead-letter queue",
+                    exc);
+                stillFailing.Add(
+                    (itemId, $"[retry] {exc.GetType().Name}: {exc.Message}", objectConfig.ObjectName));
             }
         }
 
@@ -117,12 +127,36 @@ public static class RetryFailed
         if (file is null)
             return SyncState.ReadFailedRecords(connectorId);
 
+        // Same per-line isolation as SyncState.ReadFailedRecords: one torn or
+        // corrupt line (crash mid-append) must not make every OTHER entry
+        // unretryable — log it with the file + line number and keep going.
         var entries = new List<JsonObject>();
+        var lineNumber = 0;
         foreach (var rawLine in File.ReadLines(file))
         {
+            lineNumber++;
             var line = rawLine.Trim();
-            if (line.Length > 0)
-                entries.Add(JsonNode.Parse(line)!.AsObject());
+            if (line.Length == 0)
+                continue;
+            try
+            {
+                if (JsonNode.Parse(line) is JsonObject entry)
+                {
+                    entries.Add(entry);
+                }
+                else
+                {
+                    Logger.Error(
+                        $"retry-failed: '{file}' line {lineNumber} is valid JSON but not an "
+                        + $"object — skipping it. Raw line: {line}");
+                }
+            }
+            catch (JsonException exc)
+            {
+                Logger.Error(
+                    $"retry-failed: '{file}' line {lineNumber} is not valid JSON "
+                    + $"({exc.Message}) — skipping it. Raw line: {line}");
+            }
         }
         return entries;
     }

@@ -44,8 +44,13 @@ public static class Retention
                         System.Globalization.DateTimeStyles.AssumeUniversal, out var ledgerUtc))
                     processedUtc = ledgerUtc;
             }
-            catch
+            catch (Exception exc)
             {
+                // Cannot establish WHEN the delivery was processed — never
+                // guess with an archive/delete; skip it (it retries next pass)
+                // and say so instead of silently never acting on it.
+                Logger.Warning($"Retention: could not determine processed time for delivery '{delivery.Id}' " +
+                               $"({exc.GetType().Name}: {exc.Message}) — skipped this pass.");
                 continue;
             }
 

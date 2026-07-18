@@ -150,7 +150,12 @@ public class WebHdfsClient : IBdhSource
         }
         catch (Exception exc)
         {
-            Logger.Warning($"WebHDFS connectivity check failed: {exc.Message}");
+            // Best-effort probe: swallow-and-report is the contract, but include
+            // the exception TYPE — "connection refused" vs "invalid URI" point at
+            // very different fixes (HDFS_NAMENODE_URL reachability vs its value).
+            Logger.Warning(
+                $"WebHDFS connectivity check failed for {_baseUrl}: "
+                + $"{exc.GetType().Name}: {exc.Message}");
             return false;
         }
     }
@@ -199,7 +204,8 @@ public class WebHdfsClient : IBdhSource
                     // Transport failure before any stream bytes — safe to retry.
                     var delay = Math.Min(60, 2 * Math.Pow(2, attempt));
                     Logger.Warning(
-                        $"WebHDFS OPEN failed ({exc.Message}); retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
+                        $"WebHDFS OPEN '{relativePath}' failed ({exc.Message}); "
+                        + $"retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
                     await DelayAsync(TimeSpan.FromSeconds(delay), ct).ConfigureAwait(false);
                     continue;
                 }
@@ -225,7 +231,8 @@ public class WebHdfsClient : IBdhSource
                         var delay = Math.Min(60, retryAfter ?? Math.Min(60, 2 * Math.Pow(2, attempt)));
                         response.Dispose();
                         Logger.Warning(
-                            $"WebHDFS OPEN returned HTTP {status}; retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
+                            $"WebHDFS OPEN '{relativePath}' returned HTTP {status}; "
+                            + $"retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
                         await DelayAsync(TimeSpan.FromSeconds(delay), ct).ConfigureAwait(false);
                         continue;
                     }
@@ -290,8 +297,11 @@ public class WebHdfsClient : IBdhSource
                 catch (HttpRequestException exc) when (attempt < MaxRetries)
                 {
                     var delay = Math.Min(60, 2 * Math.Pow(2, attempt));
+                    // uri.AbsolutePath only — the query string can carry the
+                    // HDFS delegation token and must never reach a log line.
                     Logger.Warning(
-                        $"WebHDFS request failed ({exc.Message}); retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
+                        $"WebHDFS request for '{uri.AbsolutePath}' failed ({exc.Message}); "
+                        + $"retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
                     await DelayAsync(TimeSpan.FromSeconds(delay), ct).ConfigureAwait(false);
                     continue;
                 }
@@ -318,7 +328,8 @@ public class WebHdfsClient : IBdhSource
                         // Retry-After honoured exactly; every wait clamped to 60 s.
                         var delay = Math.Min(60, retryAfter ?? Math.Min(60, 2 * Math.Pow(2, attempt)));
                         Logger.Warning(
-                            $"WebHDFS returned HTTP {(int)status}; retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
+                            $"WebHDFS request for '{uri.AbsolutePath}' returned HTTP {(int)status}; "
+                            + $"retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
                         await DelayAsync(TimeSpan.FromSeconds(delay), ct).ConfigureAwait(false);
                         continue;
                     }
@@ -372,6 +383,9 @@ public class WebHdfsClient : IBdhSource
         }
         catch
         {
+            // Best-effort error-body read for a message that is ALREADY being
+            // thrown as an HdfsException — a secondary read failure here must
+            // not mask the primary error; the empty string just means "no body".
             return string.Empty;
         }
     }

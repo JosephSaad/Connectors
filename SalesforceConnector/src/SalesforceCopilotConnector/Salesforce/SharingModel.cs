@@ -291,7 +291,9 @@ public class SalesforceIdentitySOQLResponseProcessor
             }
             catch (Exception error)
             {
-                Logger.Warning($"Failed to parse {typeof(T).Name} record: {error.Message}");
+                var recordId = (record as JsonObject)?["Id"]?.ToString() ?? "(no Id)";
+                Logger.Warning(
+                    $"Failed to parse {typeof(T).Name} record {recordId}: {error.GetType().Name}: {error.Message}");
             }
         }
         return results;

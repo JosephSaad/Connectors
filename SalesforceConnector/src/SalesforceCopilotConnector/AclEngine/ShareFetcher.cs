@@ -464,8 +464,13 @@ public class ShareFetcher
                 Logger.Debug($"[ShareFetcher] Probe confirmed parent field {candidate} on {shareObject}");
                 return candidate;
             }
-            catch (InvalidOperationException)
+            catch (InvalidOperationException exc)
             {
+                // Intentionally quiet failure: probing by trial IS the mechanism —
+                // a candidate that does not exist on the share table throws
+                // INVALID_FIELD and we simply try the next one.
+                Logger.Debug(
+                    $"[ShareFetcher] Probe: {candidate} not present on {shareObject} ({exc.Message}); trying next candidate");
                 continue;
             }
         }

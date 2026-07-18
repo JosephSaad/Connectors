@@ -244,7 +244,8 @@ CREATE TABLE IF NOT EXISTS field_cache (
         }
         catch (Exception)
         {
-            // pass
+            // pass (Python parity): best-effort close — SQLite teardown failures
+            // have no operational consequence and nowhere useful to be reported.
         }
     }
 
@@ -661,7 +662,9 @@ CREATE TABLE IF NOT EXISTS field_cache (
             }
             catch (Exception e) when (e is JsonException or InvalidOperationException or ArgumentNullException)
             {
-                // pass
+                // pass (Python parity): a corrupt/stale field-cache row is treated
+                // as absent — the caller re-runs the field discovery loop and
+                // overwrites the row, so nothing is lost.
             }
         }
         return null;

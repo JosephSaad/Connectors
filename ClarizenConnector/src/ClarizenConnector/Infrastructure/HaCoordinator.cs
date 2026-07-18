@@ -111,9 +111,17 @@ public sealed class HaCoordinator
                 ("@key", crawlKey), ("@type", objectType), ("@node", NodeId));
             return inserted > 0;
         }
-        catch (Exception)
+        catch (Exception exc)
         {
-            // Primary-key race: another node inserted first.
+            // Almost always the primary-key race (another node inserted first),
+            // which is expected and must stay quiet at default levels — but a
+            // real SQL fault here would otherwise be indistinguishable from
+            // "claimed elsewhere", so record the detail at DEBUG (captured by
+            // connector.log) for HA troubleshooting. Semantics unchanged: the
+            // claim is simply not ours.
+            Logger.Debug(
+                $"Claim insert for '{objectType}' (crawl '{crawlKey}') lost/failed — treating "
+                + $"as claimed by another node: {exc.GetType().Name}: {exc.Message}");
             return false;
         }
     }

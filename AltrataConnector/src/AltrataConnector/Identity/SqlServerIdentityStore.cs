@@ -278,6 +278,18 @@ public sealed class SqlServerIdentityStore : IIdentityStore
         return null;
     });
 
+    public bool TryUpdateAclHash(string itemId, string aclHash, DateTime lastIngestedUtc) => Execute(conn =>
+    {
+        using var cmd = new SqlCommand(
+            "UPDATE dbo.altrata_id_items SET acl_hash = @h, last_ingested_utc = @u " +
+            "WHERE connector_id = @cid AND item_id = @i", conn);
+        cmd.Parameters.AddWithValue("@h", aclHash);
+        cmd.Parameters.AddWithValue("@u", lastIngestedUtc);
+        cmd.Parameters.AddWithValue("@cid", _connectorId);
+        cmd.Parameters.AddWithValue("@i", itemId);
+        return cmd.ExecuteNonQuery() > 0;
+    });
+
     public void RemoveIngestedItem(string itemId) => Execute<object?>(conn =>
     {
         Exec(conn, null,

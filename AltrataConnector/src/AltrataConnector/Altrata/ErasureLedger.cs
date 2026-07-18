@@ -57,6 +57,11 @@ public interface IErasureLedger
 
 public sealed class ErasureLedger : IErasureLedger
 {
+    // PII CAUTION: ledger ENTRIES may carry a subject email (the compliance
+    // record needs it), but no LOG line here ever may — log only the file path,
+    // seq / line numbers, the action and the opaque subject id.
+    private static readonly IAppLogger Logger = Logging.GetLogger("altrata_connector.erasure_ledger");
+
     /// <summary>Genesis PrevHash — 64 hex zeros.</summary>
     public const string GenesisHash = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -66,6 +71,19 @@ public sealed class ErasureLedger : IErasureLedger
     };
 
     private readonly object _sync = new();
+
+    /// <summary>
+    /// Chain-tail cache: (entry count, last hash, file length at cache time).
+    /// Append re-read and re-parsed the WHOLE file per call, making an N-entry
+    /// ledger O(N²) overall and capping realistic DSAR volumes at a few
+    /// thousand entries; with the cache each append is O(1). The cache is
+    /// validated against the current file length before every use, so another
+    /// instance appending to the same file (sequential cross-instance use, as
+    /// commands in separate processes do) or an external truncation triggers a
+    /// full strict reload — byte-identical chaining semantics to the uncached
+    /// implementation. Guarded by _sync.
+    /// </summary>
+    private (int Count, string LastHash, long FileLength)? _tail;
 
     public string Path { get; }
 
@@ -106,9 +124,31 @@ public sealed class ErasureLedger : IErasureLedger
     {
         lock (_sync)
         {
-            var existing = ReadAllInternal();
-            var seq = existing.Count + 1;
-            var prevHash = existing.Count > 0 ? existing[^1].Hash : GenesisHash;
+            var currentLength = File.Exists(Path) ? new FileInfo(Path).Length : 0L;
+            if (_tail == null || _tail.Value.FileLength != currentLength)
+            {
+                // Cold cache, or the file changed under us (another instance
+                // appended / external truncation): strict full reload. A chain
+                // that cannot be parsed must never be appended to — that would
+                // bury the tamper under fresh entries.
+                var existing = ReadEntries(out var firstBadLine);
+                if (firstBadLine != 0)
+                {
+                    // LOUD refusal: the append is the erasure's compliance
+                    // record, so a corrupt chain must be impossible to miss.
+                    // Ids only — never the subject email.
+                    Logger.Error(
+                        $"Erasure ledger '{Path}' line {firstBadLine} is unreadable — REFUSING to append " +
+                        $"'{action}' for subject '{subjectId}' to a corrupt chain. Restore the ledger, then re-run.");
+                    throw new InvalidDataException(
+                        $"Erasure ledger '{Path}' line {firstBadLine} is unreadable — refusing to " +
+                        "append to a corrupt chain. Run verify and restore the ledger first.");
+                }
+                _tail = (existing.Count, existing.Count > 0 ? existing[^1].Hash : GenesisHash, currentLength);
+            }
+
+            var seq = _tail.Value.Count + 1;
+            var prevHash = _tail.Value.LastHash;
             var timestamp = DateTime.UtcNow;
             var correlationId = CorrelationContext.Current;
             var hash = ComputeHash(seq, timestamp, actor, action, subjectId, subjectEmail,
@@ -129,9 +169,12 @@ public sealed class ErasureLedger : IErasureLedger
             };
 
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
-            using var stream = new FileStream(Path, FileMode.Append, FileAccess.Write, FileShare.Read);
-            using var writer = new StreamWriter(stream, new UTF8Encoding(false));
-            writer.WriteLine(JsonSerializer.Serialize(entry, JsonlOptions));
+            using (var stream = new FileStream(Path, FileMode.Append, FileAccess.Write, FileShare.Read))
+            using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+            {
+                writer.WriteLine(JsonSerializer.Serialize(entry, JsonlOptions));
+            }
+            _tail = (seq, hash, new FileInfo(Path).Length);
             return entry;
         }
     }
@@ -139,21 +182,53 @@ public sealed class ErasureLedger : IErasureLedger
     public IReadOnlyList<ErasureLedgerEntry> ReadAll()
     {
         lock (_sync)
-            return ReadAllInternal();
+        {
+            var entries = ReadEntries(out var firstBadLine);
+            if (firstBadLine != 0)
+            {
+                Logger.Error(
+                    $"Erasure ledger '{Path}' line {firstBadLine} is unreadable/tampered — ReadAll refused.");
+                throw new InvalidDataException(
+                    $"Erasure ledger '{Path}' line {firstBadLine} is unreadable/tampered — " +
+                    "use Verify() to check integrity without throwing.");
+            }
+            return entries;
+        }
     }
 
-    private List<ErasureLedgerEntry> ReadAllInternal()
+    /// <summary>
+    /// Tolerant line reader: parses entries up to the first unreadable line;
+    /// firstBadLine is that line's 1-based number (0 = whole file parsed).
+    /// Blank lines are skipped; an unparseable line stops the scan so Verify
+    /// can pinpoint the break instead of throwing on tampered bytes.
+    /// </summary>
+    private List<ErasureLedgerEntry> ReadEntries(out int firstBadLine)
     {
+        firstBadLine = 0;
         var entries = new List<ErasureLedgerEntry>();
         if (!File.Exists(Path))
             return entries;
+        var lineNumber = 0;
         foreach (var line in File.ReadLines(Path))
         {
+            lineNumber++;
             if (string.IsNullOrWhiteSpace(line))
                 continue;
-            var entry = JsonSerializer.Deserialize<ErasureLedgerEntry>(line);
-            if (entry != null)
-                entries.Add(entry);
+            ErasureLedgerEntry? entry;
+            try
+            {
+                entry = JsonSerializer.Deserialize<ErasureLedgerEntry>(line);
+            }
+            catch (JsonException)
+            {
+                entry = null;
+            }
+            if (entry == null)
+            {
+                firstBadLine = lineNumber;
+                break;
+            }
+            entries.Add(entry);
         }
         return entries;
     }
@@ -162,12 +237,15 @@ public sealed class ErasureLedger : IErasureLedger
     /// Verify the whole chain. Returns true when every entry's recomputed hash
     /// matches and links to its predecessor; on failure, brokenAtSeq is the
     /// first entry whose integrity check failed (0 when the file is empty/absent).
+    /// NEVER throws on tampered content — a line that no longer parses as an
+    /// entry (structural corruption) reports the chain as broken at that line,
+    /// exactly like a hash mismatch does.
     /// </summary>
     public bool Verify(out int brokenAtSeq)
     {
         lock (_sync)
         {
-            var entries = ReadAllInternal();
+            var entries = ReadEntries(out var firstBadLine);
             var prevHash = GenesisHash;
             for (var i = 0; i < entries.Count; i++)
             {
@@ -178,9 +256,20 @@ public sealed class ErasureLedger : IErasureLedger
                 if (entry.Seq != expectedSeq || entry.PrevHash != prevHash || entry.Hash != recomputed)
                 {
                     brokenAtSeq = (int)entry.Seq;
+                    Logger.Error(
+                        $"Erasure ledger '{Path}' FAILED verification: chain broken at seq {brokenAtSeq} " +
+                        "(sequence/link/hash mismatch — the entry or an earlier one was edited, reordered or deleted).");
                     return false;
                 }
                 prevHash = entry.Hash;
+            }
+            if (firstBadLine != 0)
+            {
+                brokenAtSeq = firstBadLine;   // unreadable line = broken chain link
+                Logger.Error(
+                    $"Erasure ledger '{Path}' FAILED verification: chain broken at seq {brokenAtSeq} " +
+                    "(line does not parse as a ledger entry).");
+                return false;
             }
             brokenAtSeq = 0;
             return true;

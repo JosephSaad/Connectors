@@ -13,11 +13,27 @@ using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using AltrataConnector.Infrastructure;
 
 namespace AltrataConnector.State;
 
 public sealed class FileStateStore : IStateStore
 {
+    private static readonly IAppLogger Logger = Logging.GetLogger("altrata_connector.state");
+
+    /// <summary>Once-per-process-per-file corruption warnings: these read paths
+    /// run on hot/polled loops (every state op re-loads the doc; /metrics polls
+    /// the dead-letter queue), so a corrupt file must be LOUD exactly once, not
+    /// a firehose. Keyed by full path — each connector/shard file warns itself.</summary>
+    private static readonly ConcurrentDictionary<string, bool> CorruptFileWarned =
+        new(StringComparer.Ordinal);
+
+    private static void WarnCorruptOnce(string path, string message)
+    {
+        if (CorruptFileWarned.TryAdd(Path.GetFullPath(path), true))
+            Logger.Error(message);
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -69,9 +85,17 @@ public sealed class FileStateStore : IStateStore
         {
             return JsonSerializer.Deserialize<StateDoc>(File.ReadAllText(StatePath)) ?? new StateDoc();
         }
-        catch
+        catch (Exception exc)
         {
-            return new StateDoc();  // corrupt state file — start fresh rather than crash
+            // Corrupt state file — start fresh rather than crash (unchanged),
+            // but never silently: an empty doc drops the sync timestamps, the
+            // processed-delivery ledger, the billable counter AND the erasure
+            // suppression list, and an operator must know why they reset.
+            WarnCorruptOnce(StatePath,
+                $"State file '{StatePath}' is unreadable ({exc.GetType().Name}: {exc.Message}) — " +
+                "continuing with an EMPTY state document: sync timestamps, processed-delivery ledger, " +
+                "billable counter and the erasure suppression list are not readable until the file is restored.");
+            return new StateDoc();
         }
     }
 
@@ -98,8 +122,14 @@ public sealed class FileStateStore : IStateStore
             {
                 return JsonSerializer.Deserialize<CrawlCheckpoint>(File.ReadAllText(CheckpointPath));
             }
-            catch
+            catch (Exception exc)
             {
+                // Unreadable checkpoint = resume position lost. Treating it as
+                // "no checkpoint" is safe (PUTs are idempotent; the delivery
+                // re-ingests from record 0) but must be visible in the log.
+                WarnCorruptOnce(CheckpointPath,
+                    $"Checkpoint file '{CheckpointPath}' is unreadable ({exc.GetType().Name}: {exc.Message}) — " +
+                    "treating as NO checkpoint; the interrupted delivery restarts from record 0 (PUTs are idempotent).");
                 return null;
             }
         }
@@ -180,8 +210,12 @@ public sealed class FileStateStore : IStateStore
             if (!File.Exists(DeadLetterPath))
                 return Array.Empty<DeadLetterRecord>();
             var records = new List<DeadLetterRecord>();
+            var malformed = 0;
+            var firstMalformedLine = 0;
+            var lineNumber = 0;
             foreach (var line in File.ReadLines(DeadLetterPath))
             {
+                lineNumber++;
                 if (string.IsNullOrWhiteSpace(line))
                     continue;
                 try
@@ -192,9 +226,19 @@ public sealed class FileStateStore : IStateStore
                 }
                 catch
                 {
-                    // Skip malformed lines; retry-failed reports what it could parse.
+                    // Skip malformed lines; retry-failed reports what it could
+                    // parse — but a skipped line is a LOST failure record, so
+                    // it is counted and warned about (once per file) below.
+                    malformed++;
+                    if (firstMalformedLine == 0)
+                        firstMalformedLine = lineNumber;
                 }
             }
+            if (malformed > 0)
+                WarnCorruptOnce(DeadLetterPath,
+                    $"Dead-letter queue '{DeadLetterPath}' has {malformed} malformed line(s) " +
+                    $"(first at line {firstMalformedLine}) — those failure records cannot be replayed and were skipped; " +
+                    $"{records.Count} record(s) parsed.");
             return records;
         }
     }

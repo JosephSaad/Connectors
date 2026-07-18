@@ -37,12 +37,17 @@ public static class IngestItem
 
         try
         {
-            var record = await context.Fetcher.FindByIdAsync(objectConfig, id, ServiceStop.Token);
-            if (record is null)
+            var find = await context.Fetcher.FindByIdDetailedAsync(objectConfig, id, ServiceStop.Token);
+            if (find.Record is null)
             {
-                Console.Error.WriteLine($"error: record '{id}' not found in BDH");
+                Console.Error.WriteLine(find.SkippedOversize
+                    ? $"error: record '{id}' not found in the readable files — an oversize file "
+                      + "(> BDH_MAX_FILE_BYTES) was skipped during the search, so it may live there; "
+                      + "raise the bound and re-run"
+                    : $"error: record '{id}' not found in BDH");
                 return false;
             }
+            var record = find.Record;
             var pipeline = await context.BuildPipelineAsync(ServiceStop.Token);
             var (ok, error) = await pipeline.IngestSingleAsync(record, objectConfig, ServiceStop.Token);
             if (ok)

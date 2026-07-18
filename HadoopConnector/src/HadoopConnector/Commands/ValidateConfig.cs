@@ -283,17 +283,24 @@ public static class ValidateConfig
                 var config = AppConfig.Load();
                 using var source = Runtime.CreateSource(config, CircuitBreaker.Disabled);
                 bool sourceOk;
+                string? sourceFailReason = null;
                 try
                 {
                     sourceOk = await source.ExistsAsync(string.Empty, ServiceStop.Token);
+                    if (!sourceOk)
+                        sourceFailReason = "the BDH root path does not exist";
                 }
-                catch (Exception)
+                catch (Exception exc)
                 {
+                    // Preflight is exactly where the failure REASON matters —
+                    // "connection refused" vs "404" vs "path escapes root" each
+                    // point at a different setting. Never discard it.
                     sourceOk = false;
+                    sourceFailReason = $"{exc.GetType().Name}: {exc.Message}";
                 }
                 if (!sourceOk)
                     (strict ? result.Errors : result.Warnings).Add(
-                        $"BDH source connectivity check failed ({source.Description}).");
+                        $"BDH source connectivity check failed ({source.Description}): {sourceFailReason}");
                 else
                     Dashboard.Line($"BDH source connectivity: OK ({source.Description})");
 

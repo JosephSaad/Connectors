@@ -29,20 +29,30 @@ public sealed class IdentityStore : IIdentityStore
             Directory.CreateDirectory(dir);
 
         _connection = new SqliteConnection($"Data Source={path}");
-        _connection.Open();
-        using var command = _connection.CreateCommand();
-        command.CommandText =
-            """
-            CREATE TABLE IF NOT EXISTS principals (
-                clarizen_id    TEXT PRIMARY KEY,
-                principal_type TEXT NOT NULL,
-                email          TEXT,
-                entra_id       TEXT,
-                updated_utc    TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_principals_email ON principals(email);
-            """;
-        command.ExecuteNonQuery();
+        try
+        {
+            _connection.Open();
+            using var command = _connection.CreateCommand();
+            command.CommandText =
+                """
+                CREATE TABLE IF NOT EXISTS principals (
+                    clarizen_id    TEXT PRIMARY KEY,
+                    principal_type TEXT NOT NULL,
+                    email          TEXT,
+                    entra_id       TEXT,
+                    updated_utc    TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_principals_email ON principals(email);
+                """;
+            command.ExecuteNonQuery();
+        }
+        catch (Exception exc)
+        {
+            // Log-and-rethrow: name the db file (SqliteException does not).
+            Logger.Error($"Failed to open identity store database '{path}'", exc);
+            _connection.Dispose();
+            throw;
+        }
         Logger.Debug($"Identity store opened: {path}");
     }
 

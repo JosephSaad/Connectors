@@ -45,7 +45,13 @@ public enum HaCloseResult
     ClosedElsewhere,
 }
 
-public sealed class HaCoordinator
+/// <summary>
+/// Unsealed with virtual SQL-touching members so tests can substitute an
+/// in-memory coordinator and exercise multi-node claim behaviour without a
+/// SQL Server (the pure decision seams below stay the single source of truth
+/// for the contention logic).
+/// </summary>
+public class HaCoordinator
 {
     private static readonly IAppLogger Logger = Logging.GetLogger("seismic_connector.ha");
 
@@ -135,7 +141,7 @@ public sealed class HaCoordinator
     /// opened. Single-node mode (HA off) returns a fresh local handle without
     /// touching SQL.
     /// </summary>
-    public HaCrawlHandle OpenOrJoinCrawl(string crawlKind, string? sinceIso)
+    public virtual HaCrawlHandle OpenOrJoinCrawl(string crawlKind, string? sinceIso)
     {
         if (!Enabled)
             return new HaCrawlHandle(Guid.NewGuid(), Created: true);
@@ -197,7 +203,7 @@ public sealed class HaCoordinator
     /// when some claims FAILED (status 'failed'); exactly one node reports
     /// <see cref="HaCloseResult.ClosedByThisNode"/> and records sync state.
     /// </summary>
-    public HaCloseResult TryCloseCrawl(Guid crawlId)
+    public virtual HaCloseResult TryCloseCrawl(Guid crawlId)
     {
         if (!Enabled)
             return HaCloseResult.ClosedByThisNode;  // single-node: always the closer
@@ -279,7 +285,7 @@ public sealed class HaCoordinator
     private string Key(string resource) => $"{_connectorId}:{resource}";
 
     /// <summary>Attempt to claim <paramref name="resource"/> within <paramref name="crawlId"/>.</summary>
-    public bool TryClaim(Guid crawlId, string resource)
+    public virtual bool TryClaim(Guid crawlId, string resource)
     {
         if (!Enabled)
             return true;  // single-node mode: everything is ours
@@ -335,7 +341,7 @@ public sealed class HaCoordinator
     }
 
     /// <summary>Refresh the heartbeat on a held claim.</summary>
-    public void Heartbeat(Guid crawlId, string resource)
+    public virtual void Heartbeat(Guid crawlId, string resource)
     {
         if (!Enabled)
             return;
@@ -354,7 +360,7 @@ public sealed class HaCoordinator
     }
 
     /// <summary>Mark a held claim done|failed (no-op if another node stole it).</summary>
-    public void CompleteClaim(Guid crawlId, string resource, bool succeeded)
+    public virtual void CompleteClaim(Guid crawlId, string resource, bool succeeded)
     {
         if (!Enabled)
             return;

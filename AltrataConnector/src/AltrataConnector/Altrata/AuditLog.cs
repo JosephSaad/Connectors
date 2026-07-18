@@ -13,6 +13,7 @@
 
 using System.Text;
 using System.Text.Json;
+using AltrataConnector.Infrastructure;
 
 namespace AltrataConnector.Altrata;
 
@@ -33,6 +34,8 @@ public interface IAuditLog
 
 public sealed class AuditLog : IAuditLog
 {
+    private static readonly IAppLogger Logger = Logging.GetLogger("altrata_connector.audit");
+
     private readonly object _sync = new();
 
     public string Path { get; }
@@ -64,8 +67,12 @@ public sealed class AuditLog : IAuditLog
             if (!File.Exists(Path))
                 return Array.Empty<AuditEntry>();
             var entries = new List<AuditEntry>();
+            var unreadable = 0;
+            var firstBadLine = 0;
+            var lineNumber = 0;
             foreach (var line in File.ReadLines(Path))
             {
+                lineNumber++;
                 if (string.IsNullOrWhiteSpace(line))
                     continue;
                 try
@@ -76,9 +83,17 @@ public sealed class AuditLog : IAuditLog
                 }
                 catch
                 {
-                    // tolerate manual edits; the write path never produces bad lines
+                    // Tolerate manual edits; the write path never produces bad
+                    // lines — but this is the purpose-of-use compliance trail,
+                    // so skipped lines are counted and reported below.
+                    unreadable++;
+                    if (firstBadLine == 0)
+                        firstBadLine = lineNumber;
                 }
             }
+            if (unreadable > 0)
+                Logger.Warning($"Audit log '{Path}' has {unreadable} unreadable line(s) " +
+                               $"(first at line {firstBadLine}) — entries skipped; the file may have been hand-edited.");
             return entries;
         }
     }

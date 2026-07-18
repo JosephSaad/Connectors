@@ -175,7 +175,12 @@ public sealed class IdentitySync
         }
         catch (Exception exc)
         {
-            Logger.Warning($"Entra lookup failed for '{email}': {exc.Message}");
+            // Best-effort per-user lookup: the user is counted as unresolved and
+            // the sync continues. Keep the exception type — a config/auth error
+            // (token failure) looks very different from a transient socket error.
+            Logger.Warning(
+                $"Entra lookup failed for '{email}' (user counted as unresolved): "
+                + $"{exc.GetType().Name}: {exc.Message}");
             return null;
         }
     }

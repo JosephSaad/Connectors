@@ -156,8 +156,12 @@ public sealed class WebhookProcessor
         catch (Exception exc)
         {
             // One event's failure must never stall the queue; the polling
-            // cursor is the backstop that eventually reconciles it.
-            Logger.Warning($"Webhook: error applying event for {evt.ItemId}: {exc.Message}");
+            // cursor is the backstop that eventually reconciles it. Log the
+            // full exception (type + stack) with the event's identity so the
+            // failure is attributable without waiting for the next crawl.
+            Logger.Warning(
+                $"Webhook: error applying {evt.Kind} event for {evt.ItemId} "
+                + $"(will be reconciled by the polling crawl): {exc}");
         }
     }
 }

@@ -233,7 +233,9 @@ internal static class SqlStateStore
         {
             // Mirror the file implementation: never lose track of failures silently.
             Logger.Error(
-                $"Failed to write {failures.Count} failed record(s) to SQL dead-letter table: {exc.Message}");
+                $"Failed to write {failures.Count} failed record(s) to SQL dead-letter table " +
+                $"(connector {connectorId}): {exc.Message}",
+                exc);
             foreach (var (itemId, itemError) in failures)
             {
                 Logger.Error(

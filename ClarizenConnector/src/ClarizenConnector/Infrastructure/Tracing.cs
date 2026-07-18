@@ -95,7 +95,9 @@ public static class Tracing
             Enabled = false;
             Endpoint = null;
             _provider = null;
-            Logger.Error($"OpenTelemetry tracing failed to initialise; continuing without export: {exc.Message}");
+            Logger.Error(
+                $"OpenTelemetry tracing failed to initialise for endpoint '{endpoint}'; "
+                + "continuing without export.", exc);
             return null;
         }
     }

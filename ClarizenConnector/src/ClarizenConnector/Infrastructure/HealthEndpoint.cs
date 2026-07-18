@@ -72,7 +72,7 @@ public sealed class HealthEndpoint : IDisposable
         }
         catch (Exception exc)
         {
-            Logger.Error($"Health endpoint failed to start: {exc.Message}");
+            Logger.Error("Health endpoint failed to start; continuing without it.", exc);
             return null;
         }
     }
@@ -121,7 +121,8 @@ public sealed class HealthEndpoint : IDisposable
             {
                 if (_stopped)
                     return;
-                Logger.Warning($"Health endpoint: accept error: {exc.Message}");
+                Logger.Warning(
+                    $"Health endpoint: accept error: {exc.GetType().Name}: {exc.Message}");
                 // Don't spin hot on a persistently broken listener.
                 Thread.Sleep(1000);
                 continue;
@@ -133,7 +134,11 @@ public sealed class HealthEndpoint : IDisposable
             }
             catch (Exception exc)
             {
-                Logger.Warning($"Health endpoint: request handling error: {exc.Message}");
+                // Expected outcomes are handled inside HandleRequest; anything
+                // here is unexpected — keep the path and full exception.
+                Logger.Warning(
+                    $"Health endpoint: request handling error for "
+                    + $"{context.Request.Url?.AbsolutePath}: {exc}");
                 TryAbort(context);
             }
         }

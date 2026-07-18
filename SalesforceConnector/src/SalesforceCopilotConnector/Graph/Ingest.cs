@@ -375,6 +375,10 @@ public static class Ingest
 
             var objectAcl = new Dictionary<string, List<Dictionary<string, string>>>();
             var validPairs = new List<(string RecordId, AclResult Result)>();
+            // Per-record failures usually share one root cause — attach the full
+            // exception (type + stack) to the FIRST failure only so the log stays
+            // readable while still carrying one complete diagnostic.
+            var resolveStackLogged = false;
             for (var i = 0; i < records.Count && i < aclResults.Count; i++)
             {
                 var record = records[i];
@@ -382,8 +386,17 @@ public static class Ingest
                 var recordId = record["Id"]!.ToString();
                 if (aclResult is Exception resolveError)
                 {
-                    Logger.Error(
-                        $"[NewACL] resolve_async failed for {objectType}/{recordId}: {resolveError.Message} – using deny-everyone ACL");
+                    var resolveMsg =
+                        $"[NewACL] resolve_async failed for {objectType}/{recordId}: {resolveError.Message} – using deny-everyone ACL";
+                    if (!resolveStackLogged)
+                    {
+                        resolveStackLogged = true;
+                        Logger.Error(resolveMsg, resolveError);
+                    }
+                    else
+                    {
+                        Logger.Error(resolveMsg);
+                    }
                     objectAcl[recordId] = DenyAllAclEntry();
                 }
                 else
@@ -409,13 +422,24 @@ public static class Ingest
                         aclEntryResults.Add(exc);
                     }
                 }
+                // Same first-failure-carries-the-stack pattern as resolve_async above.
+                var entryStackLogged = false;
                 for (var i = 0; i < validPairs.Count && i < aclEntryResults.Count; i++)
                 {
                     var (recordId, _) = validPairs[i];
                     if (aclEntryResults[i] is Exception entryError)
                     {
-                        Logger.Error(
-                            $"[NewACL] to_acl_entries failed for {objectType}/{recordId}: {entryError.Message} — using deny-everyone ACL");
+                        var entryMsg =
+                            $"[NewACL] to_acl_entries failed for {objectType}/{recordId}: {entryError.Message} — using deny-everyone ACL";
+                        if (!entryStackLogged)
+                        {
+                            entryStackLogged = true;
+                            Logger.Error(entryMsg, entryError);
+                        }
+                        else
+                        {
+                            Logger.Error(entryMsg);
+                        }
                         objectAcl[recordId] = DenyAllAclEntry();
                     }
                     else
@@ -567,7 +591,9 @@ public static class Ingest
             }
             catch (Exception exc)
             {
-                Logger.Error($"[{objectType}] transform_record failed for item {itemId}: {exc.Message}");
+                // Full exception (type + stack) in the log; the dead-letter record
+                // below carries type + message for the retry tooling.
+                Logger.Error($"[{objectType}] transform_record failed for item {itemId}: {exc.Message}", exc);
                 transformFailures.Add((itemId, $"[Transform] {exc.GetType().Name}: {exc.Message}"));
             }
         }
@@ -749,7 +775,10 @@ public static class Ingest
                 }
                 catch (Exception exc)
                 {
-                    Logger.Error($"Graph $batch call failed for {curItems.Count} items: {exc.Message}");
+                    Logger.Error(
+                        $"[{objectType}] Graph $batch call failed for {curItems.Count} item(s) on attempt " +
+                        $"{attempt}/{maxItemRetries} — dead-lettering the whole sub-batch: {exc.Message}",
+                        exc);
                     var failedIds = new List<string>();
                     lock (statsLock!)
                     {
@@ -1081,6 +1110,7 @@ public static class Ingest
 
         // Pipeline: overlap Graph upload of chunk N with ACL resolution of chunk N+1
         Task<int>? pendingGraphFuture = null;
+        var pendingChunkIndex = 0;  // chunk # the pending upload belongs to (log context only)
         var fetchSw = Stopwatch.StartNew();  // track SF fetch time
 
         try
@@ -1226,7 +1256,7 @@ public static class Ingest
                     catch (Exception exc)
                     {
                         Logger.Error(
-                            $"[{objectType}] Graph upload of previous chunk failed — " +
+                            $"[{objectType}] Graph upload of previous chunk #{pendingChunkIndex} failed — " +
                             $"continuing with next chunk: {exc.Message}",
                             exc);
                     }
@@ -1255,10 +1285,25 @@ public static class Ingest
                         config, client, transformer, chunkRecords, chunkAcl, stats, graphBatchSize,
                         dlPath: dlPath, objectType: chunkOt, dashboard: dashboard,
                         concurrency: concurrency, statsLock: statsLock);
-                    SyncState.WriteCheckpoint(connectorId, sinceIso, chunkOt, chunkCi);
+                    try
+                    {
+                        SyncState.WriteCheckpoint(connectorId, sinceIso, chunkOt, chunkCi);
+                    }
+                    catch (Exception cpExc)
+                    {
+                        // The chunk's items WERE submitted; without this line the outer
+                        // "Graph upload failed" catch would misattribute a state-file/SQL
+                        // write fault to the Graph push. Rethrow — handling is unchanged.
+                        Logger.Error(
+                            $"[{chunkOt}] Failed to write checkpoint for chunk #{chunkCi} (connector {connectorId}) " +
+                            $"after a successful Graph push — a resume may re-ingest this chunk: {cpExc.Message}",
+                            cpExc);
+                        throw;
+                    }
                     chunkAcl.Clear();
                     return submitted;
                 });
+                pendingChunkIndex = chunkCi;
                 fetchSw.Restart();  // reset for next SF fetch measurement
             }
 
@@ -1271,7 +1316,8 @@ public static class Ingest
                 }
                 catch (Exception exc)
                 {
-                    Logger.Error($"[{objectType}] Graph upload of final chunk failed: {exc.Message}", exc);
+                    Logger.Error(
+                        $"[{objectType}] Graph upload of final chunk #{pendingChunkIndex} failed: {exc.Message}", exc);
                 }
                 pendingGraphFuture = null;
             }

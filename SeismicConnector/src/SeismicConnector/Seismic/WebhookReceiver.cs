@@ -162,6 +162,8 @@ public sealed class WebhookReceiver : IDisposable
             }
             catch (Exception) when (_stopped)
             {
+                // Dispose() stopped the listener; GetContext throwing here is the
+                // normal shutdown handshake — nothing to log.
                 return;
             }
             catch (Exception exc)
@@ -186,6 +188,8 @@ public sealed class WebhookReceiver : IDisposable
                 }
                 catch
                 {
+                    // The response is already broken/closed — aborting it is
+                    // best-effort cleanup; there is nothing further to do.
                 }
             }
         }
@@ -220,7 +224,13 @@ public sealed class WebhookReceiver : IDisposable
         var signature = request.Headers[SignatureValidator.DefaultHeader];
         if (!_validator.IsValid(raw, signature))
         {
-            Logger.Warning("Webhook receiver: rejected request with invalid/missing signature.");
+            // Name the peer so repeated bad-signature sources (misconfigured
+            // sender vs. probing) are attributable from the log alone. The
+            // signature VALUE is never logged.
+            Logger.Warning(
+                "Webhook receiver: rejected request with invalid/missing signature "
+                + $"(remote {request.RemoteEndPoint?.ToString() ?? "unknown"}, "
+                + $"{raw.Length} byte body).");
             Respond(context, 401, "Invalid signature");
             return;
         }
@@ -289,6 +299,9 @@ public sealed class WebhookReceiver : IDisposable
         if (_stopped)
             return;
         _stopped = true;
+        // Shutdown is best-effort by design: Stop/Close on an already-broken
+        // listener and Join on a wedged thread may throw, and there is no
+        // useful recovery during dispose — the process is tearing this down.
         try
         {
             _listener.Stop();

@@ -111,9 +111,16 @@ public sealed class HaCoordinator
                 ("@key", crawlKey), ("@type", objectType), ("@node", NodeId));
             return inserted > 0;
         }
-        catch (Exception)
+        catch (Exception exc)
         {
-            // Primary-key race: another node inserted first.
+            // Primary-key race: another node inserted first — expected and
+            // benign, hence no warning. Logged at DEBUG (with the exception)
+            // because this broad catch would also absorb a real SQL failure;
+            // the run-log keeps the evidence either way, and a genuine outage
+            // additionally fails the surrounding uncaught statements loudly.
+            Logger.Debug(
+                $"Claim insert for '{objectType}' on crawl '{crawlKey}' lost to another node "
+                + $"(or failed): {exc.GetType().Name}: {exc.Message}");
             return false;
         }
     }

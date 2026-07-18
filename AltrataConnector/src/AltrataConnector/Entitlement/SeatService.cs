@@ -58,7 +58,19 @@ public sealed class SeatService
             throw new FileNotFoundException(
                 $"Seat list not found at '{path}'. Provide config/seats.json, SEAT_LIST_PATH, or SEAT_GROUP_ID.",
                 path);
-        return ParseSeatFile(File.ReadAllText(path));
+        try
+        {
+            return ParseSeatFile(File.ReadAllText(path));
+        }
+        catch (Exception exc) when (exc is JsonException or FormatException)
+        {
+            // The entitlement source is unusable — the command still fails
+            // fast (unchanged, fail closed), but a bare JsonException does not
+            // say WHICH config input broke; name the seat file first.
+            Logger.Error($"Seat list at '{path}' is not valid ({exc.GetType().Name}: {exc.Message}) — " +
+                         "entitlement cannot be resolved; fix the seat file (or set SEAT_GROUP_ID).");
+            throw;
+        }
     }
 
     /// <summary>Parse a seat file: plain array of UPNs/object IDs, or {"users":[...],"groups":[...]}.</summary>

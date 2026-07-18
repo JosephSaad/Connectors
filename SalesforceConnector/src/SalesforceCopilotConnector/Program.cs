@@ -108,6 +108,11 @@ public static class Program
         catch (Exception ex)
         {
             // Mirror CPython: an unhandled exception prints a traceback and exits 1.
+            // Additionally land the failure in the structured log (with the command
+            // name and full stack) so operators troubleshooting from the log file
+            // see the final error even when stderr was not captured.
+            Logging.GetLogger("salesforce_connector").Error(
+                $"Command '{parsedArgs.Command}' crashed with an unhandled exception", ex);
             Console.Error.WriteLine(ex);
             return 1;
         }

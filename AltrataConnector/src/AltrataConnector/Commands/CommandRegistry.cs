@@ -457,6 +457,8 @@ public static class CommandRegistry
                 }
                 catch (OperationCanceledException)
                 {
+                    // Graceful stop requested while sleeping between scheduled
+                    // crawls — leave the loop ("Continuous mode stopped" below).
                     break;
                 }
             }
@@ -629,7 +631,12 @@ public static class CommandRegistry
             }
             catch (Exception exc)
             {
-                Logger.Warning($"[{label}] Retry failed for {record.ItemId}: {exc.Message}");
+                // Kept + re-queued with the attempt bumped: log WHICH record
+                // (item id + op + shard label), which attempt this was, and the
+                // exception type (payload-unreadable vs Graph rejection differ).
+                Logger.Warning($"[{label}] Retry failed for {record.ItemId} " +
+                               $"(op {record.Op}, attempt {record.Attempts + 1}): {exc.GetType().Name}: {exc.Message} " +
+                               "— record stays on the dead-letter queue.");
                 remaining.Add(record with { Attempts = record.Attempts + 1, Error = exc.Message });
             }
         }
@@ -755,8 +762,11 @@ public static class CommandRegistry
                     }
                     catch (Exception exc)
                     {
+                        // Counted: any failure keeps this target's state UNWIPED
+                        // (see below) so the purge can be re-run to completion.
                         rtFailures++;
-                        Logger.Error($"[{label}] Failed to withdraw {item.ItemId}: {exc.Message}");
+                        Logger.Error($"[{label}] Failed to withdraw {item.ItemId}: " +
+                                     $"{exc.GetType().Name}: {exc.Message} — state NOT wiped; re-run purge-all --confirm.");
                     }
                 }
 
@@ -924,9 +934,26 @@ public static class CommandRegistry
 
             Console.WriteLine();
             Console.WriteLine("Erasing...");
+
+            // Suppress FIRST — before any withdrawal (round-2 DSAR-race fix).
+            // A crawl racing this erasure re-checks the suppression list AFTER
+            // its $batch PUT lands and withdraws any item whose subject is
+            // suppressed by then (CrawlEngine.IngestRecordsAsync). Ordering the
+            // suppression ahead of the withdrawals makes that guard airtight:
+            // any in-flight batch this withdrawal loop cannot see (its items are
+            // not inventoried yet) is guaranteed to observe the suppression at
+            // its post-PUT re-check. Fail-closed too — if this process dies
+            // mid-erasure the subject stays suppressed; unsuppress-subject is
+            // the explicit way back.
+            foreach (var id in subjectIds)
+            {
+                foreach (var (rt, _, _) in perTarget)
+                    rt.State.AddSuppressedSubject(id);
+            }
+
             var withdrawn = 0;
             var failures = 0;
-            foreach (var (rt, _, toWithdraw) in perTarget)
+            foreach (var (rt, label, toWithdraw) in perTarget)
             {
                 foreach (var itemId in toWithdraw)
                 {
@@ -943,7 +970,9 @@ public static class CommandRegistry
                         // Durability: still suppress + ledger, but queue the DELETE
                         // (on this target's queue) for retry-failed to complete.
                         failures++;
-                        Logger.Error($"Erasure withdrawal failed for {itemId}: {exc.Message}");
+                        Logger.Error($"[{label}] Erasure withdrawal failed for {itemId}: " +
+                                     $"{exc.GetType().Name}: {exc.Message} — DELETE dead-lettered; " +
+                                     "suppression stays durable, run retry-failed to complete the erasure.");
                         rt.State.AddDeadLetter(new DeadLetterRecord
                         {
                             ItemId = itemId,
@@ -959,15 +988,14 @@ public static class CommandRegistry
                 }
             }
 
-            // Local erasure + durable suppression on EVERY target's store so each
-            // shard crawl skips the subject; ledger once (base) per subject.
+            // Local erasure on EVERY target's store (suppression already durable
+            // above, ahead of the withdrawals); ledger once (base) per subject.
             foreach (var id in subjectIds)
             {
                 foreach (var (rt, _, _) in perTarget)
                 {
                     rt.Identity.RemoveCrosswalk(id);
                     rt.Identity.RemovePersonFromPathIndex(id);
-                    rt.State.AddSuppressedSubject(id);
                 }
                 runtime.Erasure.Append(actor, ErasureActions.Erase, id, email, allWithdraw.ToList());
                 Metrics.Increment("altrata_subjects_erased_total");

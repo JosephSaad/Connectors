@@ -21,13 +21,32 @@ public sealed class ClarizenRecord
 
     public JsonObject Fields { get; }
 
-    /// <summary>Raw Clarizen id, e.g. "/Task/1234567" (or a bare id from TDW exports).</summary>
-    public string RawId =>
-        Fields.TryGetPropertyValue("id", out var id) && id is not null
-            ? id.GetValue<string>()
-            : Fields.TryGetPropertyValue("Id", out var id2) && id2 is not null
-                ? id2.GetValue<string>()
-                : string.Empty;
+    /// <summary>
+    /// Raw Clarizen id, e.g. "/Task/1234567" (or a bare id from TDW exports).
+    /// TDW warehouse exports ship BARE NUMERIC ids ({"id": 1234567}) — any
+    /// scalar id value is normalized to its string form. A structurally
+    /// unusable id (object/array) yields an empty string so the row is dropped
+    /// by source-id validation instead of crashing the whole export.
+    /// </summary>
+    public string RawId
+    {
+        get
+        {
+            var node = Fields.TryGetPropertyValue("id", out var id) && id is not null
+                ? id
+                : Fields.TryGetPropertyValue("Id", out var id2) && id2 is not null
+                    ? id2
+                    : null;
+            return node switch
+            {
+                null => string.Empty,
+                JsonValue value => value.TryGetValue<string>(out var s)
+                    ? s
+                    : value.ToJsonString().Trim('"'),   // numeric/bool scalar → "1234567"
+                _ => string.Empty,                       // object/array id — not usable
+            };
+        }
+    }
 
     /// <summary>Numeric/local part of the id ("1234567" from "/Task/1234567").</summary>
     public string LocalId

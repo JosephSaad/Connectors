@@ -141,6 +141,8 @@ public static class Deploy
             }
             catch (OperationCanceledException)
             {
+                // Graceful stop requested during the inter-cycle sleep — exit
+                // the loop; "Continuous mode stopped." is logged just below.
                 break;
             }
         }

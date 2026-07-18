@@ -6,6 +6,7 @@ using System.Net;
 using System.Text.Json.Nodes;
 using SeismicConnector.Config;
 using SeismicConnector.Graph;
+using SeismicConnector.Infrastructure;
 using SeismicConnector.Seismic;
 
 namespace SeismicConnector.Tests;
@@ -31,11 +32,17 @@ public sealed class PipelineHarness : IDisposable
 
     public PipelineHarness(
         ExclusionRules? exclusions = null, string fallbackAcl = "skip", bool enrichUsage = false,
-        bool liveDocFieldIndexing = false, bool permissionReacl = false)
+        bool liveDocFieldIndexing = false, bool permissionReacl = false,
+        IEnumerable<string>? objects = null,
+        int chunkSize = 10, int graphBatchSize = 5, int batchWorkers = 2,
+        HaCoordinator? ha = null)
     {
         Config = TestConfig.Build(
             exclusions: exclusions, fallbackAcl: fallbackAcl, enrichUsage: enrichUsage,
-            liveDocFieldIndexing: liveDocFieldIndexing, permissionReacl: permissionReacl);
+            liveDocFieldIndexing: liveDocFieldIndexing, permissionReacl: permissionReacl,
+            objects: objects, chunkSize: chunkSize, graphBatchSize: graphBatchSize,
+            batchWorkers: batchWorkers);
+        _ha = ha;
         _dbPath = Path.Combine(Path.GetTempPath(), "seismic-pipe-" + Guid.NewGuid().ToString("N") + ".db");
         Store = new SqliteIdentityStore(_dbPath);
         Store.UpsertPrincipal(new PrincipalMapping("seismic-user-1", "user", "amy@contoso.com", "entra-user-1", "Amy"));
@@ -64,8 +71,10 @@ public sealed class PipelineHarness : IDisposable
             OverrideAccessToken = "token",
             DelayAsync = (_, _) => Task.CompletedTask,
         };
-        Pipeline = new IngestPipeline(Config, Seismic, Graph, Store);
+        Pipeline = new IngestPipeline(Config, Seismic, Graph, Store, ha: _ha);
     }
+
+    private readonly HaCoordinator? _ha;
 
     public void AddTeamsite(
         string id, string name = "", bool restricted = false,

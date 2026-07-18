@@ -73,9 +73,24 @@ public static class SyncState
         catch (Exception exc) when (
             exc is FileNotFoundException or DirectoryNotFoundException or JsonException or FormatException)
         {
-            // no state yet
+            // A missing file is the normal "no state yet" case and stays silent;
+            // an EXISTING file that fails to parse means the delta cursor was
+            // lost (the next incremental behaves like a first run) — say so.
+            WarnIfCorrupt(exc, SyncStateFile,
+                $"last-sync state for '{connectorId}' unavailable; treating as no previous sync");
         }
         return null;
+    }
+
+    /// <summary>Log a warning for a state file that exists but cannot be parsed
+    /// (missing-file conditions stay silent — they are the normal first-run path).</summary>
+    private static void WarnIfCorrupt(Exception exc, string path, string consequence)
+    {
+        if (exc is FileNotFoundException or DirectoryNotFoundException)
+            return;
+        Logger.Warning(
+            $"State file '{path}' exists but could not be parsed "
+            + $"({exc.GetType().Name}: {exc.Message}) — {consequence}.");
     }
 
     public static void WriteLastSync(string connectorId, DateTime timestampUtc)
@@ -94,7 +109,9 @@ public static class SyncState
         catch (Exception exc) when (
             exc is FileNotFoundException or DirectoryNotFoundException or JsonException)
         {
-            // start fresh
+            // start fresh (warn when an existing file was unreadable — other
+            // connectors' cursors in it are lost by the rewrite below)
+            WarnIfCorrupt(exc, SyncStateFile, "rewriting it from scratch");
         }
         data[connectorId] = IsoFormat(timestampUtc);
         Directory.CreateDirectory(LogsDir);
@@ -121,7 +138,11 @@ public static class SyncState
         catch (Exception exc) when (
             exc is FileNotFoundException or DirectoryNotFoundException or JsonException)
         {
-            // no checkpoint
+            // No checkpoint file is normal; a corrupt one means the resume
+            // point was lost and completed chunks will be re-sent (safe —
+            // PUT is idempotent — but worth an explanation in the log).
+            WarnIfCorrupt(exc, CheckpointPath(connectorId),
+                "resuming without a checkpoint (completed chunks will be re-ingested)");
         }
         return null;
     }
@@ -164,7 +185,8 @@ public static class SyncState
             catch (Exception exc) when (
                 exc is FileNotFoundException or DirectoryNotFoundException or JsonException)
             {
-                // start fresh
+                // start fresh (warn when an existing checkpoint was unreadable)
+                WarnIfCorrupt(exc, CheckpointPath(connectorId), "starting a fresh completed-chunk map");
             }
             var completed = data["completed"]!.AsObject();
             var current = completed.TryGetPropertyValue(objectType, out var node) && node is not null
@@ -261,13 +283,40 @@ public static class SyncState
         if (UseSqlServer)
             return SqlStateStore.ReadDeadLetter(connectorId);
         var entries = new List<JsonObject>();
+        var path = FailedRecordsPath(connectorId);
         try
         {
-            foreach (var rawLine in File.ReadLines(FailedRecordsPath(connectorId), Utf8NoBom))
+            var lineNumber = 0;
+            foreach (var rawLine in File.ReadLines(path, Utf8NoBom))
             {
+                lineNumber++;
                 var line = rawLine.Trim();
-                if (line.Length > 0)
-                    entries.Add(JsonNode.Parse(line)!.AsObject());
+                if (line.Length == 0)
+                    continue;
+                // Per-line isolation: a torn/corrupt line (typically a crash
+                // mid-append) must not make the WHOLE queue unreadable — that
+                // would break retry-failed and the dead-letter depth gauge.
+                // Log the offending line verbatim so no failure detail is lost,
+                // then keep reading the parseable entries.
+                try
+                {
+                    if (JsonNode.Parse(line) is JsonObject entry)
+                    {
+                        entries.Add(entry);
+                    }
+                    else
+                    {
+                        Logger.Error(
+                            $"Dead-letter file '{path}' line {lineNumber} is valid JSON but not "
+                            + $"an object — skipping it. Raw line: {line}");
+                    }
+                }
+                catch (JsonException exc)
+                {
+                    Logger.Error(
+                        $"Dead-letter file '{path}' line {lineNumber} is not valid JSON "
+                        + $"({exc.Message}) — skipping it. Raw line: {line}");
+                }
             }
         }
         catch (Exception exc) when (exc is FileNotFoundException or DirectoryNotFoundException)

@@ -128,6 +128,15 @@ internal sealed class HarnessGraphClient : GraphClient
 {
     public int LatencyMs { get; init; }
 
+    /// <summary>
+    /// Soak mode: count acks without retaining every acked item id. The Acked
+    /// dictionary intentionally holds one entry per item to prove exactly-once
+    /// ingestion, which makes the HARNESS's own RSS grow with item count — for
+    /// long-soak leak attribution that bookkeeping can be switched off so the
+    /// measured footprint is the pipeline's alone.
+    /// </summary>
+    public bool CountOnlyAcks { get; init; }
+
     /// <summary>Responder: (1-based batch call index, sub-request payload) → sub-responses.</summary>
     public Func<int, List<JsonObject>, List<JsonObject>> OnBatch { get; set; } =
         (_, payload) => AllOk(payload);
@@ -170,9 +179,12 @@ internal sealed class HarnessGraphClient : GraphClient
                     continue;
                 if (!byId.TryGetValue(resp["id"]?.ToString() ?? "", out var req))
                     continue;
-                var url = req["url"]!.ToString();
-                var itemId = Uri.UnescapeDataString(url[(url.LastIndexOf('/') + 1)..]);
-                Acked.AddOrUpdate(itemId, 1, (_, v) => v + 1);
+                if (!CountOnlyAcks)
+                {
+                    var url = req["url"]!.ToString();
+                    var itemId = Uri.UnescapeDataString(url[(url.LastIndexOf('/') + 1)..]);
+                    Acked.AddOrUpdate(itemId, 1, (_, v) => v + 1);
+                }
                 Interlocked.Increment(ref _ackedTotal);
             }
             return responses;

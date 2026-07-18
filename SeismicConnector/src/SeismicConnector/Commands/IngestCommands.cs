@@ -53,6 +53,9 @@ public static class IngestCommands
         catch (Exception ex)
         {
             progress.Error($"ingest failed: {ex.Message}");
+            // Full exception (type + stack) to the log file — the progress line
+            // above is the console-friendly summary.
+            Logging.GetLogger("seismic_connector").Error("ingest failed", ex);
             await Alerting.RaiseAsync("crawl_failed", ex.Message);
             return false;
         }
@@ -90,6 +93,7 @@ public static class IngestCommands
         catch (Exception ex)
         {
             progress.Error($"ingest-object failed: {ex.Message}");
+            Logging.GetLogger("seismic_connector").Error("ingest-object failed", ex);
             return false;
         }
     }
@@ -118,7 +122,8 @@ public static class IngestCommands
         }
         catch (Exception ex)
         {
-            progress.Error($"ingest-item failed: {ex.Message}");
+            progress.Error($"ingest-item {contentId} failed: {ex.Message}");
+            Logging.GetLogger("seismic_connector").Error($"ingest-item {contentId} failed", ex);
             return false;
         }
     }

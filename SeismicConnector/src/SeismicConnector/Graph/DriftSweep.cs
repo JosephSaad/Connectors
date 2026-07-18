@@ -236,7 +236,12 @@ public sealed class DriftSweep
             }
             catch (Exception ex)
             {
-                Logger.Error($"Drift repair failed for {itemId} ({kind}): {ex.Message}");
+                // Repair boundary: one item's failed repair must not abort the
+                // sweep. The finding is recorded as UNREPAIRED (exit 1 /
+                // index_drift alert), so the miss is never silent. Full
+                // exception attached — this broad catch also absorbs unexpected
+                // types whose stack matters.
+                Logger.Error($"Drift repair failed for {itemId} ({kind}) — finding left unrepaired.", ex);
             }
         }
         summary.Findings.Add(new DriftFinding(kind, itemId, teamsiteId, detail, repaired));

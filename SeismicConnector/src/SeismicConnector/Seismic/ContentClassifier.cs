@@ -130,6 +130,9 @@ public readonly record struct ClassificationResult(
 /// </summary>
 public sealed class ContentClassifier
 {
+    private static readonly Infrastructure.IAppLogger Logger =
+        Infrastructure.Logging.GetLogger("seismic_connector.classify");
+
     private static readonly TimeSpan DefaultMatchTimeout = TimeSpan.FromSeconds(2);
 
     private readonly TimeSpan _matchTimeout;
@@ -172,9 +175,15 @@ public sealed class ContentClassifier
             regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, _matchTimeout);
             return true;
         }
-        catch (ArgumentException)
+        catch (ArgumentException ex)
         {
-            regex = null;  // invalid config pattern — skip it rather than crash a crawl
+            // Invalid config pattern — skip it rather than crash a crawl, but
+            // WARN: a silently-dropped detection rule means content that should
+            // classify as sensitive quietly stops being detected.
+            Logger.Warning(
+                $"classification.json: regex '{pattern}' does not compile ({ex.Message}) — "
+                + "this detection rule is DISABLED for the run; fix the pattern to restore it.");
+            regex = null;
             return false;
         }
     }

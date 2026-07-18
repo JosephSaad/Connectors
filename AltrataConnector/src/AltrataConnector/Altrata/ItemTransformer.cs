@@ -87,14 +87,25 @@ public sealed class ItemTransformer
 
     /// <summary>
     /// Graph-safe, collision-free item id. Record ids that are already
-    /// Graph-safe (alphanumeric plus '-') keep the legacy `{dataset}-{id}`
-    /// shape unchanged. Ids containing any other character are sanitized
-    /// (char → '-') AND suffixed with a short stable SHA-256 of the raw id, so
-    /// two distinct raw ids can never fold onto the same item id (e.g.
-    /// 'acct:12/3' vs 'acct-12-3' — sanitization alone is not injective, and a
-    /// collision would let one subject's PUT overwrite another's item or a
-    /// DSAR tombstone mis-target). Deterministic: erasure recomputes the same
-    /// id from the same raw id.
+    /// Graph-safe (ASCII alphanumeric plus '-') keep the legacy
+    /// `{dataset}-{id}` shape unchanged. Ids containing ANY other character
+    /// are sanitized (char → '-') AND suffixed with a short stable SHA-256 of
+    /// the raw id, so two distinct raw ids can never fold onto the same item
+    /// id (e.g. 'acct:12/3' vs 'acct-12-3' — sanitization alone is not
+    /// injective, and a collision would let one subject's PUT overwrite
+    /// another's item or a DSAR tombstone mis-target). Deterministic: erasure
+    /// recomputes the same id from the same raw id.
+    ///
+    /// The pass-through alphabet is STRICTLY ASCII [A-Za-z0-9-] (round-2
+    /// hardening): unicode letters/digits — precomposed accents (NFC "é"),
+    /// homoglyphs (Cyrillic 'а', U+212A KELVIN SIGN), non-ASCII digit systems
+    /// (Arabic-Indic '١') — previously passed `char.IsLetterOrDigit` straight
+    /// into the id, producing non-Graph-safe ids whose identity depended on the
+    /// producer's unicode normalization form and on any case-folding /
+    /// normalizing layer downstream. Now every such id is sanitized + hashed:
+    /// the id is a pure function of the raw id's exact UTF-8 bytes (no
+    /// normalization anywhere), so NFC/NFD spellings, zero-width/RTL controls
+    /// and combining sequences each map to their own stable, ASCII-only id.
     ///
     /// Injectivity proof sketch: the sanitized (hashed) form and the legacy
     /// pass-through form share the same [A-Za-z0-9-] alphabet, so a hash
@@ -114,7 +125,7 @@ public sealed class ItemTransformer
         var sb = new StringBuilder(raw.Length);
         foreach (var ch in raw)
         {
-            if (char.IsLetterOrDigit(ch) || ch == '-')
+            if (ch is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or (>= '0' and <= '9') or '-')
             {
                 sb.Append(ch);
             }

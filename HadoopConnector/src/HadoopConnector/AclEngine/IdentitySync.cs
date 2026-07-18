@@ -174,7 +174,12 @@ public sealed class IdentitySync
         }
         catch (Exception exc)
         {
-            Logger.Warning($"Entra lookup failed for '{email}': {exc.Message}");
+            // Per-user best effort: the user just stays unresolved (counted in
+            // the sync result). Include the exception TYPE — one line per user
+            // during an outage is tolerable, a stack per user is not, and the
+            // type is what separates DNS/auth trouble from a response-shape bug.
+            Logger.Warning(
+                $"Entra lookup failed for '{email}': {exc.GetType().Name}: {exc.Message}");
             return null;
         }
     }

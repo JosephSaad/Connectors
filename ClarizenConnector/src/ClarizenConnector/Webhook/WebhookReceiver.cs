@@ -101,7 +101,10 @@ public sealed class WebhookReceiver : IDisposable
         }
         catch (Exception exc)
         {
-            Logger.Error($"Webhook receiver failed to start: {exc.Message}");
+            // Full exception: an unexpected startup failure here silently costs
+            // event-driven incremental (polling remains), so the log must carry
+            // enough to diagnose it without a repro.
+            Logger.Error("Webhook receiver failed to start; falling back to polling only.", exc);
             return null;
         }
     }
@@ -158,7 +161,8 @@ public sealed class WebhookReceiver : IDisposable
             {
                 if (_stopped)
                     return;
-                Logger.Warning($"Webhook receiver: accept error: {exc.Message}");
+                Logger.Warning(
+                    $"Webhook receiver: accept error: {exc.GetType().Name}: {exc.Message}");
                 Thread.Sleep(1000);
                 continue;
             }
@@ -169,7 +173,13 @@ public sealed class WebhookReceiver : IDisposable
             }
             catch (Exception exc)
             {
-                Logger.Warning($"Webhook receiver: request handling error: {exc.Message}");
+                // HandleRequest handles its own expected rejections (401/400/413),
+                // so anything landing here is unexpected — keep the full exception
+                // and the caller so one bad request is diagnosable in isolation.
+                Logger.Warning(
+                    "Webhook receiver: request handling error for "
+                    + $"{context.Request.HttpMethod} {context.Request.Url?.AbsolutePath} from "
+                    + $"{context.Request.RemoteEndPoint}: {exc}");
                 TryAbort(context);
             }
         }

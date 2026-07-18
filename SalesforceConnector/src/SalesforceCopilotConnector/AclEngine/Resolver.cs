@@ -428,8 +428,14 @@ public class AclResolver
         {
             records = await _sf.QueryAllAsync(soql);
         }
-        catch (InvalidOperationException)
+        catch (InvalidOperationException exc)
         {
+            // Returning null here breaks the ControlledByParent chain for this
+            // record (it falls back to its own private ACL), so the failure must
+            // be visible: which record, which parent field, and why.
+            Logger.Warning(
+                $"[AclResolver] Could not read {objectType}.{fieldName} for record {recordId} " +
+                $"(parent-chain lookup): {exc.Message} — treating parent as unresolved");
             return null;
         }
         if (records.Count == 0)

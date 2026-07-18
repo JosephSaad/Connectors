@@ -221,7 +221,15 @@ public sealed class HealthEndpoint : IDisposable
     private IReadOnlyList<BreakerSnapshot> SafeBreakers()
     {
         try { return _breakers(); }
-        catch { return Array.Empty<BreakerSnapshot>(); }
+        catch
+        {
+            // Deliberately silent: the snapshot supplier is best-effort
+            // telemetry polled on every /ready and /metrics scrape — the
+            // endpoint must keep answering (and must not flood the log once
+            // per scrape) when a store behind the supplier is down.
+            // RenderMetrics logs a warning when the gauges themselves fail.
+            return Array.Empty<BreakerSnapshot>();
+        }
     }
 
     private static string Escape(string value) =>

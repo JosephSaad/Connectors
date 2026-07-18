@@ -111,6 +111,8 @@ public sealed class HealthEndpoint : IDisposable
             }
             catch (Exception) when (_stopped)
             {
+                // Dispose() stopped the listener; GetContext throwing here is
+                // the normal shutdown handshake — nothing to log.
                 return;
             }
             catch (Exception exc)
@@ -206,6 +208,8 @@ public sealed class HealthEndpoint : IDisposable
         }
         catch
         {
+            // The response is already broken/closed — aborting it is best-effort
+            // cleanup after the request error was logged by the caller.
         }
     }
 
@@ -214,6 +218,9 @@ public sealed class HealthEndpoint : IDisposable
         if (_stopped)
             return;
         _stopped = true;
+        // Shutdown is best-effort by design: Stop/Close on an already-broken
+        // listener and Join on a wedged thread may throw, and there is no
+        // useful recovery during dispose ("stopped" is logged either way).
         try
         {
             _listener.Stop();

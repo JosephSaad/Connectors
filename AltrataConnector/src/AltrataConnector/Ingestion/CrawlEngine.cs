@@ -388,6 +388,17 @@ public sealed class CrawlEngine
                 Reconciliation.WriteReport(_config.ConnectorId, readRejected);
                 return readRejected;
             }
+            catch (Exception exc) when (exc is JsonException or FormatException or NotSupportedException)
+            {
+                // Malformed-but-checksum-consistent feed file (bad JSON/CSV or
+                // an unsupported extension). This still aborts the whole crawl
+                // (unchanged — the publisher must fix the file), but names the
+                // delivery/file/dataset first: a bare JsonException surfacing at
+                // the top level identifies a byte offset and nothing else.
+                Logger.Error($"Delivery '{delivery.Id}' file '{file.Name}' ({dataset}) failed to parse — " +
+                             $"{exc.GetType().Name}: {exc.Message}. Aborting the crawl; fix the feed file and re-run.");
+                throw;
+            }
             if (records.Count != file.RecordCount)
                 Logger.Warning($"'{file.Name}': manifest says {file.RecordCount} records, parsed {records.Count}");
 
@@ -585,6 +596,9 @@ public sealed class CrawlEngine
                 }
                 catch (EntitlementViolationException)
                 {
+                    // Never dead-letter an entitlement violation: it aborts the
+                    // crawl (fail closed) and is logged + alerted at the
+                    // command boundary (WithRuntime).
                     throw;
                 }
                 catch (Exception exc)
@@ -603,6 +617,10 @@ public sealed class CrawlEngine
                         Op = DeadLetterOps.Transform,
                         PayloadJson = "",
                     });
+                    // Same visibility as a failed PUT: dataset + record id +
+                    // delivery + why (ids only — never a profile field value).
+                    Logger.Warning($"Transform dead-lettered {dataset} record '{record.Id ?? $"row{i}"}' " +
+                                   $"(delivery '{delivery.Id}'): {exc.GetType().Name}: {exc.Message}");
                     if (Logger.IsDebugEnabled)
                         Logger.Debug($"Transform failed for {dataset} record {record.Id ?? i.ToString()}: {exc}");
                 }
@@ -637,21 +655,24 @@ public sealed class CrawlEngine
             }
 
             var resolved = new HashSet<string>(StringComparer.Ordinal);
+            var succeededPuts = new List<string>();
             foreach (var result in putResults)
             {
                 resolved.Add(result.ItemId);
                 if (result.Success)
                 {
+                    // Inventory + reverse index are journaled BEFORE the
+                    // suppression re-read below: a forget-subject racing this
+                    // superchunk either takes its withdrawal snapshot after
+                    // these rows exist (and withdraws them itself), or it
+                    // committed its suppression first (and the re-read below
+                    // catches it) — there is no ordering in which both sides
+                    // miss the item.
                     _identity.RecordIngestedItem(new IngestedItem(result.ItemId, dataset, seatHash, DateTime.UtcNow));
                     // Reverse index for per-subject erasure (DSAR).
                     if (itemSubjects.TryGetValue(result.ItemId, out var subjectIds))
                         _identity.RecordItemSubjects(result.ItemId, subjectIds.ToList());
-                    // Classification manifest: id → label + categories (no values).
-                    if (classificationEntries != null && classificationByItem!.TryGetValue(result.ItemId, out var ce))
-                        classificationEntries.Add(ce);
-                    ingested++;
-                    Progress.AddIngested();
-                    Metrics.Increment("altrata_items_ingested_total");
+                    succeededPuts.Add(result.ItemId);
                 }
                 else
                 {
@@ -665,6 +686,36 @@ public sealed class CrawlEngine
                     });
                     Logger.Warning($"Dead-lettered {dataset} item {result.ItemId}: {result.Error}");
                 }
+            }
+
+            // DSAR race guard (round-2): a forget-subject can run to completion
+            // between this superchunk's per-record suppression pre-check and
+            // this point. Such a PUT silently resurrects an erased subject: the
+            // erasure's withdrawal snapshot may predate these items entirely.
+            // Re-read the suppression list AFTER the successful PUTs were
+            // journaled above and withdraw every item whose subject is
+            // suppressed by now — suppression wins, whichever side finishes
+            // last (forget-subject commits its suppression BEFORE taking its
+            // withdrawal snapshot, so the two guards interlock with no window).
+            var suppressedNow = itemSubjects.Count == 0 || succeededPuts.Count == 0
+                ? null
+                : new HashSet<string>(_state.ListSuppressedSubjects(), StringComparer.Ordinal);
+            var resurrected = new List<string>();
+            foreach (var itemId in succeededPuts)
+            {
+                if (suppressedNow is { Count: > 0 }
+                    && itemSubjects.TryGetValue(itemId, out var subjectsOfItem)
+                    && subjectsOfItem.Any(suppressedNow.Contains))
+                {
+                    resurrected.Add(itemId);   // erased mid-flight: withdraw below
+                    continue;
+                }
+                // Classification manifest: id → label + categories (no values).
+                if (classificationEntries != null && classificationByItem!.TryGetValue(itemId, out var ce))
+                    classificationEntries.Add(ce);
+                ingested++;
+                Progress.AddIngested();
+                Metrics.Increment("altrata_items_ingested_total");
             }
 
             // Tombstone withdrawals: success removes the item from the registry;
@@ -696,6 +747,60 @@ public sealed class CrawlEngine
                     });
                     Logger.Warning($"Dead-lettered tombstone {dataset} item {result.ItemId}: {result.Error}");
                 }
+            }
+
+            // Compensating withdrawals for the DSAR race guard. Each record is
+            // accounted as suppressed (it was consumed and must never surface);
+            // a failed or interrupted withdrawal queues a replayable DELETE so
+            // retry-failed completes the erasure — the item is never left both
+            // live and untracked.
+            if (resurrected.Count > 0)
+            {
+                IReadOnlyList<BatchOpResult> compensations;
+                try
+                {
+                    compensations = await _graph.DeleteItemsBatchAsync(resurrected, ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    compensations = resurrected
+                        .Select(id => new BatchOpResult(id, false, 0, "graceful stop during erasure-race withdrawal"))
+                        .ToList();
+                }
+                foreach (var result in compensations)
+                {
+                    if (!result.Success)
+                    {
+                        _state.AddDeadLetter(new DeadLetterRecord
+                        {
+                            ItemId = result.ItemId,
+                            Dataset = dataset,
+                            DeliveryId = delivery.Id,
+                            Error = $"erasure-race withdrawal: {result.Error ?? $"HTTP {result.Status}"}",
+                            Op = DeadLetterOps.Delete,
+                            PayloadJson = "",
+                            CorrelationId = CorrelationContext.Current,
+                        });
+                        Logger.Warning($"Erasure-race withdrawal dead-lettered for {result.ItemId} " +
+                                       $"(delivery '{delivery.Id}'): {result.Error} — retry-failed completes the erasure.");
+                    }
+                    else
+                    {
+                        // A compensating withdrawal is part of an erasure and
+                        // MUST be visible per item: this PUT landed while the
+                        // subject's DSAR completed, and this DELETE undid it.
+                        Logger.Warning($"Erasure-race withdrawal completed for {result.ItemId} " +
+                                       $"(delivery '{delivery.Id}') — subject erased while the PUT was in flight; suppression wins.");
+                    }
+                    // Remove the rows journaled above (idempotent alongside the
+                    // racing forget's own removal).
+                    _identity.RemoveIngestedItem(result.ItemId);
+                    suppressed++;
+                    Progress.AddSuppressed();
+                    Metrics.Increment("altrata_items_suppressed_total");
+                }
+                Logger.Warning($"DSAR race: withdrew {resurrected.Count} item(s) whose subject was erased " +
+                               "while their PUT was in flight (suppression wins).");
             }
 
             // Defensive: anything the batch pipeline never reported on is a failure.
@@ -798,14 +903,17 @@ public sealed class CrawlEngine
             var results = await _graph.UpdateItemAclsBatchAsync(updates, ct);
             foreach (var result in results)
             {
-                if (result.Success && byId.TryGetValue(result.ItemId, out var item))
+                if (result.Success && byId.ContainsKey(result.ItemId))
                 {
-                    _identity.RecordIngestedItem(item with
-                    {
-                        AclHash = seatSync.SeatHash,
-                        LastIngestedUtc = DateTime.UtcNow,
-                    });
-                    updated++;
+                    // UPDATE-only stamp (round-2 DSAR-race fix): if a concurrent
+                    // forget-subject erased this item after the stale snapshot
+                    // was taken, the row is gone and must NOT be re-inserted —
+                    // an upsert here would leave a ghost inventory row claiming
+                    // ownership of an item the DSAR already withdrew.
+                    if (_identity.TryUpdateAclHash(result.ItemId, seatSync.SeatHash, DateTime.UtcNow))
+                        updated++;
+                    else
+                        Logger.Info($"Re-ACL: item {result.ItemId} vanished mid-pass (erased) — not re-recorded");
                 }
                 else if (!result.Success)
                 {
@@ -879,6 +987,15 @@ public sealed class CrawlEngine
                     // Rejected deliveries never feed the index (consistent with ingestion).
                     Logger.Warning($"Path index: skipping delivery '{delivery.Id}' ({exc.Message})");
                 }
+                catch (Exception exc) when (exc is JsonException or FormatException or NotSupportedException)
+                {
+                    // Same parse-diagnostic rule as ingestion: the crawl still
+                    // aborts (unchanged), but the log names the delivery that
+                    // fed the index a malformed file before the exception flies.
+                    Logger.Error($"Path index: delivery '{delivery.Id}' failed to parse — " +
+                                 $"{exc.GetType().Name}: {exc.Message}. Aborting the crawl; fix the feed file and re-run.");
+                    throw;
+                }
             }
         }
 
@@ -940,7 +1057,20 @@ public sealed class CrawlEngine
             return new EntityResolver(_identity, fuzzy);
         }
         using var span = Telemetry.Span("entity.load");
-        var contacts = LoadCrmContactFile(_config.CrmContactsPath);
+        IReadOnlyList<CrmContact> contacts;
+        try
+        {
+            contacts = LoadCrmContactFile(_config.CrmContactsPath);
+        }
+        catch (Exception exc)
+        {
+            // Config-input failure → abort the crawl (unchanged: silently
+            // resolving against a stale store would mislink subjects), but
+            // fail fast NAMING the setting instead of a bare parse exception.
+            Logger.Error($"CRM_CONTACTS_PATH '{_config.CrmContactsPath}' could not be loaded — " +
+                         $"{exc.GetType().Name}: {exc.Message}. Fix or unset the file; aborting the crawl.");
+            throw;
+        }
         _identity.ReplaceCrmContacts(contacts);
         Telemetry.SetTag(span, "altrata.crm.contacts", contacts.Count);
         Logger.Info($"Loaded {contacts.Count} CRM contact(s) for entity resolution" +

@@ -49,21 +49,39 @@ public static class RetryFailed
                     continue;
 
                 bool ok;
-                if (objectType == "Withdrawal")
+                try
                 {
-                    await runtime.Pipeline.WithdrawItemAsync(
-                        itemId, "retry", "dead-letter retry of failed withdrawal", ServiceStop.Token);
-                    ok = true;
+                    if (objectType == "Withdrawal")
+                    {
+                        await runtime.Pipeline.WithdrawItemAsync(
+                            itemId, "retry", "dead-letter retry of failed withdrawal", ServiceStop.Token);
+                        ok = true;
+                    }
+                    else if (objectType == "Teamsite")
+                    {
+                        // A whole-teamsite listing failure: re-crawl handled by next run;
+                        // here we just probe that the teamsite lists now.
+                        ok = (await runtime.Seismic.GetContentsAsync(itemId, null, ServiceStop.Token)).Count >= 0;
+                    }
+                    else
+                    {
+                        ok = await runtime.Pipeline.IngestSingleAsync(itemId, null, ServiceStop.Token);
+                    }
                 }
-                else if (objectType == "Teamsite")
+                catch (OperationCanceledException)
                 {
-                    // A whole-teamsite listing failure: re-crawl handled by next run;
-                    // here we just probe that the teamsite lists now.
-                    ok = (await runtime.Seismic.GetContentsAsync(itemId, null, ServiceStop.Token)).Count >= 0;
+                    throw;  // graceful stop — handled by the command-level catch
                 }
-                else
+                catch (Exception ex)
                 {
-                    ok = await runtime.Pipeline.IngestSingleAsync(itemId, null, ServiceStop.Token);
+                    // Per-record boundary: one record whose retry throws (Seismic
+                    // 5xx, breaker open, ...) must not abort the retries queued
+                    // BEHIND it. It stays in the dead-letter queue (nothing is
+                    // removed on failure) and the run reports FAIL + exit 1.
+                    Logging.GetLogger("seismic_connector").Error(
+                        $"retry-failed: retry of {objectType} {itemId} threw — the record stays in "
+                        + "the dead-letter queue; continuing with the remaining records.", ex);
+                    ok = false;
                 }
                 allOk &= ok;
                 progress.Info($"  {(ok ? "OK " : "FAIL")} {objectType} {itemId}");
@@ -84,6 +102,7 @@ public static class RetryFailed
         catch (Exception ex)
         {
             progress.Error($"retry-failed failed: {ex.Message}");
+            Logging.GetLogger("seismic_connector").Error("retry-failed failed", ex);
             return false;
         }
     }
@@ -93,8 +112,10 @@ public static class RetryFailed
         var entries = new List<System.Text.Json.Nodes.JsonObject>();
         if (!File.Exists(path))
             return entries;
+        var lineNumber = 0;
         foreach (var line in File.ReadLines(path))
         {
+            lineNumber++;
             var trimmed = line.Trim();
             if (trimmed.Length == 0)
                 continue;
@@ -103,8 +124,12 @@ public static class RetryFailed
                 if (System.Text.Json.Nodes.JsonNode.Parse(trimmed) is System.Text.Json.Nodes.JsonObject obj)
                     entries.Add(obj);
             }
-            catch (System.Text.Json.JsonException)
+            catch (System.Text.Json.JsonException ex)
             {
+                // A torn/corrupt line (e.g. crash mid-append) must not hide the
+                // parseable records around it — skip it, but say which line.
+                Logging.GetLogger("seismic_connector").Warning(
+                    $"retry-failed: {path} line {lineNumber} is not valid JSON ({ex.Message}) — skipped.");
             }
         }
         return entries;

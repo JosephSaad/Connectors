@@ -176,10 +176,19 @@ public interface IMatchReviewSink
     void Add(MatchReviewEntry entry);
 }
 
-/// <summary>Append-only JSONL review queue at logs/match_review_{CONNECTOR_ID}.jsonl.</summary>
+/// <summary>
+/// Append-only JSONL review queue at logs/match_review_{CONNECTOR_ID}.jsonl.
+/// Deduplicated (round-2 fix): the documented dedup keys — altrata id,
+/// candidate contact id and the name/employer hashes — are actually enforced,
+/// seeded from the existing file, so re-resolving the same below-threshold
+/// candidate on every crawl no longer grows the queue without bound (an
+/// unbounded queue both bloats the log and multiplies reviewer work). A
+/// candidate re-enters only when its compared values (hashes) change.
+/// </summary>
 public sealed class MatchReviewQueue : IMatchReviewSink
 {
     private readonly object _sync = new();
+    private HashSet<string>? _seen;   // dedup keys, lazily seeded from the file
 
     public string Path { get; }
 
@@ -191,10 +200,16 @@ public sealed class MatchReviewQueue : IMatchReviewSink
         Path = System.IO.Path.Combine(dir, $"match_review_{connectorId}.jsonl");
     }
 
+    private static string DedupKey(MatchReviewEntry entry) =>
+        $"{entry.AltrataId}|{entry.CandidateContactId}|{entry.NameHash}|{entry.EmployerHash}";
+
     public void Add(MatchReviewEntry entry)
     {
         lock (_sync)
         {
+            _seen ??= new HashSet<string>(ReadAllLocked().Select(DedupKey), StringComparer.Ordinal);
+            if (!_seen.Add(DedupKey(entry)))
+                return;   // identical candidate already queued (this run or an earlier crawl)
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
             using var stream = new FileStream(Path, FileMode.Append, FileAccess.Write, FileShare.Read);
             using var writer = new StreamWriter(stream, new UTF8Encoding(false));
@@ -205,27 +220,30 @@ public sealed class MatchReviewQueue : IMatchReviewSink
     public IReadOnlyList<MatchReviewEntry> ReadAll()
     {
         lock (_sync)
-        {
-            if (!File.Exists(Path))
-                return Array.Empty<MatchReviewEntry>();
-            var entries = new List<MatchReviewEntry>();
-            foreach (var line in File.ReadLines(Path))
-            {
-                if (string.IsNullOrWhiteSpace(line))
-                    continue;
-                try
-                {
-                    var entry = System.Text.Json.JsonSerializer.Deserialize<MatchReviewEntry>(line);
-                    if (entry != null)
-                        entries.Add(entry);
-                }
-                catch
-                {
-                    // tolerate manual edits
-                }
-            }
+            return ReadAllLocked();
+    }
+
+    private List<MatchReviewEntry> ReadAllLocked()
+    {
+        var entries = new List<MatchReviewEntry>();
+        if (!File.Exists(Path))
             return entries;
+        foreach (var line in File.ReadLines(Path))
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                continue;
+            try
+            {
+                var entry = System.Text.Json.JsonSerializer.Deserialize<MatchReviewEntry>(line);
+                if (entry != null)
+                    entries.Add(entry);
+            }
+            catch
+            {
+                // tolerate manual edits
+            }
         }
+        return entries;
     }
 }
 

@@ -248,7 +248,8 @@ public class ClarizenClient : IAttachmentDownloader
         }
         catch (Exception exc)
         {
-            Logger.Warning($"Clarizen connectivity check failed: {exc.Message}");
+            Logger.Warning(
+                $"Clarizen connectivity check failed: {exc.GetType().Name}: {exc.Message}");
             return false;
         }
     }

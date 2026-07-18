@@ -399,7 +399,8 @@ public class SqlServerIdentityStore : IIdentityStore
                 }
                 catch (Exception e) when (e is JsonException or InvalidOperationException or ArgumentNullException)
                 {
-                    // pass
+                    // pass (mirrors IdentityStore): corrupt field-cache rows are
+                    // treated as absent and repopulated by the discovery loop.
                 }
             }
             return null;

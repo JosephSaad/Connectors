@@ -84,9 +84,15 @@ public sealed class ContentClassifier
                         {
                             patterns.Add((pName ?? "pattern", new Regex(regex, Options, MatchTimeout)));
                         }
-                        catch (ArgumentException)
+                        catch (ArgumentException exc)
                         {
-                            // Skip an invalid regex; never crash the connector on config.
+                            // Skip an invalid regex; never crash the connector on
+                            // config — but SAY so: a silently dropped pattern means
+                            // a sensitive-data category quietly stops detecting.
+                            Logger.Warning(
+                                $"classification.json: category '{name}' pattern "
+                                + $"'{pName ?? "pattern"}' is not a valid regex and was skipped "
+                                + $"({exc.Message}). Detection for this pattern is OFF until fixed.");
                         }
                     }
                 }

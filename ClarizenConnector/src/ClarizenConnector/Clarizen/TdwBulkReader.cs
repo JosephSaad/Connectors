@@ -54,9 +54,24 @@ public sealed class TdwBulkReader
                 $"No TDW export file for '{objectName}' under '{_exportPath}' "
                 + $"(expected {objectName}.json or {objectName}.csv).");
         Logger.Info($"TDW bulk read: {path}");
-        return path.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
-            ? ParseJson(File.ReadAllText(path))
-            : ParseCsv(File.ReadAllText(path));
+        try
+        {
+            return path.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+                ? ParseJson(File.ReadAllText(path))
+                : ParseCsv(File.ReadAllText(path));
+        }
+        catch (Exception exc) when (exc is not OperationCanceledException)
+        {
+            // Rethrow with the FILE named: a bare JsonException ("invalid char at
+            // position N") gives an operator nothing to act on. The whole file is
+            // unusable, so this stays fatal for the object (worker-crash path,
+            // dead-lettered + logged upstream) — but now it says which export.
+            Logger.Error($"TDW export '{path}' for object '{objectName}' failed to parse", exc);
+            throw new InvalidDataException(
+                $"TDW export '{path}' for object '{objectName}' failed to parse: "
+                + $"{exc.GetType().Name}: {exc.Message}",
+                exc);
+        }
     }
 
     /// <summary>Parse a JSON export: bare array or {"entities": [...]}.</summary>

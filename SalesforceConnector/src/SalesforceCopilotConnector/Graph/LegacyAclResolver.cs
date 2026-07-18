@@ -55,7 +55,12 @@ public class AclResolver
     // are simply not granted) rather than crash.  Mirrors DefaultMaxParentDepth for
     // ControlledByParent chains and the newer AclEngine QueueHandler's bounded traversal.
     private const int MaxGroupNestingDepth = 400;
-    private static bool _warnedGroupNestingDepth;
+
+    // Group ids whose expansion already hit the depth cap (guarded by _cacheLock).
+    // Every DISTINCT truncated group warns exactly once per resolver, so an
+    // operator can enumerate every under-granted group from the log without the
+    // warning flooding once per record that references it.
+    private readonly HashSet<string> _depthCapWarnedGroups = new();
 
     private static readonly IAppLogger Logger = Logging.GetLogger("salesforce_connector");
 
@@ -80,7 +85,15 @@ public class AclResolver
     private Dictionary<string, List<string>>? _allGroupMembersByGroup;
     private Dictionary<string, string>? _roleParentMap;
     private Dictionary<string, HashSet<string>>? _usersByRole;
-    private bool _prewarmed;
+    // Single-flight latch for PrewarmCachesAsync (guarded by _cacheLock). A Task
+    // rather than a bool: the old unsynchronized ``if (_prewarmed) return;``
+    // check-then-act let two concurrent first resolves BOTH run the bulk fetch —
+    // duplicate SOQL load, and worse, the loser rewrote all eight cache fields
+    // while resolves against the winner's snapshot were already in flight, so a
+    // group walk could mix reference data from two different fetch epochs
+    // (groups from fetch A, members from fetch B) if Salesforce changed between
+    // them. See StressRound2Tests.Round2ResolverChurnTests.
+    private Task? _prewarmTask;
     // Guards mutable caches shared across parallel object workers (Python relies on the GIL).
     private readonly object _cacheLock = new();
 
@@ -180,11 +193,73 @@ public class AclResolver
     ///
     /// All of these fit comfortably in RAM and are fetched in seconds.
     /// </summary>
-    public virtual async Task PrewarmCachesAsync()
+    public virtual Task PrewarmCachesAsync()
     {
-        if (_prewarmed)
-            return;
+        // Single-flight: however many workers race the first resolve, exactly one
+        // bulk fetch runs and every caller awaits that same task, so the eight
+        // cache fields are only ever published as one consistent snapshot. A
+        // faulted (or canceled) attempt is replaced on the next call, matching
+        // the old behavior where ``_prewarmed`` stayed false on exception; the
+        // callers that awaited the failed attempt still observe its exception.
+        lock (_cacheLock)
+        {
+            if (_prewarmTask is null || _prewarmTask.IsFaulted || _prewarmTask.IsCanceled)
+            {
+                // Logging only — behavior is unchanged: a faulted/canceled attempt
+                // was always replaced here. Naming the prior failure makes prewarm
+                // churn (fail → retry → fail) visible in the log instead of only
+                // the downstream per-chunk ACL fallbacks.
+                if (_prewarmTask is { IsFaulted: true } priorAttempt)
+                {
+                    Logger.Warning(
+                        "[LegacyACL] Previous bulk prewarm attempt failed " +
+                        $"({priorAttempt.Exception?.GetBaseException().GetType().Name}: " +
+                        $"{priorAttempt.Exception?.GetBaseException().Message}); starting a new prewarm attempt");
+                }
+                _prewarmTask = RunPrewarmLoggedAsync();
+            }
+            return _prewarmTask;
+        }
+    }
 
+    /// <summary>
+    /// Awaits <see cref="PrewarmCachesCoreAsync"/> and logs a prewarm failure
+    /// exactly once, with the full exception (type + stack). Every caller of
+    /// <see cref="PrewarmCachesAsync"/> awaits this same wrapper task, so the
+    /// failure is not re-logged per awaiting worker; the original exception
+    /// still propagates unchanged to all of them.
+    /// </summary>
+    private async Task RunPrewarmLoggedAsync()
+    {
+        try
+        {
+            await PrewarmCachesCoreAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            // Graceful stop during prewarm — not a failure; callers observe the
+            // cancellation exactly as before.
+            throw;
+        }
+        catch (Exception exc)
+        {
+            Logger.Error(
+                "[LegacyACL] BULK PRE-WARM FAILED — ACL reference caches (roles/users/territories/groups) were not " +
+                $"populated; resolves awaiting this attempt will fail and the next resolve retries the prewarm: {exc.Message}",
+                exc);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The actual bulk fetch behind <see cref="PrewarmCachesAsync"/>.
+    /// ``internal virtual`` so stress tests can count executions and substitute
+    /// fetch epochs while exercising the real single-flight wrapper above.
+    /// </summary>
+    internal virtual Task PrewarmCachesCoreAsync() => PrewarmFetchAllAsync();
+
+    private async Task PrewarmFetchAllAsync()
+    {
         Logger.Info(new string('=', 70));
         Logger.Info("BULK PRE-WARM: Fetching all ACL reference data from Salesforce");
         Logger.Info(new string('=', 70));
@@ -248,7 +323,12 @@ public class AclResolver
         }
         catch (Exception exc)
         {
-            Logger.Warning($"  Territory bulk fetch failed (Territory Management may not be enabled): {exc.Message}");
+            Logger.Warning(
+                "  Territory bulk fetch failed (Territory Management may not be enabled) — " +
+                $"continuing with EMPTY territory caches, so no territory-based grants this run: {exc.GetType().Name}: {exc.Message}");
+            // Full stack at DEBUG: an auth/network fault here (as opposed to the
+            // expected "Territory2 not enabled" SOQL error) matters to operators.
+            Logger.Debug($"  Territory bulk fetch failure detail: {exc}");
             _allTerritoryParents = new Dictionary<string, string?>();
             _objectTerritoryAssoc = new Dictionary<string, List<string>>();
             _allTerritoryUsers = new Dictionary<string, HashSet<string>>();
@@ -279,7 +359,6 @@ public class AclResolver
             $"GroupMembers: {_allGroupMembersByGroup.Values.Sum(v => v.Count)}");
 
         var elapsed = sw.Elapsed.TotalSeconds;
-        _prewarmed = true;
         Logger.Info($"BULK PRE-WARM COMPLETE in {elapsed.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s");
         Logger.Info(new string('=', 70));
     }
@@ -467,7 +546,10 @@ public class AclResolver
         }
         catch (Exception authError)
         {
-            Logger.Error($"    ❌ Failed to authorize users: {authError.Message}");
+            Logger.Error(
+                $"    ❌ Failed to authorize users for {objectName} " +
+                $"({unionUserIds.Count} user id(s), {unionGroupIds.Count} group id(s)): {authError.Message}",
+                authError);
             throw;
         }
 
@@ -601,13 +683,17 @@ public class AclResolver
             // full expansion.
             if (visited.Count > MaxGroupNestingDepth)
             {
-                if (!_warnedGroupNestingDepth)
+                bool firstHitForGroup;
+                lock (_cacheLock)
                 {
-                    _warnedGroupNestingDepth = true;
+                    firstHitForGroup = _depthCapWarnedGroups.Add(groupId);
+                }
+                if (firstHitForGroup)
+                {
                     Logger.Warning(
-                        $"[LegacyACL] Group nesting exceeded {MaxGroupNestingDepth} levels at {groupId}; " +
+                        $"[LegacyACL] Group nesting exceeded the depth cap ({MaxGroupNestingDepth} levels) at group {groupId}; " +
                         "stopping expansion of this branch to avoid stack exhaustion " +
-                        "(deeper nested members are not granted — this warning fires once).");
+                        "(deeper nested members are not granted — this warning fires once per group).");
                 }
                 return (new HashSet<string>(), false, new HashSet<string> { groupId });
             }
@@ -1268,7 +1354,9 @@ public class AclResolver
             }
             catch (Exception exc)
             {
-                Logger.Debug($"    Bulk Graph batch failed: {exc.Message} — falling back to individual lookups");
+                Logger.Warning(
+                    $"    Bulk Graph $batch lookup failed for identifiers {i + 1}-{Math.Min(i + GraphClient.GraphBatchMaxSize, unique.Count)} " +
+                    $"of {unique.Count} ({exc.GetType().Name}: {exc.Message}) — falling back to individual lookups for this batch");
             }
         }
 
@@ -1434,7 +1522,12 @@ public class AclResolver
         }
         catch (Exception exc)
         {
-            Logger.Debug($"[LegacyACL] Graph direct lookup exception for {identifier}: {exc.Message}");
+            // Not a Graph API status — a transport/parse fault. Warn (not Debug):
+            // the user will be reported as "No M365 account found" downstream, and
+            // without this line that reads as a missing account rather than an outage.
+            Logger.Warning(
+                $"[LegacyACL] Graph direct lookup failed for {identifier} " +
+                $"({exc.GetType().Name}: {exc.Message}) — treating identifier as unresolved");
             return null;
         }
 
@@ -1474,7 +1567,10 @@ public class AclResolver
         }
         catch (Exception exc)
         {
-            Logger.Debug($"[LegacyACL] Graph filter exception for {identifier}: {exc.Message}");
+            // See the direct-lookup catch above: transport/parse fault, not a 404.
+            Logger.Warning(
+                $"[LegacyACL] Graph filter lookup failed for {identifier} " +
+                $"({exc.GetType().Name}: {exc.Message}) — treating identifier as unresolved");
             return null;
         }
 

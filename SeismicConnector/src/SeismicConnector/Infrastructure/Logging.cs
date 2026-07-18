@@ -216,6 +216,9 @@ public sealed class LineRotatingFileHandler : LogHandler
         }
         catch
         {
+            // The file handler cannot log its own IO failure (it IS the log
+            // sink); dropping the record beats crashing the caller. Mirrors
+            // Python logging's handleError posture.
             return;
         }
         _lineCount++;
@@ -237,6 +240,8 @@ public sealed class LineRotatingFileHandler : LogHandler
         }
         catch
         {
+            // Best-effort close of the full log file before rotating on; a
+            // dispose failure must not stop the new file from opening.
         }
         BaseFilename = newPath;
         _lineCount = 0;
@@ -251,6 +256,7 @@ public sealed class LineRotatingFileHandler : LogHandler
         }
         catch
         {
+            // Best-effort teardown of the log sink itself — nowhere to report.
         }
     }
 }
@@ -342,6 +348,8 @@ public sealed class LoggerObject : IAppLogger
             }
             catch
             {
+                // stderr itself is unwritable (closed/redirected away) — the
+                // last-resort handler has no further fallback by definition.
             }
         }
     }

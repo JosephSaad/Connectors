@@ -19,7 +19,10 @@ public static class TestConfig
         IEnumerable<string>? objects = null,
         bool enrichUsage = false,
         bool liveDocFieldIndexing = false,
-        bool permissionReacl = false)
+        bool permissionReacl = false,
+        int chunkSize = 10,
+        int graphBatchSize = 5,
+        int batchWorkers = 2)
     {
         return new AppConfig
         {
@@ -49,7 +52,12 @@ public static class TestConfig
                 MaxRetries = 3,
                 RetryBackoffBase = 2,
             },
-            Ingest = new IngestSettings { ChunkSize = 10, GraphBatchSize = 5, BatchWorkers = 2 },
+            Ingest = new IngestSettings
+            {
+                ChunkSize = chunkSize,
+                GraphBatchSize = graphBatchSize,
+                BatchWorkers = batchWorkers,
+            },
             Schema = new SchemaConfig
             {
                 Objects = (objects ?? new[] { "ContentItem", "Library" })
@@ -70,7 +78,15 @@ public sealed class FakeHttpHandler : HttpMessageHandler
 
     private readonly List<(Func<HttpRequestMessage, bool> Match, Func<HttpRequestMessage, string?, HttpResponseMessage> Respond)> _routes = new();
 
+    /// <summary>
+    /// Recorded requests. Appends are serialized by <see cref="_recordGate"/>
+    /// because the ingest pipeline dispatches concurrent $batch workers —
+    /// unsynchronized List.Add would drop/corrupt entries at scale and break
+    /// exact-count assertions. Enumerate only when the client is quiescent.
+    /// </summary>
     public List<Recorded> Requests { get; } = new();
+
+    private readonly object _recordGate = new();
 
     public void When(
         Func<HttpRequestMessage, bool> match,
@@ -95,7 +111,8 @@ public sealed class FakeHttpHandler : HttpMessageHandler
         string? body = null;
         if (request.Content is not null)
             body = await request.Content.ReadAsStringAsync(cancellationToken);
-        Requests.Add(new Recorded(request.Method, request.RequestUri!.ToString(), body));
+        lock (_recordGate)
+            Requests.Add(new Recorded(request.Method, request.RequestUri!.ToString(), body));
 
         foreach (var (match, respond) in _routes)
         {

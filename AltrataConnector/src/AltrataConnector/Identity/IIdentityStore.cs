@@ -75,6 +75,14 @@ public interface IIdentityStore : IDisposable
 
     // ---- ingested item registry ------------------------------------------------------
     void RecordIngestedItem(IngestedItem item);
+
+    /// <summary>UPDATE-only ACL-hash stamp for the re-ACL pass: refreshes the
+    /// hash of an item STILL in the inventory and returns true; returns false
+    /// (writing nothing) when the row is gone — e.g. a concurrent DSAR erasure
+    /// removed it mid-pass. Unlike <see cref="RecordIngestedItem"/> (an upsert)
+    /// this can never re-insert a ghost row for an erased subject.</summary>
+    bool TryUpdateAclHash(string itemId, string aclHash, DateTime lastIngestedUtc);
+
     void RemoveIngestedItem(string itemId);
     IReadOnlyList<IngestedItem> ListIngestedItems();
     IReadOnlyList<IngestedItem> ListItemsWithAclHashOtherThan(string aclHash);

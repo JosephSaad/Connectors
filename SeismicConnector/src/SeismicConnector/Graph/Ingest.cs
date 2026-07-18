@@ -330,6 +330,9 @@ public sealed class IngestPipeline
 
         var hadFailures = false;
         var stoppedEarly = false;
+        // Teamsites THIS node actually crawled this cycle — the withdrawal
+        // pass may only reap within them (plus teamsites gone from the source).
+        var processedTeamsiteIds = new HashSet<string>(StringComparer.Ordinal);
 
         // 1. Library metadata items (one HA claim covers the whole object type).
         if (enabledObjects.Contains("Library", StringComparer.OrdinalIgnoreCase))
@@ -403,6 +406,7 @@ public sealed class IngestPipeline
                     using var teamsiteSpan = Tracing.StartActivity("crawl.teamsite");
                     teamsiteSpan?.SetTag("seismic.teamsite_id", teamsite.Id);
                     teamsiteSpan?.SetTag("seismic.teamsite_name", teamsite.Name);
+                    processedTeamsiteIds.Add(teamsite.Id);
                     teamsiteOk = await IngestTeamsiteAsync(
                         teamsite, since, sinceIso, checkpoint, ct).ConfigureAwait(false);
                     hadFailures |= !teamsiteOk;
@@ -434,7 +438,8 @@ public sealed class IngestPipeline
             Phase = "withdrawal pass";
             using (Tracing.StartActivity("crawl.withdrawal"))
             {
-                await WithdrawalPassAsync(crawlStartUtc, teamsitesById, ct).ConfigureAwait(false);
+                await WithdrawalPassAsync(crawlStartUtc, teamsitesById, processedTeamsiteIds, ct)
+                    .ConfigureAwait(false);
             }
         }
         else if (!stoppedEarly)
@@ -537,6 +542,10 @@ public sealed class IngestPipeline
             chunkIndex++;
             if (chunkIndex <= CompletedChunks(checkpoint, "Library"))
             {
+                if (Logger.IsEnabledFor(LogLevels.Debug))
+                    Logger.Debug(
+                        $"Resume: Library chunk {chunkIndex} ({chunk.Count} teamsite(s)) already "
+                        + "checkpointed before the pause — skipping.");
                 Stats.AddSkipped(chunk.Count);
                 continue;
             }
@@ -624,16 +633,22 @@ public sealed class IngestPipeline
                 contents = await _seismic.GetContentsAsync(teamsite.Id, since, ct).ConfigureAwait(false);
             }
         }
-        catch (CircuitOpenException)
+        catch (CircuitOpenException ex)
         {
             // Seismic breaker opened between the boundary check and this call —
             // pause; the teamsite's claim is left held for the next cycle.
+            Logger.Warning(
+                $"Teamsite '{teamsite.Name}' ({teamsite.Id}): listing short-circuited — breaker "
+                + $"'{ex.BreakerName}' is open. Pausing the crawl at this boundary; the claim stays "
+                + "held and a later cycle resumes this teamsite.");
             _degradedPause = true;
             return true;
         }
         catch (SeismicApiError ex)
         {
-            Logger.Error($"Teamsite '{teamsite.Name}': listing failed — {ex.Message}");
+            Logger.Error(
+                $"Teamsite '{teamsite.Name}' ({teamsite.Id}): listing failed — {ex.Message}. "
+                + "Dead-lettered as Teamsite; retry-failed re-probes it and the next crawl re-lists.");
             SyncState.AppendFailedRecords(
                 SyncState.FailedRecordsPath(ConnectorId),
                 new[] { teamsite.Id },
@@ -651,16 +666,39 @@ public sealed class IngestPipeline
         foreach (var chunk in Chunk(contents, _config.Ingest.ChunkSize))
         {
             chunkIndex++;
-            if (chunkIndex <= CompletedChunks(checkpoint, objectKey))
-            {
-                Stats.AddSkipped(chunk.Count);
-                continue;
-            }
+            var completedChunk = chunkIndex <= CompletedChunks(checkpoint, objectKey);
+            // Resume diagnosability: say ONCE per completed chunk that its items
+            // are being reconciled (not re-ingested) so an operator reading the
+            // log understands why a resumed crawl PUTs far fewer items.
+            if (completedChunk && Logger.IsEnabledFor(LogLevels.Debug))
+                Logger.Debug(
+                    $"Resume: chunk {chunkIndex} of {objectKey} already checkpointed — reconciling its "
+                    + $"{chunk.Count} item(s) against the fresh listing (tracked items re-decided, "
+                    + "untracked trusted to the checkpoint).");
 
             var batchItems = new List<(string ItemId, JsonNode Item)>();
             foreach (var content in chunk)
             {
                 ct.ThrowIfCancellationRequested();
+
+                // Resume reconcile: this chunk's Graph work completed before the
+                // pause, but the world may have moved while we were stopped.
+                //   * Untracked items are trusted to the checkpoint (already
+                //     sent; nothing to reconcile against) — never re-PUT.
+                //   * Tracked items are re-decided from the FRESH listing via
+                //     PrepareItemAsync: an unchanged version is a cheap
+                //     last-seen touch (so the withdrawal reaper cannot eat
+                //     completed work), a changed version re-ingests (no stale
+                //     version survives a resume), and a newly-excluded /
+                //     unpublished / expired item is withdrawn (a compliance
+                //     flag that lands mid-pause is never lost to a stale
+                //     checkpoint).
+                if (completedChunk && _store.GetTrackedItem(content.Id) is null)
+                {
+                    Stats.AddSkipped();
+                    continue;
+                }
+
                 var outcome = await PrepareItemAsync(content, teamsite, nowUtc, ct).ConfigureAwait(false);
                 if (outcome is not null)
                     batchItems.Add(outcome.Value);
@@ -670,7 +708,8 @@ public sealed class IngestPipeline
             // flushed and checkpointed before returning (see ServiceStop
             // semantics) — so no in-flight work is lost across the transition.
             ok &= await FlushBatchAsync(batchItems, "ContentItem", ct, chunk, teamsite).ConfigureAwait(false);
-            SyncState.WriteCheckpoint(ConnectorId, sinceIso, objectKey, chunkIndex);
+            if (!completedChunk)
+                SyncState.WriteCheckpoint(ConnectorId, sinceIso, objectKey, chunkIndex);
             _ha.Heartbeat(_crawlId, $"teamsite:{teamsite.Id}");
             if (StopRequested)
                 return ok;
@@ -942,6 +981,14 @@ public sealed class IngestPipeline
             // data is lost: the dead-letter queue and checkpoint are consistent.
             if (ex is CircuitOpenException)
                 _degradedPause = true;
+            Logger.Error(
+                $"Graph $batch envelope failed for {batch.Count} {objectType} item(s)"
+                + (teamsite is null ? "" : $" in teamsite '{teamsite.Name}' ({teamsite.Id})")
+                + $" [{string.Join(", ", batch.Take(3).Select(b => b.ItemId))}"
+                + (batch.Count > 3 ? ", ..." : "") + $"] — {ex.Message} "
+                + (ex is CircuitOpenException
+                    ? "All items dead-lettered; the crawl pauses into degraded mode and retry-failed re-drives them."
+                    : "All items dead-lettered for retry-failed."));
             var requestBodies = batch.ToDictionary(
                 b => b.ItemId, b => (JsonNode?)b.Item.DeepClone());
             SyncState.AppendFailedRecords(
@@ -975,6 +1022,14 @@ public sealed class IngestPipeline
             {
                 ok = false;
                 Stats.AddFailed();
+                // Per-item failure inside a 2xx envelope: name the item, its
+                // teamsite and the Graph error so the operator can act on THIS
+                // subject; the full request/response bodies go to dead-letter.
+                Logger.Error(
+                    $"Ingest failed for {objectType} {result.ItemId}"
+                    + (teamsite is null ? "" : $" (teamsite '{teamsite.Name}' {teamsite.Id})")
+                    + $": HTTP {result.Status} {result.Error ?? "(no error body)"} — "
+                    + "dead-lettered with request/response for retry-failed.");
                 var request = batch.FirstOrDefault(b => b.ItemId == result.ItemId).Item;
                 SyncState.AppendFailedRecords(
                     SyncState.FailedRecordsPath(ConnectorId),
@@ -1013,22 +1068,49 @@ public sealed class IngestPipeline
     private async Task WithdrawalPassAsync(
         DateTime crawlStartUtc,
         IReadOnlyDictionary<string, SeismicTeamsite> teamsitesById,
+        IReadOnlySet<string> processedTeamsiteIds,
         CancellationToken ct)
     {
         await WithdrawExpiredAsync(ct).ConfigureAwait(false);
 
         // Items no longer present in Seismic (deleted / moved / unpublished).
+        var outOfReapScope = 0;
         foreach (var tracked in _store.GetItemsNotSeenSince(crawlStartUtc))
         {
-            // Items in teamsites another HA node owns were legitimately not
-            // seen by THIS node — only reap items whose teamsite this node
-            // crawled (single-node mode crawls them all).
-            if (HaCoordinator.Enabled && !teamsitesById.ContainsKey(tracked.TeamsiteId))
+            // Reap only what THIS crawl can vouch for:
+            //   * the teamsite was processed by this node → the item truly
+            //     vanished from a listing we just walked;
+            //   * the teamsite is absent from the source listing entirely →
+            //     the whole library is gone and its items go with it.
+            // A teamsite that is listed but was NOT processed here — another
+            // HA node's claim, a claim-blocked resource, or an excluded
+            // teamsite (handled by its own withdrawal path) — is out of
+            // scope: its items' last-seen belongs to whoever owns it.
+            var teamsiteGone = !teamsitesById.ContainsKey(tracked.TeamsiteId);
+            if (!teamsiteGone && !processedTeamsiteIds.Contains(tracked.TeamsiteId))
+            {
+                outOfReapScope++;
+                if (Logger.IsEnabledFor(LogLevels.Debug))
+                    Logger.Debug(
+                        $"Reap-scope: stale item {tracked.ItemId} left alone — teamsite "
+                        + $"{tracked.TeamsiteId} is listed but was not processed by this node "
+                        + "(owned/claimed elsewhere); its owner's crawl decides.");
                 continue;
+            }
+            if (teamsiteGone && Logger.IsEnabledFor(LogLevels.Debug))
+                Logger.Debug(
+                    $"Reap: item {tracked.ItemId} withdrawn because its whole teamsite "
+                    + $"{tracked.TeamsiteId} is gone from the Seismic listing.");
             await WithdrawItemAsync(tracked.ItemId, "not-in-source",
                 "content no longer present/published in Seismic", ct).ConfigureAwait(false);
             _store.RemoveTrackedItem(tracked.ItemId);
         }
+        // One summary line (not per item) so multi-node runs can explain why
+        // stale items survived this node's withdrawal pass.
+        if (outOfReapScope > 0)
+            Logger.Info(
+                $"Withdrawal pass: {outOfReapScope} stale tracked item(s) in teamsites this node did "
+                + "not process — out of reap scope here; the owning node's crawl reaps them.");
     }
 
     /// <summary>
@@ -1067,16 +1149,22 @@ public sealed class IngestPipeline
             {
                 contents = await _seismic.GetContentsAsync(teamsite.Id, null, ct).ConfigureAwait(false);
             }
-            catch (CircuitOpenException)
+            catch (CircuitOpenException ex)
             {
+                // Seismic breaker opened mid-pass: abandon the REST of the pass
+                // (no withdrawals were decided for unvisited teamsites, so
+                // nothing is lost) and let the next crawl re-check them.
+                Logger.Warning(
+                    $"Late-exclusion pass paused at teamsite '{teamsite.Name}' ({teamsite.Id}): breaker "
+                    + $"'{ex.BreakerName}' is open — remaining tracked items are re-checked next crawl.");
                 _degradedPause = true;
                 return;
             }
             catch (SeismicApiError ex)
             {
                 Logger.Warning(
-                    $"Late-exclusion pass: listing teamsite '{teamsite.Name}' failed ({ex.Message}) — "
-                    + "its items will be re-checked on the next crawl.");
+                    $"Late-exclusion pass: listing teamsite '{teamsite.Name}' ({teamsite.Id}) failed "
+                    + $"({ex.Message}) — its items will be re-checked on the next crawl.");
                 continue;
             }
             var contentById = contents.ToDictionary(c => c.Id, StringComparer.Ordinal);
@@ -1120,6 +1208,11 @@ public sealed class IngestPipeline
         }
         catch (GraphApiError ex)
         {
+            // The item STAYS in the index until the retry succeeds — say so,
+            // with the withdrawal's own rule/reason as the subject context.
+            Logger.Error(
+                $"WITHDRAW FAILED {itemId} ({rule}: {reason}) — {ex.Message}. Item remains in the "
+                + "index; dead-lettered as Withdrawal so retry-failed re-attempts the delete.");
             Stats.AddFailed();
             SyncState.AppendFailedRecords(
                 SyncState.FailedRecordsPath(ConnectorId),
@@ -1225,6 +1318,12 @@ public sealed class IngestPipeline
             }
             catch (GraphApiError ex)
             {
+                // The indexed ACL still reflects the OLD principal set — flag it
+                // loudly (permissions are compliance-relevant) and dead-letter.
+                Logger.Error(
+                    $"RE-ACL FAILED {content.Id} ('{content.Name}', teamsite {content.TeamsiteId}): "
+                    + $"fingerprint {tracked.AclFingerprint ?? "(none)"} -> {fingerprint} not applied — "
+                    + $"{ex.Message}. The indexed ACL is unchanged; dead-lettered as ReAcl for retry-failed.");
                 Stats.AddFailed();
                 SyncState.AppendFailedRecords(
                     SyncState.FailedRecordsPath(ConnectorId),
@@ -1338,19 +1437,47 @@ public sealed class IngestPipeline
             using var eventSpan = Tracing.StartActivity("webhook.event");
             eventSpan?.SetTag("webhook.type", evt.Type);
             eventSpan?.SetTag("seismic.content_id", evt.ContentId);
-            if (evt.IsDelete)
+            try
             {
-                var tracked = _store.GetTrackedItem(evt.ContentId);
-                if (tracked?.Status == "ingested")
+                if (evt.IsDelete)
                 {
-                    await WithdrawItemAsync(evt.ContentId, "not-in-source",
-                        $"webhook event '{evt.Type}'", ct).ConfigureAwait(false);
-                    _store.RemoveTrackedItem(evt.ContentId);
+                    var tracked = _store.GetTrackedItem(evt.ContentId);
+                    if (tracked?.Status == "ingested")
+                    {
+                        await WithdrawItemAsync(evt.ContentId, "not-in-source",
+                            $"webhook event '{evt.Type}'", ct).ConfigureAwait(false);
+                        _store.RemoveTrackedItem(evt.ContentId);
+                    }
+                }
+                else
+                {
+                    await IngestSingleAsync(evt.ContentId, evt.TeamsiteId, ct).ConfigureAwait(false);
                 }
             }
-            else
+            catch (OperationCanceledException)
             {
-                await IngestSingleAsync(evt.ContentId, evt.TeamsiteId, ct).ConfigureAwait(false);
+                throw;  // graceful stop — never treated as an event failure
+            }
+            catch (Exception ex)
+            {
+                // Event-dispatch boundary: the batch was already drained from the
+                // queue, so letting one bad event escape would DROP every event
+                // after it (and kill continuous mode). Dead-letter the event id —
+                // retry-failed re-drives it through IngestSingleAsync, which
+                // converges both publish and delete cases — and continue.
+                Logger.Error(
+                    $"Webhook event '{evt.Type}' for content {evt.ContentId}"
+                    + (string.IsNullOrEmpty(evt.TeamsiteId) ? "" : $" (teamsite {evt.TeamsiteId})")
+                    + " failed — dead-lettered for retry-failed; continuing with the remaining events. "
+                    + "The next reconciling crawl also heals it.", ex);
+                Stats.AddFailed();
+                SyncState.AppendFailedRecords(
+                    SyncState.FailedRecordsPath(ConnectorId),
+                    new List<(string, string)>
+                    {
+                        (evt.ContentId, $"webhook event '{evt.Type}' failed: {ex.Message}"),
+                    },
+                    "ContentItem");
             }
         }
     }

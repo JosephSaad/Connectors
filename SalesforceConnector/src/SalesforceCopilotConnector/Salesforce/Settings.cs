@@ -318,7 +318,8 @@ public static class Settings
             }
             catch (JsonException)
             {
-                // pass
+                // pass (Python parity): an unparsable owd_overrides JSON env value
+                // is ignored and defaults apply; validate-config reports it properly.
             }
         }
 

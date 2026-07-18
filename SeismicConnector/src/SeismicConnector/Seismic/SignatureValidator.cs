@@ -87,6 +87,9 @@ public sealed class SignatureValidator
         }
         catch (FormatException)
         {
+            // Neither hex nor base64 — by contract the caller treats null as an
+            // invalid signature (fail-closed 401); nothing to log HERE because
+            // the receiver logs every rejection with the remote endpoint.
             return null;
         }
     }

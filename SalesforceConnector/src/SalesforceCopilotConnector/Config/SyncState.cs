@@ -329,7 +329,8 @@ public static class SyncState
         catch (Exception exc) when (exc is IOException or UnauthorizedAccessException)
         {
             Logger.Error(
-                $"Failed to write {failures.Count} failed record(s) to dead-letter file {filePath}: {exc.Message}");
+                $"Failed to write {failures.Count} failed record(s) to dead-letter file {filePath}: {exc.Message}",
+                exc);
             foreach (var (itemId, itemError) in failures)
             {
                 Logger.Error(
@@ -370,10 +371,12 @@ public static class SyncState
         }
         var path = FailedRecordsPath(connectorId);
         var entries = new List<JsonObject>();
+        var lineNumber = 0;
         try
         {
             foreach (var rawLine in File.ReadLines(path, Utf8NoBom))
             {
+                lineNumber++;
                 var line = rawLine.Trim();
                 if (line.Length > 0)
                 {
@@ -384,6 +387,16 @@ public static class SyncState
         catch (Exception exc) when (exc is FileNotFoundException or DirectoryNotFoundException)
         {
             // Python: except FileNotFoundError: pass
+        }
+        catch (Exception exc) when (exc is JsonException or InvalidOperationException)
+        {
+            // Catch-log-rethrow only (InvalidOperationException = line parsed but
+            // is not a JSON object): without this the caller (e.g. retry-failed)
+            // reports a bare JSON parse error with no hint of WHICH file or line
+            // is corrupt. Behavior is unchanged — the exception still propagates.
+            Logger.Error(
+                $"Dead-letter file {path} contains a corrupt entry at line {lineNumber}: {exc.Message}");
+            throw;
         }
         return entries;
     }

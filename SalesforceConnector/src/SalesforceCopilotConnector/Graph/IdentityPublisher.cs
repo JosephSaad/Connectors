@@ -183,6 +183,8 @@ public class IdentityPublisher
         }
         catch (Exception)
         {
+            // Mark the session failed for the audit trail, then rethrow unchanged —
+            // the command-level handler owns logging this exception (with stack).
             _store.CompleteSession(sessionId, stats, status: "failed");
             throw;
         }

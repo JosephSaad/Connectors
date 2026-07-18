@@ -143,6 +143,9 @@ public sealed class PlainTextExtractor : IContentExtractor
         }
         catch
         {
+            // Defensive only (a non-throwing decoder should never throw):
+            // extraction is best-effort by contract — empty text falls back to
+            // metadata-only indexing, never a failed item.
             return string.Empty;
         }
     }
@@ -294,6 +297,9 @@ public sealed class PdfTextExtractor : IContentExtractor
         }
         catch
         {
+            // Corrupt/exotic PDF structure — extraction is best-effort by
+            // contract: empty text → metadata-only indexing, never a failed
+            // item. CompositeExtractor.ExtractFor records the miss per format.
             return string.Empty;
         }
     }
@@ -514,6 +520,9 @@ public sealed class PdfTextExtractor : IContentExtractor
 /// <summary>Routes to the first extractor that understands the format.</summary>
 public sealed class CompositeExtractor : IContentExtractor
 {
+    private static readonly Infrastructure.IAppLogger Logger =
+        Infrastructure.Logging.GetLogger("seismic_connector.extract");
+
     private readonly IReadOnlyList<IContentExtractor> _extractors;
 
     public CompositeExtractor(params IContentExtractor[] extractors)
@@ -558,9 +567,15 @@ public sealed class CompositeExtractor : IContentExtractor
                     return text;
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // extraction must never fail an item — fall through
+                // extraction must never fail an item — fall through. Debug-gated
+                // breadcrumb so "why is this doc metadata-only?" is answerable
+                // (the per-format failure metric records the miss either way).
+                if (Logger.IsEnabledFor(Infrastructure.LogLevels.Debug))
+                    Logger.Debug(
+                        $"Extractor {extractor.GetType().Name} threw on a '{format}' payload "
+                        + $"({ex.GetType().Name}: {ex.Message}) — falling through to metadata-only.");
             }
         }
         if (attempted)

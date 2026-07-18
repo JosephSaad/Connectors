@@ -83,7 +83,7 @@ public sealed class HealthEndpoint : IDisposable
         catch (Exception exc)
         {
             // Must never throw into the caller.
-            Logger.Error($"Health endpoint failed to start: {exc.Message}");
+            Logger.Error($"Health endpoint failed to start: {exc.Message}", exc);
             return null;
         }
     }

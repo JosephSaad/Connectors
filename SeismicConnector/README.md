@@ -309,7 +309,7 @@ dotnet build
 dotnet test
 ```
 
-414 xUnit tests, all offline (mock `HttpMessageHandler`, temp SQLite/state
+430 xUnit tests, all offline (mock `HttpMessageHandler`, temp SQLite/state
 dirs): CLI parsing, checkpoint resume, dead-letter write/retry and integrity
 under concurrent writers, the Retry-After + jitter contract, the $batch
 429/503 retry ladder and adaptive concurrency, sovereign-cloud endpoint

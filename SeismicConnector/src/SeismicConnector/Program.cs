@@ -85,7 +85,12 @@ public static class Program
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine(ex);
+            // Last-resort handler for exceptions that escape a command handler
+            // (each command logs its own failure to its run log first). Emit the
+            // FULL exception — type + message + stack — with a greppable prefix,
+            // and exit nonzero. Console.Error because logging may not be
+            // configured yet (e.g. a failure before SetupLogging).
+            Console.Error.WriteLine($"seismic-connector: fatal: {ex}");
             return 1;
         }
     }

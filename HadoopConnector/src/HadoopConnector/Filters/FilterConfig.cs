@@ -102,11 +102,15 @@ public sealed class ObjectFilter
     /// exist and therefore prune). A partition predicate on a NON-dt key that may
     /// be ABSENT never prunes (MatchesPartition skips absent keys), so it does
     /// NOT count — otherwise a filter that prunes nothing would silently pass the
-    /// guard and full-scan 150M+ rows.
+    /// guard and full-scan 150M+ rows. A dt predicate whose operator matches
+    /// EVERY present dt value (isNotNull) can likewise never prune a single
+    /// partition, so it does not count either.
     /// </summary>
     public bool IsEffectivelyFiltered =>
         AnyOf.Count > 0
-        || Partition.Any(p => string.Equals(p.Field, WatermarkKey, StringComparison.OrdinalIgnoreCase));
+        || Partition.Any(p =>
+            string.Equals(p.Field, WatermarkKey, StringComparison.OrdinalIgnoreCase)
+            && p.Op != FilterOp.IsNotNull);
 }
 
 public sealed class FilterSet

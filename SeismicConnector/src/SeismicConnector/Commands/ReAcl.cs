@@ -62,6 +62,7 @@ public static class ReAcl
         catch (Exception ex)
         {
             progress.Error($"reacl failed: {ex.Message}");
+            Logging.GetLogger("seismic_connector").Error("reacl failed", ex);
             return false;
         }
     }

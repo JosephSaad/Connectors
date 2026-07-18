@@ -202,44 +202,67 @@ public sealed class BdhFetcher
                     : null);
 
                 var parser = new BdhFileParser();
-                var stream = await _source.OpenAsync(filePath, ct).ConfigureAwait(false);
-                stats.FilesRead++;
-                foreach (var row in parser.Parse(stream, file.PathSuffix, _config.BdhMaxFileBytes))
+                try
                 {
-                    ct.ThrowIfCancellationRequested();
-                    stats.RecordsScanned++;
-                    Metrics.IncRecordsScanned();
+                    var stream = await _source.OpenAsync(filePath, ct).ConfigureAwait(false);
+                    stats.FilesRead++;
+                    foreach (var row in parser.Parse(stream, file.PathSuffix, _config.BdhMaxFileBytes))
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        stats.RecordsScanned++;
+                        Metrics.IncRecordsScanned();
 
-                    var record = new BdhRecord(objectConfig.ObjectName, row, fileAsOf, filePath);
-                    if (!_engine.MatchesRecord(filter, record))
-                    {
-                        stats.RecordsFilteredPredicate++;
-                        Metrics.IncRecordsFiltered("predicate");
-                        continue;
-                    }
-                    if (!BdhRecord.IsSafeItemId(record.RawId))
-                    {
-                        stats.RecordsDroppedNoId++;
-                        if (!seenIdWarning)
+                        var record = new BdhRecord(objectConfig.ObjectName, row, fileAsOf, filePath);
+                        if (!_engine.MatchesRecord(filter, record))
                         {
-                            seenIdWarning = true;
-                            Logger.Error(
-                                $"{objectConfig.ObjectName}: dropping row(s) with a missing/unsafe id "
-                                + $"in '{filePath}' — each needs an 'Id' column with a Graph-safe value.");
+                            stats.RecordsFilteredPredicate++;
+                            Metrics.IncRecordsFiltered("predicate");
+                            continue;
                         }
-                        continue;
-                    }
-                    result.Records.Add(record);
-                    stats.RecordsMatched++;
-                    Metrics.IncRecordsMatched();
+                        if (!BdhRecord.IsSafeItemId(record.RawId))
+                        {
+                            stats.RecordsDroppedNoId++;
+                            if (!seenIdWarning)
+                            {
+                                seenIdWarning = true;
+                                Logger.Error(
+                                    $"{objectConfig.ObjectName}: dropping row(s) with a missing/unsafe id "
+                                    + $"in '{filePath}' — each needs an 'Id' column with a Graph-safe value.");
+                            }
+                            continue;
+                        }
+                        result.Records.Add(record);
+                        stats.RecordsMatched++;
+                        Metrics.IncRecordsMatched();
 
-                    if (cap > 0 && result.Records.Count >= cap)
-                    {
-                        result.Truncated = true;
-                        break;
+                        if (cap > 0 && result.Records.Count >= cap)
+                        {
+                            result.Truncated = true;
+                            break;
+                        }
                     }
+                    stats.RecordsMalformed += parser.ParseErrors;
                 }
-                stats.RecordsMalformed += parser.ParseErrors;
+                catch (Exception exc) when (exc is not OperationCanceledException
+                                            and not CircuitOpenException)
+                {
+                    // Catch-log-RETHROW only — no behaviour change. The escaping
+                    // exception often does not name the file (e.g. BoundedStream's
+                    // read-bound InvalidDataException, or a mid-stream transport
+                    // failure), and the object-level handler that dead-letters
+                    // this as a WORKER_CRASH only records the message. Log the
+                    // exact file + progress so the operator can locate the bad
+                    // export, then let the existing fail-the-object semantics run.
+                    // (CircuitOpenException is excluded: it is degraded-mode flow
+                    // control, not a file failure, and is handled upstream.)
+                    Logger.Error(
+                        $"{objectConfig.ObjectName}: failed reading BDH file '{filePath}' "
+                        + $"({stats.RecordsScanned} record(s) scanned so far this fetch; "
+                        + $"{parser.ParseErrors} parse error(s) in this file) — "
+                        + "the object crawl fails and continues with the next object type",
+                        exc);
+                    throw;
+                }
                 if (result.Truncated)
                     break;
             }
@@ -286,6 +309,16 @@ public sealed class BdhFetcher
     /// operator action), partition filters and bounds still apply.
     /// </summary>
     public async Task<BdhRecord?> FindByIdAsync(
+        ObjectConfig objectConfig, string id, CancellationToken ct = default) =>
+        (await FindByIdDetailedAsync(objectConfig, id, ct).ConfigureAwait(false)).Record;
+
+    /// <summary>
+    /// <see cref="FindByIdAsync"/> with search completeness: when the record was
+    /// NOT found but an oversize file was skipped along the way, the miss is not
+    /// proof the record is gone from BDH — callers (retry-failed) must not treat
+    /// it as deleted-upstream.
+    /// </summary>
+    public async Task<FindByIdResult> FindByIdDetailedAsync(
         ObjectConfig objectConfig, string id, CancellationToken ct = default)
     {
         // Same fail-closed scale guard as FetchAsync: an unfiltered object has no
@@ -297,7 +330,7 @@ public sealed class BdhFetcher
         if (!BdhRecord.IsSafeItemId(id))
         {
             Logger.Warning($"FindByIdAsync: rejecting unsafe record id for {objectConfig.ObjectName}.");
-            return null;
+            return new FindByIdResult();
         }
         var filter = _filters.For(objectConfig.ObjectName);
         var scanStats = new PartitionScanStats();
@@ -306,6 +339,7 @@ public sealed class BdhFetcher
                 minDt: null, scanStats, ct)
             .ConfigureAwait(false);
 
+        var skippedOversize = false;
         foreach (var partition in partitions.AsEnumerable().Reverse())  // newest dt first
         {
             var dataAsOf = partition.Dt?.ToString(
@@ -314,19 +348,60 @@ public sealed class BdhFetcher
             {
                 ct.ThrowIfCancellationRequested();
                 if (file.Length > _config.BdhMaxFileBytes)
+                {
+                    // The file's rows are never read: if the search ends in a
+                    // miss, that miss is UNPROVEN (the record may live here) —
+                    // callers must not treat it as deleted upstream.
+                    skippedOversize = true;
+                    Logger.Warning(
+                        $"{objectConfig.ObjectName}: FindById skipping oversize file "
+                        + $"'{partition.RelativePath}/{file.PathSuffix}' ({file.Length} bytes > "
+                        + $"BDH_MAX_FILE_BYTES={_config.BdhMaxFileBytes}); a miss is inconclusive.");
                     continue;
+                }
                 var filePath = PartitionScanner.Join(partition.RelativePath, file.PathSuffix);
                 var parser = new BdhFileParser();
-                var stream = await _source.OpenAsync(filePath, ct).ConfigureAwait(false);
-                foreach (var row in parser.Parse(stream, file.PathSuffix, _config.BdhMaxFileBytes))
+                try
                 {
-                    ct.ThrowIfCancellationRequested();
-                    var record = new BdhRecord(objectConfig.ObjectName, row, dataAsOf, filePath);
-                    if (string.Equals(record.RawId, id, StringComparison.Ordinal))
-                        return record;
+                    var stream = await _source.OpenAsync(filePath, ct).ConfigureAwait(false);
+                    foreach (var row in parser.Parse(stream, file.PathSuffix, _config.BdhMaxFileBytes))
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        var record = new BdhRecord(objectConfig.ObjectName, row, dataAsOf, filePath);
+                        if (string.Equals(record.RawId, id, StringComparison.Ordinal))
+                            return new FindByIdResult { Record = record, SkippedOversize = skippedOversize };
+                    }
+                }
+                catch (Exception exc) when (exc is not OperationCanceledException
+                                            and not CircuitOpenException)
+                {
+                    // Catch-log-rethrow: name the file the targeted lookup died in
+                    // (the caller only reports the record id), then propagate
+                    // unchanged so ingest-item/retry-failed handle it as before.
+                    Logger.Error(
+                        $"{objectConfig.ObjectName}: FindById('{id}') failed reading BDH file "
+                        + $"'{filePath}'",
+                        exc);
+                    throw;
                 }
             }
         }
-        return null;
+        return new FindByIdResult { SkippedOversize = skippedOversize };
     }
+}
+
+/// <summary>Outcome of a targeted id lookup, including search completeness.</summary>
+public sealed class FindByIdResult
+{
+    /// <summary>The record, or null when not found in any readable file.</summary>
+    public BdhRecord? Record { get; init; }
+
+    /// <summary>True when at least one candidate file was skipped for exceeding
+    /// BDH_MAX_FILE_BYTES during the search — its rows were never read, so a
+    /// null <see cref="Record"/> must NOT be read as "gone from BDH".</summary>
+    public bool SkippedOversize { get; init; }
+
+    /// <summary>The search missed AND was incomplete: the record may live in an
+    /// un-read oversize file.</summary>
+    public bool Incomplete => Record is null && SkippedOversize;
 }
