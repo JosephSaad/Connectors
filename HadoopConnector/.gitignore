@@ -1,0 +1,13 @@
+bin/
+obj/
+logs/
+data/
+*.user
+env/.env.local
+env/.env.local.user
+.env.local
+.env.local.user
+.vs/
+.idea/
+TestResults/
+stress-out/

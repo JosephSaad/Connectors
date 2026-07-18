@@ -1,0 +1,56 @@
+{
+  "_comment": "THE scale control (docs/FILTERS.md). BDH holds 150M+ rows; every object needs a filter (or an explicit fullScanAllowed entry / ALLOW_FULL_SCAN=true) or the crawl REFUSES it. 'partition' predicates match Hive partition KEYS (dt=..., region=...) and prune whole directories with zero I/O; date operators apply to dt. 'anyOf' is an OR of {allOf:[...]} AND-groups evaluated per row while streaming ('allOf' at the top level is shorthand for one group). Operators: equals, notEquals, in, notIn, prefix, contains, gte, lte, between, withinLastDays, after, before, isNull, isNotNull. Field lookup is case-insensitive. Malformed filters are startup errors, never ignored.",
+  "objects": {
+    "Contact": {
+      "partition": [
+        { "key": "dt", "op": "withinLastDays", "value": "450" }
+      ],
+      "allOf": [
+        { "field": "Email", "op": "isNotNull" }
+      ],
+      "notes": "Active-mailbox contacts from the last ~15 months of partitions."
+    },
+    "Account": {
+      "partition": [
+        { "key": "dt", "op": "withinLastDays", "value": "450" }
+      ],
+      "allOf": [
+        { "field": "Type", "op": "notIn", "values": ["Prospect - Dormant", "Archived"] }
+      ]
+    },
+    "Opportunity": {
+      "partition": [
+        { "key": "dt", "op": "withinLastDays", "value": "450" }
+      ],
+      "anyOf": [
+        { "allOf": [ { "field": "StageName", "op": "notIn", "values": ["Closed Lost"] } ] },
+        { "allOf": [
+            { "field": "StageName", "op": "equals", "value": "Closed Lost" },
+            { "field": "CloseDate", "op": "withinLastDays", "value": "180" }
+        ] }
+      ],
+      "notes": "All open pipeline plus closed-lost from the last 6 months."
+    },
+    "Case": {
+      "partition": [
+        { "key": "dt", "op": "withinLastDays", "value": "450" }
+      ],
+      "anyOf": [
+        { "allOf": [ { "field": "Status", "op": "notEquals", "value": "Closed" } ] },
+        { "allOf": [
+            { "field": "Status", "op": "equals", "value": "Closed" },
+            { "field": "SystemModstamp", "op": "withinLastDays", "value": "365" }
+        ] }
+      ]
+    },
+    "Lead": {
+      "partition": [
+        { "key": "dt", "op": "withinLastDays", "value": "450" }
+      ],
+      "allOf": [
+        { "field": "Status", "op": "notIn", "values": ["Disqualified", "Converted"] }
+      ]
+    }
+  },
+  "fullScanAllowed": []
+}

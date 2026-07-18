@@ -1,0 +1,29 @@
+{
+  "_comment": "Dependency-free content classifier pattern set (docs/CLASSIFICATION.md). Each category has named regex patterns matched against ingested text + attachment text. luhn:true means candidate digit runs must additionally pass the Luhn check (so PCI never false-positives on ordinary numbers). Categories PII/PCI/Secret raise the item's SensitivityLabel to Restricted. Edit patterns here; no code change or redeploy of logic needed. Case-insensitive matching.",
+  "categories": [
+    {
+      "name": "PII",
+      "patterns": [
+        { "name": "email", "regex": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}" },
+        { "name": "phone", "regex": "(?:\\+\\d{1,3}[ .\\-]?(?:\\(?\\d{1,4}\\)?[ .\\-]?){1,5}\\d{2,4})|(?<![\\d.])\\d{3}[ .\\-]\\d{3}[ .\\-]\\d{4}(?![\\d.])" },
+        { "name": "usSsn", "regex": "\\b\\d{3}-\\d{2}-\\d{4}\\b" },
+        { "name": "ukNino", "regex": "\\b[ABCEGHJ-PRSTW-Z][ABCEGHJ-NPRSTW-Z] ?\\d{2} ?\\d{2} ?\\d{2} ?[A-D]\\b" }
+      ]
+    },
+    {
+      "name": "PCI",
+      "luhn": true,
+      "patterns": [
+        { "name": "cardNumber", "regex": "\\b(?:\\d[ -]?){13,19}\\b" }
+      ]
+    },
+    {
+      "name": "Secret",
+      "patterns": [
+        { "name": "awsAccessKey", "regex": "\\bAKIA[0-9A-Z]{16}\\b" },
+        { "name": "bearerToken", "regex": "\\b(?:bearer|token|api[_-]?key|secret)[\"'`:= ]+[A-Za-z0-9_\\-]{20,}\\b" },
+        { "name": "privateKeyBlock", "regex": "-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----" }
+      ]
+    }
+  ]
+}

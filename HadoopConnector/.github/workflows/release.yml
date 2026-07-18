@@ -1,0 +1,180 @@
+name: Release
+
+# Two entry points:
+#   - tag push (v*): full pipeline, ends by creating a GitHub release with the
+#     bundles attached.
+#   - workflow_dispatch: dry run — identical build/smoke/package path, bundles
+#     upload as run artifacts only, and NO release is created.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  # Needed by the release job to create the GitHub release on tag builds.
+  contents: write
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  # Releases gate on the full suite — a tag on a red commit must not ship.
+  test:
+    name: Full test suite (release gate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Test
+        run: dotnet test -c Release
+
+  package:
+    name: Package (${{ matrix.rid }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # win-x64 first-class: Windows Server + service mode is the primary
+        # deployment target. linux-x64 covers containers/VMs.
+        rid: [win-x64, linux-x64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-ci.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish (self-contained single file)
+        run: >-
+          dotnet publish src/HadoopConnector -c Release
+          -r ${{ matrix.rid }} --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.ver.outputs.version }}
+          -o publish/${{ matrix.rid }}
+
+      # Bundle layout mirrors a checkout: the app resolves config/ (and env/)
+      # relative to its working directory, so the zip extracts to a directory
+      # you run it from.
+      - name: Assemble bundle
+        id: bundle
+        run: |
+          NAME="HadoopConnector-${{ steps.ver.outputs.version }}-${{ matrix.rid }}"
+          ROOT="bundle/$NAME"
+          mkdir -p "$ROOT/env" "$ROOT/scripts"
+          find "publish/${{ matrix.rid }}" -maxdepth 1 -type f \
+            ! -name "*.pdb" -exec cp {} "$ROOT/" \;
+          cp -r config "$ROOT/config"
+          cp env/.env.local.example "$ROOT/env/"
+          cp -r docs "$ROOT/docs"
+          cp -r scripts/sql "$ROOT/scripts/sql"
+          cp README.md LICENSE NOTICE "$ROOT/"
+          if [[ "${{ matrix.rid }}" == "win-x64" ]]; then
+            cp scripts/install-windows-service.ps1 "$ROOT/scripts/"
+          fi
+          (cd bundle && zip -qr "$NAME.zip" "$NAME" && sha256sum "$NAME.zip" > "$NAME.zip.sha256")
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      # Prove the artifact is actually runnable — a single-file self-contained
+      # publish can build fine and still fail to bootstrap (missing native
+      # libs). --help exercises startup + the CLI parser without credentials.
+      - name: Smoke test published binary
+        if: ${{ matrix.rid == 'linux-x64' }}
+        run: |
+          cd "bundle/${{ steps.bundle.outputs.name }}"
+          chmod +x HadoopConnector
+          ./HadoopConnector --help
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-${{ matrix.rid }}
+          path: bundle/*.zip*
+          if-no-files-found: error
+
+  # Container distribution: the same image the docker CI job validates, pushed
+  # to GHCR on tag builds. Dispatch dry runs build it end to end but never push.
+  container:
+    name: Container image (ghcr.io)
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tags
+        id: img
+        run: |
+          # Registry paths must be lowercase; the repo owner is not.
+          IMAGE="$(echo "ghcr.io/${{ github.repository_owner }}/hadoop-connector" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tags=${IMAGE}:${GITHUB_REF_NAME#v},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${IMAGE}:ci-dryrun" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image (push on tag builds only)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.img.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Create GitHub release
+    needs: package
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download bundles
+        uses: actions/download-artifact@v8
+        with:
+          pattern: bundle-*
+          merge-multiple: true
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY"
+          --title "HadoopConnector $GITHUB_REF_NAME"
+          --generate-notes

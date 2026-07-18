@@ -1,0 +1,111 @@
+{
+  "_comment": "BDH object list (Salesforce-shaped). Keys of selectedFields = BDH column names (case-insensitive lookup). Values = Graph property name, or a _bdh_<name> placeholder when the field is consumed by the searchable content body instead of becoming a Graph property. aclMode: ownerOnly (record owner via identity store; ownerField default OwnerId, ownerEmailField default OwnerEmail), group (fixed Entra group - aclGroupId required), public (everyone except guests; explicit opt-in). sourcePath overrides the object's directory under the BDH root (defaults to objectName). sensitivityDefault floors the CLASSIFICATION label.",
+  "objectList": [
+    {
+      "objectName": "Contact",
+      "displayName": "Contact",
+      "aclMode": "ownerOnly",
+      "ownerField": "OwnerId",
+      "ownerEmailField": "OwnerEmail",
+      "selectedFields": {
+        "Name": "Title",
+        "Email": "Email",
+        "Phone": "Phone",
+        "Title": "JobTitle",
+        "AccountId": "AccountId",
+        "AccountName": "AccountName",
+        "Department": "Department",
+        "MailingCity": "City",
+        "MailingCountry": "Country",
+        "Description": "_bdh_Description",
+        "SystemModstamp": "LastModified"
+      },
+      "sensitivityDefault": "Confidential",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Account",
+      "displayName": "Client",
+      "aclMode": "group",
+      "aclGroupId": "00000000-0000-0000-0000-000000000000",
+      "selectedFields": {
+        "Name": "Title",
+        "Industry": "Industry",
+        "Type": "AccountType",
+        "Website": "Website",
+        "AnnualRevenue": "AnnualRevenue",
+        "NumberOfEmployees": "NumberOfEmployees",
+        "BillingCity": "City",
+        "BillingCountry": "Country",
+        "OwnerId": "OwnerId",
+        "Description": "_bdh_Description",
+        "SystemModstamp": "LastModified"
+      },
+      "sensitivityDefault": "Internal",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Opportunity",
+      "displayName": "Opportunity",
+      "aclMode": "ownerOnly",
+      "ownerField": "OwnerId",
+      "ownerEmailField": "OwnerEmail",
+      "selectedFields": {
+        "Name": "Title",
+        "StageName": "Stage",
+        "Amount": "Amount",
+        "CloseDate": "CloseDate",
+        "AccountId": "AccountId",
+        "AccountName": "AccountName",
+        "Probability": "Probability",
+        "ForecastCategory": "ForecastCategory",
+        "Description": "_bdh_Description",
+        "NextStep": "_bdh_NextStep",
+        "SystemModstamp": "LastModified"
+      },
+      "sensitivityDefault": "Confidential",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Case",
+      "displayName": "Case",
+      "aclMode": "ownerOnly",
+      "ownerField": "OwnerId",
+      "ownerEmailField": "OwnerEmail",
+      "selectedFields": {
+        "CaseNumber": "CaseNumber",
+        "Subject": "Title",
+        "Status": "Status",
+        "Priority": "Priority",
+        "Origin": "Origin",
+        "AccountId": "AccountId",
+        "ContactId": "ContactId",
+        "Description": "_bdh_Description",
+        "SystemModstamp": "LastModified"
+      },
+      "sensitivityDefault": "Internal",
+      "iconUrl": ""
+    },
+    {
+      "objectName": "Lead",
+      "displayName": "Lead",
+      "aclMode": "ownerOnly",
+      "ownerField": "OwnerId",
+      "ownerEmailField": "OwnerEmail",
+      "selectedFields": {
+        "Name": "Title",
+        "Company": "Company",
+        "Status": "Status",
+        "Email": "Email",
+        "Phone": "Phone",
+        "LeadSource": "LeadSource",
+        "Industry": "Industry",
+        "Rating": "Rating",
+        "Description": "_bdh_Description",
+        "SystemModstamp": "LastModified"
+      },
+      "sensitivityDefault": "Confidential",
+      "iconUrl": ""
+    }
+  ]
+}

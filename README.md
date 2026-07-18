@@ -11,6 +11,7 @@ lives in its own top-level folder.
 | [ClarizenConnector](ClarizenConnector/) | Planview AdaptiveWork (Clarizen) | REST v2 + TDW bulk, financial-field governance, webhooks | 480 |
 | [SeismicConnector](SeismicConnector/) | Seismic (sales enablement) | Version-aware, No-MNE exclusion filter, usage ranking | 406 |
 | [AltrataConnector](AltrataConnector/) | Altrata (relationship & wealth intelligence) | Licensed feeds, seat-only entitlement, DSAR erasure | 375 |
+| [HadoopConnector](HadoopConnector/) | BDH Hadoop data mart (nightly Salesforce mirror) | Filter-first at 150M+ scale, partition pruning, 24h-lag aware | 534 |
 
 ## Shared chassis
 
