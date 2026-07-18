@@ -118,6 +118,7 @@ public class AdversarialProbeRound3Tests : IDisposable
             Alerts = new Alerting(config.ConnectorId),
             Audit = new AuditLog(config.ConnectorId, logsDir: Path.Combine(root, "logs")),
             Erasure = new ErasureLedger(config.ConnectorId, logsDir: Path.Combine(root, "logs")),
+            Decisions = new DecisionLedger(config.ConnectorId, logsDir: Path.Combine(root, "logs")),
             GraphBreaker = new CircuitBreaker("graph", new CircuitBreakerOptions { Critical = true }),
             ApiBreaker = new CircuitBreaker("altrata-api", new CircuitBreakerOptions { Critical = false }),
         };

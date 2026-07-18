@@ -45,6 +45,9 @@ is N/A here.
 | Token replay | Assertions are short-lived (10 min), unique `jti`, aud = tenant token endpoint (`ClientAssertionJwt`) | — |
 | Tampering (item injection) | Only this app's identity can write to its connection (`*.OwnedBy` permission model) | Anyone with the app credential can rewrite the index — rotate per [SECURITY.md](../SECURITY.md) |
 | DoS / throttling | Adaptive concurrency dials down on 429 (`Graph/Ingest.cs` `AdaptiveConcurrency`), Retry-After honored exactly, 60s cap, jitter in HA (`docs/RETRY.md`) | Sustained tenant-wide throttling slows crawls (see `docs/CAPACITY.md`) |
+| Over-permission via oversized ACL (per-item ceiling) | **ACL scale guard (#9, `Graph/AclScaleGuard.cs`)**: per-item ACE-count metric (`max_item_ace_count`) always exported; when `ACL_MAX_ACES` is set, an item exceeding it is warned (default) or dropped to a group ACL / deny-everyone fallback, protecting the Graph per-item-ACL / 4 MB ceiling that user-expansion can blow | Guard is off by default; the durable fix for large orgs is `USE_GROUP_ACL=true` (group-reference ACLs stay small) |
+| Stale / over-permissioned index after an outage | **Item TTL (#8, `Graph/ItemExpiry.cs`)**: `GRAPH_ITEM_TTL_DAYS` stamps `expirationDateTime` so items self-expire if crawling stops; a healthy connector re-stamps every crawl | Off by default; set a TTL comfortably larger than the crawl cadence so a single missed crawl never expires live content |
+| Weak/absent sensitivity control on top-tier records | **Classification enforcement (#6, `Graph/Classification.cs`)**: optional — `CLASSIFICATION_ENFORCE_ACL` narrows top-tier items' ACL to a configured Entra group (belt-and-braces on the Salesforce ACL) | The classification TAG is **advisory** (connector-applied from a Salesforce field), **not** a Purview label and not enforced unless enforcement + a group are configured |
 
 ### Least-privilege Graph permission review
 
@@ -66,8 +69,9 @@ directory-read floor for ACL mapping; if you run with public ACLs only
 
 | Threat | Existing mitigation | Residual risk |
 |---|---|---|
-| Tampering (checkpoint/identity rewrite) | File ACLs (SQLite under `data/`); SQL login is least-privilege app principal (`scripts/sql/create-login.sql`); schema versioned (`docs/SQL_CONTRACT.md`) | Host admin can rewrite state → wrong ACLs served until the next identity/full crawl; alert on unexpected writes ([SIEM.md](SIEM.md)) |
-| Info disclosure | Identity store holds SF user/group/role mappings (ids + emails — directory data, not item content); protection options in [SECURITY.md](../SECURITY.md) §data-at-rest | Unencrypted SQLite file readable with file access — use volume encryption / TDE |
+| Tampering (checkpoint/identity rewrite) | File ACLs (SQLite under `data/`), now created **owner-only** (POSIX 0700 / Windows owner+admins, `Infrastructure/SecureDirectory.cs`, #3); SQL login is least-privilege app principal (`scripts/sql/create-login.sql`); schema versioned (`docs/SQL_CONTRACT.md`) | Host admin can rewrite state → wrong ACLs served until the next identity/full crawl; alert on unexpected writes ([SIEM.md](SIEM.md)) |
+| Repudiation (access decisions) | **Decision ledger (#11, `Graph/DecisionLedger.cs`)**: opt-in (`DECISION_LEDGER=true`) append-only SHA-256 hash-chained record of exclusion + ACL-restriction decisions; `Verify()` detects any edit/reorder/delete | Off by default; low-volume by design (records only deliberate access decisions, not ordinary ingests) |
+| Info disclosure | Identity store holds SF user/group/role mappings (ids + emails — directory data, not item content); state directories created owner-only (#3); protection options in [SECURITY.md](../SECURITY.md) §data-at-rest | Unencrypted SQLite file readable with file access — use volume encryption / TDE |
 | DoS (corruption) | Corrupt-state diagnostics name file+line; re-crawl rebuilds everything ([DR.md](DR.md): state loss = re-crawl cost, not data loss) | Crawl-length outage window |
 | Spoofed SQL server | `Encrypt=True` forced unless explicitly set (`Config/SqlStateStore.cs`); managed identity auth option (`SQL_USE_MANAGED_IDENTITY`) | `TrustServerCertificate=true` in a connection string disables the protection — don't ship it to prod |
 
@@ -75,7 +79,7 @@ directory-read floor for ACL mapping; if you run with public ACLs only
 
 | Threat | Existing mitigation | Residual risk |
 |---|---|---|
-| Info disclosure (CRM PII at rest) | `DEADLETTER_PAYLOAD_MODE=redacted` (`Config/DeadLetterRedaction.cs`): property values/content replaced by sha256 hashes; ids/error/ACLs/field names kept; trade-off note embedded in each record; `retry-failed` re-fetches from Salesforce so redaction costs nothing at retry time | Default is `full` (debug-friendly): request/response payloads on disk — set `redacted` wherever CRM data is sensitive; file ACLs per [DEPLOYMENT_ENTERPRISE.md](DEPLOYMENT_ENTERPRISE.md) |
+| Info disclosure (CRM PII at rest) | **`DEADLETTER_PAYLOAD_MODE=redacted` is now the DEFAULT** (`Config/DeadLetterRedaction.cs`): property values/content replaced by sha256 hashes; ids/error/ACLs/field names kept; trade-off note embedded in each record; `retry-failed` re-fetches from Salesforce so redaction costs nothing at retry time. An unrecognized mode value fails config-load naming the setting (never silently downgrades to full). Directories created owner-only (POSIX 0700, `Infrastructure/SecureDirectory.cs`, #3) | Opt in to `DEADLETTER_PAYLOAD_MODE=full` only for standalone debugging in a locked-down environment (raw request/response payloads then sit on disk); file ACLs per [DEPLOYMENT_ENTERPRISE.md](DEPLOYMENT_ENTERPRISE.md) |
 | Tampering (record injection) | `retry-failed` treats records as **pointers** (item_id/object_type) and re-reads Salesforce — an injected record cannot inject content | An attacker with write access can delete records (losing retry work) — the same access already implies host compromise |
 | DoS (unbounded growth) | Depth exposed as `salesforce_connector_dead_letter_depth`; `ALERT_DEADLETTER_THRESHOLD` webhook alert; growth runbook ([RUNBOOKS.md](RUNBOOKS.md#dead-letter-growth)) | — |
 

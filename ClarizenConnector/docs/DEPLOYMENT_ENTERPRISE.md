@@ -119,6 +119,20 @@ password) or via your DSC baseline.
 `LOG_FORMAT=json` + `LOG_RETENTION_DAYS=30` ·
 `USE_KEY_VAULT=true` (or ACL'd `.env.local.user`) ·
 certificate Graph auth over client secret ·
-`DEADLETTER_PAYLOAD_MODE=redacted` on tenants with financial-field governance ·
+`DEADLETTER_PAYLOAD_MODE=redacted` (now the default) ·
+`FINANCIAL_DATA_MODE=filter` (now the default) or `acl` under financial-field governance ·
+`DECISION_LEDGER=true` (default) with the ledger stored/backed off-host ·
+`GRAPH_ITEM_TTL_DAYS` set comfortably above the full-crawl cadence ·
 `HEALTH_PORT` scraped by Prometheus/Azure Monitor with the shipped rules
-(`ops/`) · webhook listener only behind a TLS ingress with rate limiting.
+(`ops/`) · webhook listener only behind a TLS ingress with rate limiting,
+strict anti-replay (`CLARIZEN_WEBHOOK_REQUIRE_TIMESTAMP=true`, the default).
+
+### Entitlement freshness
+
+`IDENTITY_SYNC_ON_INCREMENTAL=true` (now the default) re-resolves
+Clarizen→Entra entitlements on every incremental crawl, so an entitlement
+change propagates at the incremental cadence rather than only on full crawls.
+A residual, **non-real-time** lag remains between the change in Clarizen/Entra
+and the next incremental crawl. To bound it tighter, run incrementals on a
+short cadence and schedule a periodic full crawl (which re-applies every item's
+ACL — the effective re-ACL sweep) on a cadence matched to your entitlement-SLA.

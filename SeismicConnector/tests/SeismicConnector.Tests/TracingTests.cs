@@ -347,6 +347,9 @@ public class TracingInitTests : IDisposable
         Directory.CreateDirectory(_configDir);
         File.WriteAllText(Path.Combine(_configDir, "schema.json"),
             """{"objects":[{"name":"ContentItem","enabled":true}]}""");
+        // MNPI fail-closed: AppConfig.Load requires a valid exclusions.json.
+        File.WriteAllText(Path.Combine(_configDir, "exclusions.json"),
+            """{"excludedFlags":["MNE"],"flagProperties":["classification"]}""");
         foreach (var (k, v) in _requiredEnv)
             Environment.SetEnvironmentVariable(k, v);
     }

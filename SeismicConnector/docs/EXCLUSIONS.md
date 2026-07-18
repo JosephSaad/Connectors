@@ -29,8 +29,22 @@ report.
 | `excludeRestrictedTeamsites` | Also exclude any teamsite Seismic itself marks `isRestricted`. Default `true`. |
 | `propertyRules` | Arbitrary `name` = `equals` pairs for bespoke taxonomies. |
 
-A missing `exclusions.json` means **no rules** — `validate-config` warns about
-this loudly.
+### Fail-closed loading (MNPI safety)
+
+The No-MNE gate **fails closed**. `exclusions.json` must exist and define at
+least one rule; a **missing, empty (0-byte), empty-object (`{}`), `null`,
+malformed, or rule-less** file is a hard `ConfigException` at startup naming the
+path — it is *never* silently treated as "nothing excluded" (that would ingest
+MNPI-flagged content on a config slip). To run rule-less **on purpose**, set the
+explicit sentinel in the file:
+
+```json
+{ "acknowledgeNoExclusions": true }
+```
+
+With the sentinel the connector starts rule-less; `validate-config` still
+surfaces it as a warning, and `validate-config --strict` escalates a rule-less
+posture to a hard **FAIL**.
 
 ## Evaluation order
 
@@ -90,6 +104,18 @@ summary object:
 
 Summary counts also appear in the run summary and on the live dashboard
 ("Excluded (No-MNE)").
+
+## Immutable decision ledger (tamper-evident audit)
+
+With `DECISION_LEDGER=true`, every **exclusion** decision (and every
+classification **ACL-restriction** decision) is also appended to an
+append-only, SHA-256 **hash-chained** ledger,
+`decision_ledger_{CONNECTOR_ID}_{timestamp}.jsonl`. Each entry carries its
+`seq`, the item id, decision, reason, the previous entry's hash and its own
+hash, so any later edit, reorder, insertion or deletion breaks the chain and is
+detected by the ledger's `Verify()` (tamper-*evident*; pair with off-box/WORM
+shipping for a full guarantee). It is deliberately scoped to these low-volume
+compliance decisions — it is **not** a per-ingest log.
 
 ## Related withdrawals (not exclusion rules, same machinery)
 

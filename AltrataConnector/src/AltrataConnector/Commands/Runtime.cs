@@ -25,6 +25,8 @@ public sealed class Runtime : IDisposable
     public required Alerting Alerts { get; init; }
     public required AuditLog Audit { get; init; }
     public required ErasureLedger Erasure { get; init; }
+    /// <summary>Tamper-evident ledger of exclusion / ACL-restriction decisions (#11).</summary>
+    public required DecisionLedger Decisions { get; init; }
     /// <summary>The Graph dependency breaker (critical — drives readiness).</summary>
     public required CircuitBreaker GraphBreaker { get; init; }
     /// <summary>The Altrata enrichment-API breaker (non-critical).</summary>
@@ -39,7 +41,7 @@ public sealed class Runtime : IDisposable
     public bool IsDegraded() => GraphBreaker.IsOpen;
 
     public CrawlEngine CreateEngine() =>
-        new(Config, Graph, State, Identity, Seats, Alerts, Ha);
+        new(Config, Graph, State, Identity, Seats, Alerts, Ha, Decisions);
 
     public static Runtime Create()
     {
@@ -68,6 +70,7 @@ public sealed class Runtime : IDisposable
         var alerts = new Alerting(config.ConnectorId);
         var audit = new AuditLog(config.ConnectorId);
         var erasure = new ErasureLedger(config.ConnectorId);
+        var decisions = new DecisionLedger(config.ConnectorId);
 
         HaCoordinator? ha = null;
         if (config.HaMode)
@@ -83,6 +86,7 @@ public sealed class Runtime : IDisposable
             Alerts = alerts,
             Audit = audit,
             Erasure = erasure,
+            Decisions = decisions,
             GraphBreaker = graphBreaker,
             ApiBreaker = apiBreaker,
             Ha = ha,

@@ -219,7 +219,7 @@ CREATE TABLE IF NOT EXISTS field_cache (
         _connectionId = connectionId;
         var parent = Path.GetDirectoryName(Path.GetFullPath(_dbPath));
         if (!string.IsNullOrEmpty(parent))
-            Directory.CreateDirectory(parent);
+            SecureDirectory.EnsureOwnerOnly(parent);  // #3: state dir owner-only
         // Autocommit; we manage transactions explicitly.
         _conn = new SqliteConnection($"Data Source={_dbPath}");
         _conn.Open();

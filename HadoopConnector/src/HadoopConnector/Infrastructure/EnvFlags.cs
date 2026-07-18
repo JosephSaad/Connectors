@@ -41,6 +41,24 @@ public static class EnvFlags
     /// <summary><c>HA_MODE=true</c> — active-active multi-node crawling (requires SQL backend).</summary>
     public static bool HaMode => IsTrue("HA_MODE");
 
-    /// <summary><c>IDENTITY_SYNC_ON_INCREMENTAL=true</c> — identity sync on incremental crawls too.</summary>
-    public static bool IdentitySyncOnIncremental => IsTrue("IDENTITY_SYNC_ON_INCREMENTAL");
+    /// <summary>
+    /// <c>IDENTITY_SYNC_ON_INCREMENTAL</c> — re-sync the entitlement (BDH→Entra)
+    /// mapping on incremental crawls too, not just on full crawls. Default ON so
+    /// entitlement freshness tracks the incremental cadence rather than lagging
+    /// to the next full crawl; set <c>false</c> to restrict it to full crawls.
+    /// Residual lag remains non-real-time: the mapping refreshes each incremental,
+    /// but an item is only re-emitted with an updated ACL when its SOURCE record
+    /// changes — items whose records are unchanged keep their prior ACL until the
+    /// next FULL crawl, so schedule full crawls at your entitlement-freshness SLA.
+    /// </summary>
+    public static bool IdentitySyncOnIncremental
+    {
+        get
+        {
+            var raw = Environment.GetEnvironmentVariable("IDENTITY_SYNC_ON_INCREMENTAL");
+            // Unset → ON (safe default). Explicit false/0/no opts out.
+            return string.IsNullOrWhiteSpace(raw)
+                || raw.Trim().ToLowerInvariant() is "true" or "1" or "yes";
+        }
+    }
 }

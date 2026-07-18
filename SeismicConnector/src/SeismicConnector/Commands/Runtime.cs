@@ -57,9 +57,10 @@ public sealed class Runtime : IDisposable
 
     /// <summary>
     /// Open the classification manifest for the run and attach it to the
-    /// pipeline. File-backed (Purview-aligned export) when
-    /// CLASSIFICATION_MANIFEST=true; otherwise a no-op in-memory manifest, so
-    /// the caller's <c>using</c> works either way.
+    /// pipeline. File-backed (advisory classification export; Purview-aligned in
+    /// naming only, not a Purview-enforced label) when CLASSIFICATION_MANIFEST=true;
+    /// otherwise a no-op in-memory manifest, so the caller's <c>using</c> works
+    /// either way.
     /// </summary>
     public ClassificationManifest OpenManifest(string runLogFile)
     {
@@ -77,6 +78,29 @@ public sealed class Runtime : IDisposable
         }
         Pipeline.Manifest = manifest;
         return manifest;
+    }
+
+    /// <summary>
+    /// Open the decision audit ledger for the run and attach it to the pipeline.
+    /// File-backed, hash-chained JSONL when DECISION_LEDGER=true; otherwise a
+    /// no-op in-memory ledger, so the caller's <c>using</c> works either way.
+    /// </summary>
+    public DecisionLedger OpenLedger(string runLogFile)
+    {
+        DecisionLedger ledger;
+        if (EnvFlags.IsTrue(DecisionLedger.EnvVar))
+        {
+            var dir = Path.GetDirectoryName(runLogFile) ?? CommandRegistry.LogsDir;
+            var path = Path.Combine(
+                dir, $"decision_ledger_{Config.Connector.Id}_{DateTime.Now:yyyyMMdd_HHmmss}.jsonl");
+            ledger = new DecisionLedger(path);
+        }
+        else
+        {
+            ledger = new DecisionLedger();
+        }
+        Pipeline.Ledger = ledger;
+        return ledger;
     }
 
     public void Dispose()

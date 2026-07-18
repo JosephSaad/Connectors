@@ -142,7 +142,9 @@ public class SqlStateStoreTests
     {
         if (string.IsNullOrEmpty(SqlTestSupport.TestConnectionString))
             return;  // SKIP: no SQL Server available
-        using var scope = SqlTestSupport.SqlScope();
+        // Full mode explicitly — this test asserts the payload round-trips verbatim
+        // (the shipped default is now redacted).
+        using var scope = SqlTestSupport.SqlScope(("DEADLETTER_PAYLOAD_MODE", "full"));
         var connectorId = SqlTestSupport.UniqueConnectorId("sqltest-dl");
         var dlPath = SyncState.FailedRecordsPath(connectorId);
 

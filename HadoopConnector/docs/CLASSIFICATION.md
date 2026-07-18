@@ -1,11 +1,19 @@
-# Unified data classification & sensitivity labeling
+# Connector-applied data classification (advisory tag)
 
 Optional, off by default. When enabled, every ingested item is stamped with a
-single sensitivity taxonomy so Copilot/search admins can refine, audit and
-gate on it — and, optionally, a per-crawl manifest is written for catalog/DLP
-ingestion. Implementation: `Content/ContentClassifier.cs` (pattern scan),
-`Item/SensitivityClassifier.cs` (label derivation),
+single classification taxonomy so Copilot/search admins can refine, audit and
+(optionally) enforce on it — and, optionally, a per-crawl manifest is written
+for catalog/DLP ingestion. Implementation: `Content/ContentClassifier.cs`
+(pattern scan), `Item/SensitivityClassifier.cs` (label derivation),
 `Item/ClassificationManifest.cs` (export), wired in `Graph/Ingest.cs`.
+
+> **This is an advisory, connector-applied TAG — not a Purview label.**
+> `SensitivityLabel` is a value the connector computes and stamps as a Graph
+> refiner property. It is **not** a Microsoft Purview-enforced sensitivity
+> label: on its own it does **not** encrypt content and does **not** gate
+> access. To make the tag actually restrict access, opt into
+> `CLASSIFICATION_ENFORCE_ACL` (below). The wire property name stays
+> `SensitivityLabel` for schema back-compat.
 
 > **Off = untouched.** With `CLASSIFICATION` unset/false the classifier is
 > never constructed, no properties are added, and behaviour is byte-identical
@@ -15,8 +23,24 @@ ingestion. Implementation: `Content/ContentClassifier.cs` (pattern scan),
 
 | Env var | Default | Effect |
 |---|---|---|
-| `CLASSIFICATION` | `false` | `true` → every converted item gets `SensitivityLabel` + `DetectedCategories` properties, derived from a content scan + the per-object default. |
-| `CLASSIFICATION_MANIFEST` | `false` | `true` (with `CLASSIFICATION=true`) → additionally write a per-crawl classification JSONL under `logs/`. Without `CLASSIFICATION` it has no effect. |
+| `CLASSIFICATION` | `false` | `true` → every converted item gets the advisory `SensitivityLabel` + `DetectedCategories` properties, derived from a content scan + the per-object default. |
+| `CLASSIFICATION_MANIFEST` | `false` | `true` (with `CLASSIFICATION=true`) → additionally write a per-crawl classification JSONL under `logs/` (advisory catalog/DLP export; **no** live Purview call). Without `CLASSIFICATION` it has no effect. |
+| `CLASSIFICATION_ENFORCE_ACL` | `false` | `true` (with a group configured) → **enforce** the tag: top-tier (`Restricted`) items have their ACL narrowed to the configured group so the tag gates retrieval. Non-`Restricted` items are untouched. Off = advisory only (non-breaking). |
+| `CLASSIFICATION_RESTRICTED_GROUP_ID` | _(unset)_ | The Entra group object id `Restricted` items are limited to when enforcement is on. |
+
+## Enforcement (optional)
+
+With `CLASSIFICATION_ENFORCE_ACL=true` **and** `CLASSIFICATION_RESTRICTED_GROUP_ID`
+set, any item classified `Restricted` (PII/PCI/Secret detected, or a
+`sensitivityDefault` of `Restricted`) has its resolved ACL **replaced** with a
+single grant to that group before it is PUT — so the advisory tag becomes a real
+access boundary. Items below `Restricted` keep their normally-resolved ACL.
+
+Each enforced restriction is written to the **immutable decision ledger**
+(`logs/decisions_<CONNECTOR_ID>.jsonl`, `ACL_RESTRICTION`) so the WHO-can-see-WHAT
+change is auditable and tamper-evident. `validate-config` fails when
+`CLASSIFICATION_ENFORCE_ACL=true` without a group id, and warns when it is set
+without `CLASSIFICATION=true` (nothing would be classified, so nothing narrowed).
 
 ## The taxonomy
 
@@ -106,9 +130,10 @@ scan is bounded on both axes:
 
 ## Manifest (`CLASSIFICATION_MANIFEST=true`)
 
-A per-crawl, Purview-aligned JSONL export — file-based like the
-reconciliation reports; **no live Purview API call**. Written on crawl
-completion (`Flush()`), thread-safe against concurrent object/batch workers.
+A per-crawl advisory JSONL export for catalog/DLP ingestion — file-based like
+the reconciliation reports; **no live Purview API call**, and the label it
+records is the connector-applied advisory tag, not a Purview label. Written on
+crawl completion (`Flush()`), thread-safe against concurrent object/batch workers.
 
 File: `logs/classification_{CONNECTOR_ID}_{yyyyMMdd_HHmmss}.jsonl`
 

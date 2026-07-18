@@ -83,9 +83,33 @@ public sealed record AppConfig
     /// classification summary JSONL (counts + item→label; no personal values).</summary>
     public bool ClassificationManifest { get; init; }
 
+    /// <summary>CLASSIFICATION_ENFORCE_ACL (#6b, default false): when true AND
+    /// <see cref="ClassificationEnforceGroupId"/> is set, top-tier (Restricted)
+    /// items have their ACL restricted to that Entra group only. Requires
+    /// CLASSIFICATION=true (the tag drives enforcement). Non-breaking (off).</summary>
+    public bool ClassificationEnforceAcl { get; init; }
+
+    /// <summary>CLASSIFICATION_ENFORCE_GROUP_ID (#6b): the Entra group id that
+    /// Restricted items are locked to when enforcement is on.</summary>
+    public string? ClassificationEnforceGroupId { get; init; }
+
+    /// <summary>GRAPH_ITEM_TTL_DAYS (#8, default unset = 0 = off): when > 0,
+    /// ingested items are stamped with expirationDateTime = now + this many days
+    /// so the index self-expires if crawling stops (defense after an outage).</summary>
+    public int GraphItemTtlDays { get; init; }
+
     // ---- Entitlement ----------------------------------------------------------
     public string SeatListPath { get; init; } = Path.Combine("config", "seats.json");
     public string? SeatGroupId { get; init; }
+
+    /// <summary>IDENTITY_SYNC_ON_INCREMENTAL (#5, default TRUE): re-sync seat
+    /// entitlement on INCREMENTAL crawls too, so a seat change triggers the
+    /// re-ACL sweep at the incremental cadence (not just on full crawls). The
+    /// seat list itself is always loaded every crawl (new items always get the
+    /// current ACL); this flag governs only the sweep over EXISTING items. Set
+    /// false to defer that (potentially large) sweep to full crawls. Residual
+    /// lag is non-real-time: a mid-cycle change is enforced at the next crawl.</summary>
+    public bool IdentitySyncOnIncremental { get; init; } = true;
 
     // ---- Circuit breakers (DR / degraded mode) ----------------------------------
     /// <summary>CIRCUIT_BREAKER (default true): master switch; false = passthrough.</summary>
@@ -211,9 +235,16 @@ public sealed record AppConfig
             Classification = EnvFlags.IsTrue("CLASSIFICATION"),
             DataResidency = Optional("DATA_RESIDENCY"),
             ClassificationManifest = EnvFlags.IsTrue("CLASSIFICATION_MANIFEST"),
+            ClassificationEnforceAcl = EnvFlags.IsTrue("CLASSIFICATION_ENFORCE_ACL"),
+            ClassificationEnforceGroupId = Optional("CLASSIFICATION_ENFORCE_GROUP_ID"),
+
+            GraphItemTtlDays = OptionalInt("GRAPH_ITEM_TTL_DAYS", 0),
 
             SeatListPath = Optional("SEAT_LIST_PATH") ?? Path.Combine("config", "seats.json"),
             SeatGroupId = Optional("SEAT_GROUP_ID"),
+            // #5 default flip: entitlement re-syncs on incrementals unless
+            // explicitly turned off (default-ON knob → IsFalse check).
+            IdentitySyncOnIncremental = !EnvFlags.IsFalse("IDENTITY_SYNC_ON_INCREMENTAL"),
 
             CircuitBreakerEnabled = !EnvFlags.IsFalse("CIRCUIT_BREAKER"),
             CircuitBreakerFailureThreshold = OptionalInt("CIRCUIT_BREAKER_FAILURE_THRESHOLD", 5),
@@ -249,6 +280,12 @@ public sealed record AppConfig
             errors.Add("CIRCUIT_BREAKER_OPEN_SECONDS must be >= 1");
         if (config.CircuitBreakerHalfOpenTrials < 1)
             errors.Add("CIRCUIT_BREAKER_HALFOPEN_TRIALS must be >= 1");
+        if (config.GraphItemTtlDays < 0)
+            errors.Add("GRAPH_ITEM_TTL_DAYS must be >= 0 (0 = disabled)");
+        if (config.ClassificationEnforceAcl && string.IsNullOrWhiteSpace(config.ClassificationEnforceGroupId))
+            errors.Add("CLASSIFICATION_ENFORCE_ACL=true requires CLASSIFICATION_ENFORCE_GROUP_ID (the Entra group Restricted items are locked to)");
+        if (config.ClassificationEnforceAcl && !config.Classification)
+            errors.Add("CLASSIFICATION_ENFORCE_ACL=true requires CLASSIFICATION=true (the classification tag drives enforcement)");
 
         if (errors.Count > 0)
             throw new ConfigurationError("Invalid configuration: " + string.Join("; ", errors));

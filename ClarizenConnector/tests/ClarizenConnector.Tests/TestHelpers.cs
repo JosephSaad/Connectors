@@ -96,7 +96,10 @@ public static class TestConfig
         long attachmentMaxBytes = 10L * 1024 * 1024,
         IReadOnlySet<string>? attachmentAllowedTypes = null,
         bool classification = false,
-        bool classificationManifest = false) => new()
+        bool classificationManifest = false,
+        bool classificationEnforceAcl = false,
+        string? classificationRestrictedGroupId = null,
+        int graphItemTtlDays = 0) => new()
     {
         ConnectorId = connectorId,
         ConnectorName = "Clarizen AdaptiveWork",
@@ -120,6 +123,9 @@ public static class TestConfig
         AttachmentAllowedTypes = attachmentAllowedTypes ?? AppConfig.DefaultAttachmentTypes,
         Classification = classification,
         ClassificationManifest = classificationManifest,
+        ClassificationEnforceAcl = classificationEnforceAcl,
+        ClassificationRestrictedGroupId = classificationRestrictedGroupId,
+        GraphItemTtlDays = graphItemTtlDays,
     };
 }
 

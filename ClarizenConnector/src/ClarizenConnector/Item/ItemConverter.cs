@@ -75,6 +75,12 @@ public sealed class ItemConverter
                 : null);
 
         FinancialFieldClassifier.Apply(item, objectConfig, _config, contentFinancial);
+
+        // Optional stale-index expiry: stamp expirationDateTime = now + TTL so
+        // the Graph index self-expires if crawling stops after an outage.
+        if (_config.GraphItemTtlDays > 0)
+            item.ExpirationDateTime = DateTime.UtcNow.AddDays(_config.GraphItemTtlDays);
+
         return item;
     }
 

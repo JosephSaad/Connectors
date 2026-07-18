@@ -205,7 +205,8 @@ public sealed class IngestPipeline
         var summary = new IngestSummary();
         Metrics.IncCrawlsStarted();
 
-        // Optional Purview-aligned classification manifest for this crawl.
+        // Optional classification manifest for this crawl (advisory tags, not a
+        // Purview-enforced label — see Item/SensitivityClassifier.cs).
         _manifest = _classifier is not null && _config.ClassificationManifest
             ? new Item.ClassificationManifest(_config.ConnectorId, Config.SyncState.LogsDir)
             : null;
@@ -271,13 +272,38 @@ public sealed class IngestPipeline
 
     /// <summary>Classify one item and record it to the crawl manifest (no-op when
     /// CLASSIFICATION is off). Called after attachment enrichment so extracted
-    /// text is included in the scan.</summary>
-    private void ApplyClassification(ExternalItem item, ObjectConfig objectConfig)
+    /// text is included in the scan. When CLASSIFICATION_ENFORCE_ACL is on, a
+    /// top-tier (Restricted) item is ACL-locked to the configured group and the
+    /// decision is written to the immutable audit ledger.</summary>
+    private void ApplyClassification(ExternalItem item, ObjectConfig objectConfig, string connectorId)
     {
         if (_classifier is null)
             return;
         var outcome = _classifier.Classify(item, objectConfig);
         _manifest?.Record(item.Id, objectConfig.ObjectName, outcome.Label, outcome.Categories);
+
+        if (Item.SensitivityClassifier.EnforceRestrictedAcl(item, outcome.Label, _config))
+        {
+            Metrics.IncItemsAclRestricted("classification");
+            DecisionLedger.RecordRestriction(
+                connectorId, item.Id, $"classification={outcome.Label} (CLASSIFICATION_ENFORCE_ACL)");
+        }
+    }
+
+    /// <summary>Record an ACL-restriction decision when FINANCIAL_DATA_MODE=acl
+    /// locked a financial item down to the finance group (the converter applied
+    /// the restriction; this is the audit trail for it).</summary>
+    private void RecordFinancialAclRestriction(string connectorId, ExternalItem item)
+    {
+        if (!string.Equals(_config.FinancialDataMode, "acl", StringComparison.OrdinalIgnoreCase))
+            return;
+        if (item.Properties.TryGetValue(
+                Item.FinancialFieldClassifier.ContainsFinancialProperty, out var fin) && fin is true)
+        {
+            Metrics.IncItemsAclRestricted("financial");
+            DecisionLedger.RecordRestriction(
+                connectorId, item.Id, "financial (FINANCIAL_DATA_MODE=acl)");
+        }
     }
 
     /// <summary>One crawl pass against a single Graph connection (the whole run, or one shard).</summary>
@@ -835,16 +861,19 @@ public sealed class IngestPipeline
                         + "(set FALLBACK_ACL_GROUP_ID to grant a default group).");
                     summary.NoAclSkipped++;
                     Metrics.IncItemsSkipped();
+                    DecisionLedger.RecordExclusion(
+                        cfg.ConnectorId, record.ItemId, "no resolvable ACL principals");
                     continue;
                 }
                 var item = _converter.Convert(record, objectConfig, acl);
+                RecordFinancialAclRestriction(cfg.ConnectorId, item);
                 if (_attachmentEnricher is not null && _attachmentEnricher.ShouldEnrich(objectConfig))
                 {
                     await _attachmentEnricher.EnrichAsync(item, record, objectConfig, ct)
                         .ConfigureAwait(false);
                 }
                 // Classify AFTER enrichment so attachment text is in the scan.
-                ApplyClassification(item, objectConfig);
+                ApplyClassification(item, objectConfig, cfg.ConnectorId);
                 if (debugEnabled)
                 {
                     Logger.Debug(
@@ -1126,11 +1155,16 @@ public sealed class IngestPipeline
     {
         var acl = _aclResolver.Resolve(record, objectConfig);
         if (acl.Count == 0)
+        {
+            DecisionLedger.RecordExclusion(
+                _config.ConnectorId, record.ItemId, "no resolvable ACL principals");
             return (false, "No resolvable ACL principals");
+        }
         var item = _converter.Convert(record, objectConfig, acl);
+        RecordFinancialAclRestriction(_config.ConnectorId, item);
         if (_attachmentEnricher is not null && _attachmentEnricher.ShouldEnrich(objectConfig))
             await _attachmentEnricher.EnrichAsync(item, record, objectConfig, ct).ConfigureAwait(false);
-        ApplyClassification(item, objectConfig);
+        ApplyClassification(item, objectConfig, _config.ConnectorId);
 
         // Under sharding a single item routes to the connection that owns its
         // object type (state keys and search results stay consistent).

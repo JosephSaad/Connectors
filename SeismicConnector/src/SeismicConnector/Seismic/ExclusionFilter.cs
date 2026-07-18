@@ -61,11 +61,64 @@ public sealed class ExclusionRules
     [JsonPropertyName("propertyRules")]
     public List<PropertyRule> PropertyRules { get; init; } = new();
 
+    /// <summary>
+    /// Explicit opt-in to run the No-MNE gate with NO exclusion rules. Without
+    /// this sentinel a rule-less (or missing / empty / malformed) exclusions
+    /// file is a hard <see cref="ConfigException"/> — the gate fails CLOSED so a
+    /// config slip can never silently ingest material-nonpublic content.
+    /// </summary>
+    [JsonPropertyName("acknowledgeNoExclusions")]
+    public bool AcknowledgeNoExclusions { get; init; }
+
+    /// <summary>True when no exclusion rule of any kind is configured.</summary>
+    public bool HasNoRules =>
+        ExcludedFlags.Count == 0
+        && RestrictedLibraries.Count == 0
+        && RestrictedTeamsiteIds.Count == 0
+        && PropertyRules.Count == 0;
+
+    /// <summary>
+    /// Load the No-MNE exclusion rules, FAILING CLOSED (mirrors the schema
+    /// loader in AppConfig). A missing / empty(0-byte) /
+    /// empty-object / null / malformed / rule-less file is a hard
+    /// <see cref="ConfigException"/> naming the path — it is NEVER silently
+    /// treated as "nothing excluded", because that would ingest MNPI-flagged
+    /// content on a configuration mistake. An operator who genuinely wants a
+    /// rule-less run must opt in with <c>acknowledgeNoExclusions:true</c>.
+    /// </summary>
     public static ExclusionRules LoadFile(string path)
     {
         if (!File.Exists(path))
-            return new ExclusionRules();  // no rules file → nothing excluded
-        return JsonSerializer.Deserialize<ExclusionRules>(File.ReadAllText(path)) ?? new ExclusionRules();
+            throw new ConfigException(
+                $"Invalid configuration: exclusions file not found at {path} — the No-MNE gate "
+                + "fails closed; set acknowledgeNoExclusions:true in the file to run rule-less.");
+
+        var text = File.ReadAllText(path);
+        if (string.IsNullOrWhiteSpace(text))
+            throw new ConfigException($"Invalid configuration: exclusions file {path} is empty");
+
+        ExclusionRules? rules;
+        try
+        {
+            rules = JsonSerializer.Deserialize<ExclusionRules>(text);
+        }
+        catch (JsonException exc)
+        {
+            throw new ConfigException(
+                $"Invalid configuration: exclusions file {path} is not valid JSON ({exc.Message})");
+        }
+
+        if (rules is null)
+            throw new ConfigException(
+                $"Invalid configuration: exclusions file {path} deserialized to null");
+
+        if (rules.HasNoRules && !rules.AcknowledgeNoExclusions)
+            throw new ConfigException(
+                $"Invalid configuration: exclusions file {path} defines no exclusion rules — the "
+                + "No-MNE gate fails closed. Add exclusion rules, or set acknowledgeNoExclusions:true "
+                + "to intentionally run rule-less.");
+
+        return rules;
     }
 }
 

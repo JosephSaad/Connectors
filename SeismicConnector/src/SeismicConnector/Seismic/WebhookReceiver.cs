@@ -43,15 +43,15 @@ public sealed class WebhookReceiver : IDisposable
     internal const int MaxQueuedEvents = 10_000;
 
     private readonly HttpListener _listener;
-    private readonly SignatureValidator _validator;
+    private readonly WebhookAntiReplay _antiReplay;
     private readonly Thread _thread;
     private readonly ConcurrentQueue<ContentEvent> _events = new();
     private volatile bool _stopped;
 
-    private WebhookReceiver(HttpListener listener, SignatureValidator validator)
+    private WebhookReceiver(HttpListener listener, WebhookAntiReplay antiReplay)
     {
         _listener = listener;
-        _validator = validator;
+        _antiReplay = antiReplay;
         _thread = new Thread(ListenLoop)
         {
             IsBackground = true,
@@ -69,8 +69,13 @@ public sealed class WebhookReceiver : IDisposable
     public static WebhookReceiver? StartIfConfigured(int port) =>
         StartIfConfigured(port, SecretProvider.GetSecret(SecretEnvVar));
 
-    /// <summary>Test/DI seam: start with an explicit secret.</summary>
-    internal static WebhookReceiver? StartIfConfigured(int port, string? secret)
+    /// <summary>Test/DI seam: start with an explicit secret (anti-replay from env).</summary>
+    internal static WebhookReceiver? StartIfConfigured(int port, string? secret) =>
+        StartIfConfigured(port, secret, antiReplay: null);
+
+    /// <summary>Test/DI seam: start with an explicit secret and (optionally) an
+    /// injected anti-replay policy — lets tests drive a deterministic clock.</summary>
+    internal static WebhookReceiver? StartIfConfigured(int port, string? secret, WebhookAntiReplay? antiReplay)
     {
         if (port <= 0)
             return null;
@@ -82,6 +87,7 @@ public sealed class WebhookReceiver : IDisposable
             return null;
         }
         var validator = new SignatureValidator(secret!);
+        antiReplay ??= WebhookAntiReplay.FromEnv(validator);
         foreach (var prefix in new[] { $"http://+:{port}/", $"http://localhost:{port}/" })
         {
             var listener = new HttpListener();
@@ -89,8 +95,11 @@ public sealed class WebhookReceiver : IDisposable
             try
             {
                 listener.Start();
-                Logger.Info($"Seismic webhook receiver listening on {prefix}webhook (HMAC-authenticated)");
-                return new WebhookReceiver(listener, validator);
+                var replayNote = antiReplay.RequireTimestamp
+                    ? $"HMAC + anti-replay (signed timestamp required, {antiReplay.Window.TotalMinutes:F0}-min window)"
+                    : "HMAC (anti-replay in MIGRATION mode — timestamp optional; senders without one have no replay protection)";
+                Logger.Info($"Seismic webhook receiver listening on {prefix}webhook ({replayNote})");
+                return new WebhookReceiver(listener, antiReplay);
             }
             catch (Exception exc)
             {
@@ -220,20 +229,30 @@ public sealed class WebhookReceiver : IDisposable
             return;
         }
 
-        // SECURITY BOUNDARY: validate the signature over the raw body before the
-        // payload is decoded, parsed, or enqueued. Invalid/missing → 401, nothing acted on.
+        // SECURITY BOUNDARY: validate the signature AND anti-replay posture over
+        // the raw body before the payload is decoded, parsed, or enqueued. Any
+        // non-accepted verdict → rejected, nothing acted on.
         var signature = request.Headers[SignatureValidator.DefaultHeader];
-        if (!_validator.IsValid(raw, signature))
+        var timestamp = request.Headers[_antiReplay.TimestampHeader];
+        var verdict = _antiReplay.Check(raw, timestamp, signature);
+        if (verdict != WebhookVerdict.Accepted)
         {
-            // Name the peer so repeated bad-signature sources (misconfigured
-            // sender vs. probing) are attributable from the log alone. The
-            // signature VALUE is never logged.
+            // Name the peer so repeated bad sources (misconfigured sender vs.
+            // probing/replay) are attributable from the log alone. The signature
+            // and timestamp VALUES are never logged.
             Metrics.IncWebhookRejected();
+            var (status, reason) = verdict switch
+            {
+                WebhookVerdict.ReplayDetected => (409, "Replay detected"),
+                WebhookVerdict.StaleTimestamp => (401, "Stale or unparseable timestamp"),
+                WebhookVerdict.MissingTimestamp => (401, "Missing required timestamp"),
+                _ => (401, "Invalid signature"),
+            };
             Logger.Warning(
-                "Webhook receiver: rejected request with invalid/missing signature "
+                $"Webhook receiver: rejected request ({reason.ToLowerInvariant()}) "
                 + $"(remote {request.RemoteEndPoint?.ToString() ?? "unknown"}, "
                 + $"{raw.Length} byte body).");
-            Respond(context, 401, "Invalid signature");
+            Respond(context, status, reason);
             return;
         }
 

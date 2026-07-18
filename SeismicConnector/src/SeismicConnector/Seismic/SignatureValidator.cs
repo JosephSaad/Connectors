@@ -43,6 +43,35 @@ public sealed class SignatureValidator
     }
 
     /// <summary>
+    /// Compute the hex HMAC over the anti-replay signed payload
+    /// <c>timestamp + "." + body</c> — the value a timestamp-aware sender puts in
+    /// the signature header. Binding the timestamp INTO the HMAC means a captured
+    /// request cannot be replayed with a fresh timestamp (that would change the
+    /// signed bytes and break the signature).
+    /// </summary>
+    public string ComputeHex(string timestamp, byte[] body)
+    {
+        using var hmac = new HMACSHA256(_secret);
+        return Convert.ToHexString(hmac.ComputeHash(SignedPayload(timestamp, body))).ToLowerInvariant();
+    }
+
+    /// <summary>Validate <paramref name="providedSignature"/> over the timestamped
+    /// signed payload (<c>timestamp + "." + body</c>). Same encodings / constant-time
+    /// compare as the body-only overload.</summary>
+    public bool IsValid(string timestamp, byte[] body, string? providedSignature) =>
+        IsValid(SignedPayload(timestamp, body), providedSignature);
+
+    /// <summary>The bytes the HMAC covers when a timestamp is bound in: utf8(timestamp + ".") ++ body.</summary>
+    private static byte[] SignedPayload(string timestamp, byte[] body)
+    {
+        var prefix = Encoding.UTF8.GetBytes((timestamp ?? "") + ".");
+        var payload = new byte[prefix.Length + body.Length];
+        Buffer.BlockCopy(prefix, 0, payload, 0, prefix.Length);
+        Buffer.BlockCopy(body, 0, payload, prefix.Length, body.Length);
+        return payload;
+    }
+
+    /// <summary>
     /// True when <paramref name="providedSignature"/> matches the HMAC of
     /// <paramref name="body"/>. Accepts hex (with or without a "sha256=" prefix)
     /// or base64. A null/empty/garbage signature returns false. Constant-time in

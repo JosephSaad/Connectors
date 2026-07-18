@@ -43,6 +43,35 @@ public sealed class SignatureValidator
     }
 
     /// <summary>
+    /// Compute the hex HMAC-SHA256 over the anti-replay canonical message
+    /// "{timestamp}.{body}" — the value a sender puts in the signature header
+    /// when it also sends the timestamp header. Binding the timestamp INTO the
+    /// signature is what makes a stale/forged timestamp detectable.
+    /// </summary>
+    public string ComputeHex(string timestamp, byte[] body)
+    {
+        using var hmac = new HMACSHA256(_secret);
+        return Convert.ToHexString(hmac.ComputeHash(CanonicalMessage(timestamp, body)))
+            .ToLowerInvariant();
+    }
+
+    /// <summary>True when <paramref name="providedSignature"/> matches the HMAC of
+    /// the anti-replay canonical message "{timestamp}.{body}". Same encodings and
+    /// constant-time comparison as the body-only overload.</summary>
+    public bool IsValid(byte[] body, string? providedSignature, string timestamp) =>
+        IsValid(CanonicalMessage(timestamp, body), providedSignature);
+
+    /// <summary>The signed bytes when a timestamp is bound in: timestamp + "." + body.</summary>
+    internal static byte[] CanonicalMessage(string timestamp, byte[] body)
+    {
+        var prefix = Encoding.UTF8.GetBytes(timestamp + ".");
+        var message = new byte[prefix.Length + body.Length];
+        Buffer.BlockCopy(prefix, 0, message, 0, prefix.Length);
+        Buffer.BlockCopy(body, 0, message, prefix.Length, body.Length);
+        return message;
+    }
+
+    /// <summary>
     /// True when <paramref name="providedSignature"/> matches the HMAC of
     /// <paramref name="body"/>. Accepts hex (with or without a "sha256="
     /// prefix) or base64. A null/empty/garbage signature returns false.

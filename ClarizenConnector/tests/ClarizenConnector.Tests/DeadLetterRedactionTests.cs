@@ -47,15 +47,38 @@ public class DeadLetterRedactionTests
     }
 
     [Fact]
-    public void FullMode_Default_KeepsThePayloadVerbatim()
+    public void FullMode_Explicit_KeepsThePayloadVerbatim()
     {
         using var scope = new SyncStateScope();
-        using var env = new EnvScope((DeadLetterRedactor.ModeEnvVar, null));
+        // Full mode is now opt-in (the default is redacted), so pin it explicitly.
+        using var env = new EnvScope((DeadLetterRedactor.ModeEnvVar, "full"));
         AppendSecretFailure();
 
         var entry = Assert.Single(SyncState.ReadFailedRecords(Connector));
         Assert.Equal("Secret plan", entry["request_body"]!["properties"]!["Title"]!.GetValue<string>());
         Assert.NotNull(entry["response_body"]);
+    }
+
+    [Fact]
+    public void DefaultMode_IsRedacted_NoRawValuesOnDisk()
+    {
+        using var scope = new SyncStateScope();
+        // DEADLETTER_PAYLOAD_MODE unset → the shipped default is now REDACTED.
+        using var env = new EnvScope((DeadLetterRedactor.ModeEnvVar, null));
+        Assert.True(DeadLetterRedactor.RedactionEnabled);
+        AppendSecretFailure();
+
+        var entry = Assert.Single(SyncState.ReadFailedRecords(Connector));
+        // Redacted shape: id kept, values hashed, response dropped.
+        Assert.True(entry["request_body"]!["redacted"]!.GetValue<bool>());
+        Assert.StartsWith(
+            "sha256:", entry["request_body"]!["properties"]!["Title"]!.GetValue<string>(),
+            StringComparison.Ordinal);
+        Assert.Null(entry["response_body"]);
+
+        var raw = File.ReadAllText(SyncState.FailedRecordsPath(Connector));
+        Assert.DoesNotContain("Secret plan", raw);
+        Assert.DoesNotContain("123456.78", raw);
     }
 
     [Fact]

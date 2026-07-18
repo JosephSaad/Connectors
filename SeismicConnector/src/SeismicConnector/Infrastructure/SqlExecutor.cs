@@ -167,10 +167,14 @@ public static class SqlExecutor
                 LastSeenUtc    DATETIME2 NOT NULL,
                 Status         NVARCHAR(16) NOT NULL,
                 AclFingerprint NVARCHAR(128) NULL,
+                ClassificationLocked BIT NOT NULL DEFAULT 0,
                 CONSTRAINT PK_TrackedItems PRIMARY KEY (ConnectorId, ItemId));
         IF OBJECT_ID('dbo.TrackedItems', 'U') IS NOT NULL
             AND COL_LENGTH('dbo.TrackedItems', 'AclFingerprint') IS NULL
             ALTER TABLE dbo.TrackedItems ADD AclFingerprint NVARCHAR(128) NULL;
+        IF OBJECT_ID('dbo.TrackedItems', 'U') IS NOT NULL
+            AND COL_LENGTH('dbo.TrackedItems', 'ClassificationLocked') IS NULL
+            ALTER TABLE dbo.TrackedItems ADD ClassificationLocked BIT NOT NULL DEFAULT 0;
         IF OBJECT_ID('dbo.CrawlSessions', 'U') IS NULL
             CREATE TABLE dbo.CrawlSessions (
                 CrawlId     UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,

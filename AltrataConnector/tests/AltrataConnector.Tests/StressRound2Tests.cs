@@ -216,6 +216,7 @@ internal sealed class R2Rig : IDisposable
             Alerts = new Alerting(connectorId),
             Audit = new AuditLog(connectorId, logsDir: Path.Combine(Root, "logs")),
             Erasure = new ErasureLedger(connectorId, logsDir: Path.Combine(Root, "logs")),
+            Decisions = new DecisionLedger(connectorId, logsDir: Path.Combine(Root, "logs")),
             GraphBreaker = new CircuitBreaker("graph", new CircuitBreakerOptions { Enabled = false }),
             ApiBreaker = new CircuitBreaker("api", new CircuitBreakerOptions { Enabled = false }),
         };

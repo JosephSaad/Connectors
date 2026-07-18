@@ -292,6 +292,9 @@ public class LiveDocConfigTests : IDisposable
         Directory.CreateDirectory(_configDir);
         File.WriteAllText(Path.Combine(_configDir, "schema.json"),
             """{"objects":[{"name":"ContentItem","enabled":true},{"name":"Library","enabled":true}]}""");
+        // MNPI fail-closed: AppConfig.Load requires a valid exclusions.json.
+        File.WriteAllText(Path.Combine(_configDir, "exclusions.json"),
+            """{"excludedFlags":["MNE"],"flagProperties":["classification"]}""");
         foreach (var (key, value) in RequiredEnv)
             Environment.SetEnvironmentVariable(key, value);
     }

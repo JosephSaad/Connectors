@@ -41,6 +41,18 @@ public static class EnvFlags
     /// <summary><c>HA_MODE=true</c> — active-active multi-node crawling (requires SQL backend).</summary>
     public static bool HaMode => IsTrue("HA_MODE");
 
-    /// <summary><c>IDENTITY_SYNC_ON_INCREMENTAL=true</c> — identity sync on incremental crawls too.</summary>
-    public static bool IdentitySyncOnIncremental => IsTrue("IDENTITY_SYNC_ON_INCREMENTAL");
+    /// <summary><c>IDENTITY_SYNC_ON_INCREMENTAL</c> — re-sync entitlements on
+    /// incremental crawls too. Default ON (protective: shrinks entitlement lag to
+    /// the incremental cadence); set it to <c>false</c> to skip it. A residual,
+    /// non-real-time lag remains between an entitlement change in Clarizen/Entra
+    /// and the next incremental crawl — schedule a re-ACL sweep on a cadence for
+    /// tighter bounds (docs/DEPLOYMENT_ENTERPRISE.md).</summary>
+    public static bool IdentitySyncOnIncremental
+    {
+        get
+        {
+            var raw = Environment.GetEnvironmentVariable("IDENTITY_SYNC_ON_INCREMENTAL");
+            return string.IsNullOrWhiteSpace(raw) || IsTrue("IDENTITY_SYNC_ON_INCREMENTAL");
+        }
+    }
 }

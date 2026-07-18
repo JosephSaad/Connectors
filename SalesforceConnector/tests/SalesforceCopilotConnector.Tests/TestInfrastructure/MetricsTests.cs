@@ -54,6 +54,34 @@ public sealed class MetricsTests
     }
 
     [Fact]
+    public void ObserveItemAceCountKeepsHighWaterMark()
+    {
+        // #9 — per-item ACE-count metric is a monotonic high-water mark.
+        Metrics.ResetForTests();
+        Assert.Equal(0, Metrics.MaxItemAceCount);
+        Metrics.ObserveItemAceCount(120);
+        Assert.Equal(120, Metrics.MaxItemAceCount);
+        Metrics.ObserveItemAceCount(40);            // lower — does not lower the max
+        Assert.Equal(120, Metrics.MaxItemAceCount);
+        Metrics.ObserveItemAceCount(5000);          // new high
+        Assert.Equal(5000, Metrics.MaxItemAceCount);
+    }
+
+    [Fact]
+    public void HardeningCountersIncrement()
+    {
+        // #9 / #6b / #8 counters.
+        Metrics.ResetForTests();
+        Metrics.IncAclScaleGuardFired();
+        Metrics.IncAclScaleGuardFired();
+        Metrics.IncClassificationAclRestricted();
+        Metrics.IncItemsExpiryStamped(3);
+        Assert.Equal(2, Metrics.AclScaleGuardFiredTotal);
+        Assert.Equal(1, Metrics.ClassificationAclRestrictedTotal);
+        Assert.Equal(3, Metrics.ItemsExpiryStampedTotal);
+    }
+
+    [Fact]
     public void GaugeSetOverwrites()
     {
         Metrics.ResetForTests();
@@ -112,6 +140,10 @@ public sealed class MetricsTests
             ("salesforce_connector_crawls_started_total", "counter"),
             ("salesforce_connector_crawls_completed_total", "counter"),
             ("salesforce_connector_throttled_429_total", "counter"),
+            ("salesforce_connector_acl_scale_guard_fired_total", "counter"),
+            ("salesforce_connector_classification_acl_restricted_total", "counter"),
+            ("salesforce_connector_items_expiry_stamped_total", "counter"),
+            ("salesforce_connector_max_item_ace_count", "gauge"),
             ("salesforce_connector_dead_letter_depth", "gauge"),
             ("salesforce_connector_last_crawl_completed_timestamp_seconds", "gauge"),
             ("salesforce_connector_uptime_seconds", "gauge"),

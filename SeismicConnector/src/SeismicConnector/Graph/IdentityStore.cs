@@ -11,6 +11,7 @@
 // one store — see docs/SQL_CONTRACT.md.
 
 using Microsoft.Data.Sqlite;
+using SeismicConnector.Infrastructure;
 using SeismicConnector.Seismic;
 
 namespace SeismicConnector.Graph;
@@ -33,12 +34,25 @@ public sealed record TrackedItem(
     string Status)              // "ingested" | "excluded"
 {
     /// <summary>
-    /// Fingerprint of the resolved ACL principal set at last (re-)ACL — powers
-    /// permission-change detection (PERMISSION_REACL / the reacl command).
-    /// Null for items tracked before re-ACL support existed; treated as
-    /// "unknown", which forces one re-resolve on the next pass.
+    /// Fingerprint of the ACL principal set ACTUALLY APPLIED at last (re-)ACL —
+    /// powers permission-change detection (PERMISSION_REACL / the reacl command).
+    /// For a classification-locked item this is the fingerprint of the
+    /// enforcement group, NOT the resolved source principals. Null for items
+    /// tracked before re-ACL support existed; treated as "unknown", which forces
+    /// one re-resolve on the next pass.
     /// </summary>
     public string? AclFingerprint { get; init; }
+
+    /// <summary>
+    /// True when this item's Graph ACL was locked to the classification
+    /// enforcement group (CLASSIFICATION_ENFORCE_ACL) because it classified as
+    /// Restricted. The re-ACL path MUST keep such an item locked to that group
+    /// and never re-widen it to the resolved source principals on a
+    /// source-permission drift — otherwise the compliance lock silently leaks.
+    /// The lock is cleared automatically if enforcement is later disabled (the
+    /// item then reverts to its resolved source ACL).
+    /// </summary>
+    public bool ClassificationLocked { get; init; }
 }
 
 public interface IIdentityStore : IDisposable
@@ -72,7 +86,9 @@ public static class IdentityStoreFactory
         {
             return new SqlServerIdentityStore(connectorId);
         }
-        Directory.CreateDirectory(DataDir);
+        // Owner-only: the identity store holds Seismic→Entra principal mappings
+        // and the tracked-item table (item ids + version/ACL fingerprints).
+        SecureDirectory.EnsureHardened(DataDir);
         return new SqliteIdentityStore(Path.Combine(DataDir, $"{connectorId}_identity.db"));
     }
 }
@@ -112,27 +128,31 @@ public sealed class SqliteIdentityStore : IIdentityStore
                 expires_at      TEXT,
                 last_seen       TEXT NOT NULL,
                 status          TEXT NOT NULL,
-                acl_fingerprint TEXT
+                acl_fingerprint TEXT,
+                classification_locked INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS ix_tracked_items_teamsite ON tracked_items(teamsite_id);
             """;
         cmd.ExecuteNonQuery();
-        MigrateAclFingerprintColumn();
+        MigrateColumn("acl_fingerprint", "ALTER TABLE tracked_items ADD COLUMN acl_fingerprint TEXT");
+        MigrateColumn("classification_locked",
+            "ALTER TABLE tracked_items ADD COLUMN classification_locked INTEGER NOT NULL DEFAULT 0");
     }
 
-    /// <summary>Add the acl_fingerprint column to tracked_items opened from an older DB.</summary>
-    private void MigrateAclFingerprintColumn()
+    /// <summary>Add a column to tracked_items opened from an older DB (idempotent).</summary>
+    private void MigrateColumn(string column, string alterSql)
     {
         bool hasColumn;
         using (var probe = _connection.CreateCommand())
         {
-            probe.CommandText = "SELECT COUNT(*) FROM pragma_table_info('tracked_items') WHERE name = 'acl_fingerprint'";
+            probe.CommandText = "SELECT COUNT(*) FROM pragma_table_info('tracked_items') WHERE name = $c";
+            probe.Parameters.AddWithValue("$c", column);
             hasColumn = Convert.ToInt64(probe.ExecuteScalar()) > 0;
         }
         if (hasColumn)
             return;
         using var alter = _connection.CreateCommand();
-        alter.CommandText = "ALTER TABLE tracked_items ADD COLUMN acl_fingerprint TEXT";
+        alter.CommandText = alterSql;
         alter.ExecuteNonQuery();
     }
 
@@ -218,15 +238,16 @@ public sealed class SqliteIdentityStore : IIdentityStore
         {
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
-                INSERT INTO tracked_items (item_id, version_id, teamsite_id, expires_at, last_seen, status, acl_fingerprint)
-                VALUES ($id, $version, $teamsite, $expires, $seen, $status, $acl)
+                INSERT INTO tracked_items (item_id, version_id, teamsite_id, expires_at, last_seen, status, acl_fingerprint, classification_locked)
+                VALUES ($id, $version, $teamsite, $expires, $seen, $status, $acl, $locked)
                 ON CONFLICT(item_id) DO UPDATE SET
                     version_id      = excluded.version_id,
                     teamsite_id     = excluded.teamsite_id,
                     expires_at      = excluded.expires_at,
                     last_seen       = excluded.last_seen,
                     status          = excluded.status,
-                    acl_fingerprint = excluded.acl_fingerprint;
+                    acl_fingerprint = excluded.acl_fingerprint,
+                    classification_locked = excluded.classification_locked;
                 """;
             cmd.Parameters.AddWithValue("$id", item.ItemId);
             cmd.Parameters.AddWithValue("$version", item.VersionId);
@@ -235,6 +256,7 @@ public sealed class SqliteIdentityStore : IIdentityStore
             cmd.Parameters.AddWithValue("$seen", item.LastSeenUtc.ToString("o"));
             cmd.Parameters.AddWithValue("$status", item.Status);
             cmd.Parameters.AddWithValue("$acl", (object?)item.AclFingerprint ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$locked", item.ClassificationLocked ? 1 : 0);
             cmd.ExecuteNonQuery();
         }
     }
@@ -275,7 +297,7 @@ public sealed class SqliteIdentityStore : IIdentityStore
     }
 
     private const string SelectTracked =
-        "SELECT item_id, version_id, teamsite_id, expires_at, last_seen, status, acl_fingerprint FROM tracked_items";
+        "SELECT item_id, version_id, teamsite_id, expires_at, last_seen, status, acl_fingerprint, classification_locked FROM tracked_items";
 
     private IReadOnlyList<TrackedItem> QueryTracked(string sql, Action<SqliteCommand>? bind)
     {
@@ -303,6 +325,7 @@ public sealed class SqliteIdentityStore : IIdentityStore
         reader.GetString(5))
     {
         AclFingerprint = reader.IsDBNull(6) ? null : reader.GetString(6),
+        ClassificationLocked = !reader.IsDBNull(7) && reader.GetInt64(7) != 0,
     };
 
     public void Dispose()

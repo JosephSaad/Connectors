@@ -15,9 +15,19 @@ namespace SeismicConnector.Tests;
 // never run in parallel — prevents ephemeral-port/listener contention that made
 // the full suite non-deterministic.
 [Collection("LoopbackWebhook")]
-public class WebhookReceiverTests
+public class WebhookReceiverTests : IDisposable
 {
     private const string Secret = "s3cr3t-shared-key";
+
+    // These end-to-end tests exercise the legacy body-only HMAC path (senders
+    // that do not yet send a signed timestamp). Anti-replay now DEFAULTS to
+    // requiring a timestamp, so run them in MIGRATION mode; the timestamp/replay
+    // behaviour has its own dedicated coverage (WebhookAntiReplayTests).
+    public WebhookReceiverTests() =>
+        Environment.SetEnvironmentVariable(WebhookAntiReplay.RequireTimestampEnvVar, "false");
+
+    public void Dispose() =>
+        Environment.SetEnvironmentVariable(WebhookAntiReplay.RequireTimestampEnvVar, null);
 
     // ── SignatureValidator ─────────────────────────────────────────────────────
 

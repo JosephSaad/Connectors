@@ -183,4 +183,36 @@ public class ItemConverterTests
         // Object-with-name flattens to the name (reference-shaped columns).
         Assert.Equal("Active", record.GetString("status"));
     }
+
+    // Stale-index expiry (#8, GRAPH_ITEM_TTL_DAYS).
+
+    [Fact]
+    public void Convert_NoTtlConfigured_LeavesExpirationUnset()
+    {
+        var converter = new ItemConverter(TestConfig.Make());  // graphItemTtlDays: 0
+        var item = converter.Convert(Record(), OpportunityConfig(), DefaultAcl);
+
+        Assert.Null(item.ExpirationDateTime);
+        Assert.Null(item.ToJson()["expirationDateTime"]);
+    }
+
+    [Fact]
+    public void Convert_TtlConfigured_StampsExpirationDateTime()
+    {
+        var before = DateTime.UtcNow;
+        var converter = new ItemConverter(TestConfig.Make(graphItemTtlDays: 30));
+        var item = converter.Convert(Record(), OpportunityConfig(), DefaultAcl);
+
+        Assert.NotNull(item.ExpirationDateTime);
+        var expiry = item.ExpirationDateTime!.Value;
+        // now + 30d, allowing a small window for test execution time.
+        Assert.InRange(
+            expiry,
+            before.AddDays(30).AddMinutes(-1),
+            DateTime.UtcNow.AddDays(30).AddMinutes(1));
+
+        // ...and it serializes as ISO-8601 on the externalItem payload.
+        var iso = item.ToJson()["expirationDateTime"]!.GetValue<string>();
+        Assert.Equal(expiry.ToUniversalTime(), DateTimeOffset.Parse(iso).UtcDateTime, TimeSpan.FromSeconds(1));
+    }
 }

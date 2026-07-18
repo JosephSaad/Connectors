@@ -79,7 +79,12 @@ public static class Logging
             {
                 var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 var dir = Path.Combine(LogsRoot, $"{prefix}_{stamp}");
-                Directory.CreateDirectory(dir);
+                // Owner-only permissions on the logs root and this run's
+                // directory (POSIX 0700 / best-effort Windows ACLs). Run logs
+                // hold PII-safe-but-still-sensitive operational detail; never
+                // fatal (see DirectoryHardening).
+                DirectoryHardening.EnsureSecureDirectory(LogsRoot);
+                DirectoryHardening.EnsureSecureDirectory(dir);
                 _runDirectory = dir;
                 _fileWriter = new StreamWriter(
                     new FileStream(Path.Combine(dir, "connector.log"),

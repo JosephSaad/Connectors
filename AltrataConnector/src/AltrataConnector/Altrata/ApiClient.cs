@@ -73,6 +73,7 @@ public sealed class AltrataApiClient
     private readonly HttpClient _http;
     private readonly IStateStore _state;
     private readonly IAuditLog _audit;
+    private readonly IPurposePolicy _purpose;
     private readonly RateLimiter _rateLimiter;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly Func<DateTime> _clock;
@@ -88,11 +89,15 @@ public sealed class AltrataApiClient
         HttpMessageHandler? handler = null,
         Func<TimeSpan, CancellationToken, Task>? delay = null,
         Func<DateTime>? clock = null,
-        CircuitBreaker? breaker = null)
+        CircuitBreaker? breaker = null,
+        IPurposePolicy? purpose = null)
     {
         _config = config;
         _state = state;
         _audit = audit;
+        // Purpose-based authorization (#7). Null → read PURPOSE_ALLOWLIST from
+        // the environment (unset = record-only, enforcement off).
+        _purpose = purpose ?? PurposePolicy.FromEnv();
         // Injected handler = tests; otherwise the enterprise connectivity
         // handler (PROXY_URL / PROXY_BYPASS / CA_BUNDLE_PATH).
         _http = handler == null
@@ -158,6 +163,32 @@ public sealed class AltrataApiClient
                 "Altrata API not configured: set ALTRATA_API_BASE_URL, ALTRATA_TOKEN_URL, " +
                 "ALTRATA_CLIENT_ID and SECRET_ALTRATA_CLIENT_SECRET.");
 
+        // Purpose-based authorization / per-action veto (#7) — BEFORE any
+        // billable/sensitive work. When PURPOSE_ALLOWLIST is configured a
+        // disallowed purpose is DENIED fail-closed and audited; when unset the
+        // purpose is recorded only (back-compat) and the off posture is logged.
+        var decision = _purpose.Evaluate(actor, purpose);
+        if (_purpose.Enforcing && !decision.Allowed)
+        {
+            _audit.Append(new AuditEntry
+            {
+                Actor = actor,
+                Action = "api_lookup",
+                AltrataId = altrataId,
+                Purpose = purpose,
+                Billable = false,
+                Decision = "deny",
+            });
+            Metrics.Increment("altrata_purpose_denied_total");
+            Logger.Warning($"Purpose '{purpose}' by actor '{actor}' DENIED for lookup {altrataId} " +
+                           $"({decision.Reason}) — not in PURPOSE_ALLOWLIST; fail-closed, no billable call made.");
+            throw new PurposeDeniedException(
+                $"Purpose '{purpose}' is not permitted (actor '{actor}', {decision.Reason}). " +
+                "Set PURPOSE_ALLOWLIST to include it, or use an approved purpose.");
+        }
+        if (!_purpose.Enforcing)
+            Logger.Info("Purpose enforcement OFF (PURPOSE_ALLOWLIST unset) — recording purpose only.");
+
         // Span the billable enrichment lookup. PII CAUTION: tag only the opaque
         // subject id — never the profile response (name/email/wealth).
         using var span = Telemetry.Span("api.lookup", ActivityKind.Client);
@@ -196,6 +227,7 @@ public sealed class AltrataApiClient
             AltrataId = altrataId,
             Purpose = purpose,
             Billable = true,
+            Decision = "allow",
         });
         Logger.Info($"Billable Altrata lookup #{total}: person {altrataId} (purpose: {purpose})");
 

@@ -52,6 +52,9 @@ public class DeadLetterTests
     public void Append_IncludesRequestAndResponseBodies()
     {
         using var scope = new SyncStateScope();
+        // This test asserts VERBATIM request/response bodies, so it pins full
+        // mode explicitly — the shipped default is now redacted.
+        using var env = new EnvScope(("DEADLETTER_PAYLOAD_MODE", "full"));
         var request = new Dictionary<string, JsonNode?>
         {
             ["Task_9"] = new JsonObject { ["id"] = "Task_9", ["properties"] = new JsonObject() },

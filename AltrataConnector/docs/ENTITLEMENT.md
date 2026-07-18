@@ -47,6 +47,22 @@ item and in the state store. On every crawl / `seat-sync`:
 `altrata_seat_count` and `altrata_reacl_passes_total` surface this on
 `/metrics`.
 
+### Entitlement freshness — `IDENTITY_SYNC_ON_INCREMENTAL` (default true)
+
+Seats are re-read on **every** crawl (full and incremental), so newly ingested
+items always carry the current ACL and a seat change is *detected* each crawl.
+`IDENTITY_SYNC_ON_INCREMENTAL` (default `true`) additionally runs the re-ACL
+**sweep over existing items** on incremental crawls, so a seat change is
+enforced at the incremental cadence rather than only on full crawls. Set it
+`false` to defer the (potentially large) sweep to full crawls only.
+
+**Residual lag is non-real-time.** A mid-cycle seat removal is enforced at the
+**next** crawl, not instantly. Operationally: schedule incrementals frequently
+(e.g. `ingest --incremental` hourly, or a dedicated `seat-sync` cadence) so the
+worst-case exposure of a de-provisioned seat is bounded by that interval. For
+hard, immediate cut-off of the most sensitive tier, combine with
+`CLASSIFICATION_ENFORCE_ACL` (top-tier items locked to a small reviewer group).
+
 ## PII posture
 
 * Every item carries `piiClassification` — the HIGHEST personal-data label for

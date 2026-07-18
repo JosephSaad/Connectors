@@ -52,7 +52,10 @@ public static class CommandRegistry
     static CommandRegistry()
     {
         LogsDir = Path.GetFullPath("logs");
-        Directory.CreateDirectory(LogsDir);
+        // #3: owner-only (POSIX 0700 / Windows owner+admins) — this is the startup
+        // creation of the logs/state/dead-letter root. HardenExisting re-stamps a
+        // directory left over from an earlier un-hardened run too. Never throws.
+        SecureDirectory.HardenExisting(LogsDir);
     }
 
     private static readonly List<(LogHandler Handler, int Level)> ConsoleHandlers = new();

@@ -35,6 +35,7 @@ public static class Deploy
                 await identity.RunAsync(persist: true, ct: ServiceStop.Token);
                 using var report = runtime.OpenReport(logFile);
                 using var manifest = runtime.OpenManifest(logFile);
+                using var ledger = runtime.OpenLedger(logFile);
                 var ok = await RunCrawlCycleAsync(runtime, fullCrawl: true);
                 report.Finish();
                 manifest.Finish();
@@ -108,6 +109,7 @@ public static class Deploy
 
                 using (var report = runtime.OpenReport(logFile))
                 using (var manifest = runtime.OpenManifest(logFile))
+                using (var ledger = runtime.OpenLedger(logFile))
                 {
                     var ok = await RunCrawlCycleAsync(runtime, fullCrawl: isFull);
                     report.Finish();
@@ -200,6 +202,7 @@ public static class Deploy
                     stats: runtime.Pipeline.Stats)
                 {
                     Report = runtime.Pipeline.Report,
+                    Ledger = runtime.Pipeline.Ledger,
                 };
                 foreach (var objectType in shard.ObjectTypes)
                 {

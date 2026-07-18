@@ -97,7 +97,10 @@ public static class TestConfig
         long maxFileBytes = 1024L * 1024 * 1024,
         bool allowFullScan = false,
         bool classification = false,
-        bool classificationManifest = false) => new()
+        bool classificationManifest = false,
+        bool classificationEnforceAcl = false,
+        string? classificationRestrictedGroupId = null,
+        int graphItemTtlDays = 0) => new()
     {
         ConnectorId = connectorId,
         ConnectorName = "BDH Hadoop Data Mart",
@@ -120,6 +123,9 @@ public static class TestConfig
         GraphBatchSize = graphBatchSize,
         Classification = classification,
         ClassificationManifest = classificationManifest,
+        ClassificationEnforceAcl = classificationEnforceAcl,
+        ClassificationRestrictedGroupId = classificationRestrictedGroupId,
+        GraphItemTtlDays = graphItemTtlDays,
     };
 }
 

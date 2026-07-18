@@ -90,6 +90,7 @@ IF OBJECT_ID('dbo.TrackedItems', 'U') IS NULL
         LastSeenUtc    DATETIME2 NOT NULL,
         Status         NVARCHAR(16) NOT NULL,
         AclFingerprint NVARCHAR(128) NULL,
+        ClassificationLocked BIT NOT NULL DEFAULT 0,
         CONSTRAINT PK_TrackedItems PRIMARY KEY (ConnectorId, ItemId));
 GO
 
@@ -98,6 +99,14 @@ GO
 IF OBJECT_ID('dbo.TrackedItems', 'U') IS NOT NULL
     AND COL_LENGTH('dbo.TrackedItems', 'AclFingerprint') IS NULL
     ALTER TABLE dbo.TrackedItems ADD AclFingerprint NVARCHAR(128) NULL;
+GO
+
+-- Classification ACL-lock (CLASSIFICATION_ENFORCE_ACL): remembers that an item
+-- was locked to the enforcement group so the re-ACL sweep never re-widens it to
+-- the resolved source principals. Idempotent — guarded by COL_LENGTH.
+IF OBJECT_ID('dbo.TrackedItems', 'U') IS NOT NULL
+    AND COL_LENGTH('dbo.TrackedItems', 'ClassificationLocked') IS NULL
+    ALTER TABLE dbo.TrackedItems ADD ClassificationLocked BIT NOT NULL DEFAULT 0;
 GO
 
 -- ── HA crawl sessions (close-with-failed-claims semantics, docs/HA.md) ───────

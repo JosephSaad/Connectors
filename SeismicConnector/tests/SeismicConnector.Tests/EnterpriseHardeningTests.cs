@@ -605,8 +605,11 @@ public class DeadLetterRedactionTests : IDisposable
     };
 
     [Fact]
-    public void FullMode_Default_StoresPayloadVerbatim()
+    public void FullMode_Explicit_StoresPayloadVerbatim()
     {
+        // Full mode is now OPT-IN (the shipped default is redacted); set it
+        // explicitly to exercise the verbatim round-trip.
+        Environment.SetEnvironmentVariable(SyncState.PayloadModeEnvVar, "full");
         using var state = new TempStateDir();
         SyncState.AppendFailedRecords(
             SyncState.FailedRecordsPath("RedactTest"),
@@ -619,6 +622,35 @@ public class DeadLetterRedactionTests : IDisposable
             "TOP SECRET CONTENT BODY",
             record["request_body"]!["content"]!["value"]!.GetValue<string>());
         Assert.Equal("FY26 pricing deck", record["request_body"]!["properties"]!["title"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void DefaultMode_IsRedacted_NoRawValuesOnDisk()
+    {
+        // NEW shipped default: with DEADLETTER_PAYLOAD_MODE unset, payloads are
+        // redacted — no raw indexed content / property values ever hit disk.
+        Environment.SetEnvironmentVariable(SyncState.PayloadModeEnvVar, null);
+        using var state = new TempStateDir();
+        var path = SyncState.FailedRecordsPath("RedactTest");
+        SyncState.AppendFailedRecords(
+            path,
+            new[] { ("c1", "HTTP 503") },
+            "ContentItem",
+            requestBodies: new Dictionary<string, JsonNode?> { ["c1"] = ExternalItemBody() });
+
+        // Nothing sensitive survives verbatim anywhere in the raw file.
+        var raw = File.ReadAllText(path);
+        Assert.DoesNotContain("TOP SECRET CONTENT BODY", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("FY26 pricing deck", raw, StringComparison.Ordinal);
+
+        var record = Assert.Single(SyncState.ReadFailedRecords("RedactTest"));
+        Assert.StartsWith(
+            "[redacted sha256=",
+            record["request_body"]!["content"]!["value"]!.GetValue<string>(),
+            StringComparison.Ordinal);
+        // Retry inputs + identifiers still survive redaction.
+        Assert.Equal("c1", record["item_id"]!.GetValue<string>());
+        Assert.Equal("ts1", record["request_body"]!["properties"]!["teamsiteId"]!.GetValue<string>());
     }
 
     [Fact]

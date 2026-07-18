@@ -46,6 +46,13 @@ public sealed record ExternalItem
 
     [JsonPropertyName("content")]
     public ExternalItemContent Content { get; init; } = new();
+
+    /// <summary>Optional stale-index expiry (GRAPH_ITEM_TTL_DAYS, #8): when set,
+    /// the item self-expires at this instant so the index drains if crawling
+    /// stops (defense after an outage). Null (default) = no expiry; omitted from
+    /// the wire when null, so it is fully back-compatible.</summary>
+    [JsonPropertyName("expirationDateTime")]
+    public DateTime? ExpirationDateTime { get; init; }
 }
 
 /// <summary>Schema property definition (config/graph-schema.json shape).</summary>

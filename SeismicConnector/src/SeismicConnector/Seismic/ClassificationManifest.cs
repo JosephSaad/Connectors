@@ -1,12 +1,14 @@
 // Seismic/ClassificationManifest.cs
 // ---------------------------------
-// Optional Purview-aligned classification export (CLASSIFICATION_MANIFEST=true).
+// Optional classification export (CLASSIFICATION_MANIFEST=true).
 //
 // Writes a per-crawl JSONL manifest of every classified item — item id →
-// sensitivity label + detected categories — plus a trailing summary object
-// with per-label and per-category counts. File-based, exactly like the
+// sensitivity TAG + detected categories — plus a trailing summary object with
+// per-label and per-category counts. File-based, exactly like the
 // reconciliation/drift/reacl reports; a downstream catalog/DLP job can pick it
-// up. There is NO live Purview API call.
+// up. The tag is an ADVISORY connector-applied classification (Purview-aligned
+// in NAMING only) — NOT a Purview-enforced sensitivity label. There is NO live
+// Purview API call.
 
 using System.Globalization;
 using System.Text;

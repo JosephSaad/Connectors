@@ -117,6 +117,8 @@ public class ThroughputKnobTests : IDisposable
         "GRAPH_BATCH_WORKERS", "GRAPH_CONCURRENT_BATCHES",
         "INGEST_GRAPH_BATCH_SIZE", "GRAPH_BATCH_SIZE",
         "GRAPH_MAX_RETRIES", "GRAPH_RETRY_BACKOFF_BASE",
+        "DEADLETTER_PAYLOAD_MODE", "GRAPH_ITEM_TTL_DAYS",
+        "CLASSIFICATION_ENFORCE_ACL", "CLASSIFICATION_ENFORCE_GROUP",
     };
 
     public ThroughputKnobTests()
@@ -124,6 +126,9 @@ public class ThroughputKnobTests : IDisposable
         Directory.CreateDirectory(_configDir);
         File.WriteAllText(Path.Combine(_configDir, "schema.json"),
             """{"objects":[{"name":"ContentItem","enabled":true},{"name":"Library","enabled":true}]}""");
+        // MNPI fail-closed: AppConfig.Load requires a valid exclusions.json.
+        File.WriteAllText(Path.Combine(_configDir, "exclusions.json"),
+            """{"excludedFlags":["MNE"],"flagProperties":["classification"]}""");
         foreach (var (key, value) in RequiredEnv)
             Environment.SetEnvironmentVariable(key, value);
     }
@@ -186,6 +191,50 @@ public class ThroughputKnobTests : IDisposable
         Environment.SetEnvironmentVariable("GRAPH_BATCH_SIZE", "10");
         Environment.SetEnvironmentVariable("INGEST_GRAPH_BATCH_SIZE", "15");
         Assert.Equal(15, Load().Ingest.GraphBatchSize);
+    }
+
+    [Fact]
+    public void DeadLetterMode_UnrecognizedValue_FailsAtLoad()
+    {
+        Environment.SetEnvironmentVariable("DEADLETTER_PAYLOAD_MODE", "redact");  // typo
+        var ex = Assert.Throws<ConfigException>(() => Load());
+        Assert.Contains("DEADLETTER_PAYLOAD_MODE", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("full")]
+    [InlineData("redacted")]
+    [InlineData("REDACTED")]
+    public void DeadLetterMode_RecognizedValues_LoadOk(string mode)
+    {
+        Environment.SetEnvironmentVariable("DEADLETTER_PAYLOAD_MODE", mode);
+        _ = Load();  // must not throw
+    }
+
+    [Fact]
+    public void GraphItemTtlDays_ParsedFromEnv()
+    {
+        Assert.Equal(0, Load().Seismic.GraphItemTtlDays);   // default unset
+        Environment.SetEnvironmentVariable("GRAPH_ITEM_TTL_DAYS", "30");
+        Assert.Equal(30, Load().Seismic.GraphItemTtlDays);
+    }
+
+    [Fact]
+    public void ClassificationEnforceAcl_WithoutGroup_FailsAtLoad()
+    {
+        Environment.SetEnvironmentVariable("CLASSIFICATION_ENFORCE_ACL", "true");
+        var ex = Assert.Throws<ConfigException>(() => Load());
+        Assert.Contains("CLASSIFICATION_ENFORCE_GROUP", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ClassificationEnforceAcl_WithGroup_LoadsAndCarriesSettings()
+    {
+        Environment.SetEnvironmentVariable("CLASSIFICATION_ENFORCE_ACL", "true");
+        Environment.SetEnvironmentVariable("CLASSIFICATION_ENFORCE_GROUP", "entra-group-1");
+        var config = Load();
+        Assert.True(config.Seismic.ClassificationEnforceAcl);
+        Assert.Equal("entra-group-1", config.Seismic.ClassificationEnforceGroup);
     }
 
     [Fact]
@@ -567,6 +616,12 @@ public class DeadLetterConcurrencyTests
     [Fact]
     public void ManyConcurrentWriters_NoInterleavedOrTornLines()
     {
+        // This test asserts request bodies survive VERBATIM (payload length
+        // preserved), so it pins full mode explicitly now that the shipped
+        // default is redacted.
+        Environment.SetEnvironmentVariable(SyncState.PayloadModeEnvVar, "full");
+        try
+        {
         using var state = new TempStateDir();
         var path = SyncState.FailedRecordsPath("Conn");
         const int writers = 8;
@@ -604,6 +659,11 @@ public class DeadLetterConcurrencyTests
         // Invariant 3: request bodies survived intact (payload length preserved).
         Assert.All(records, r =>
             Assert.Equal(300, r["request_body"]!["content"]!["value"]!.GetValue<string>().Length));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(SyncState.PayloadModeEnvVar, null);
+        }
     }
 
     [Fact]

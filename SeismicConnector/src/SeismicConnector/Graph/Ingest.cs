@@ -189,6 +189,13 @@ public sealed class IngestPipeline
     /// <summary>Classification manifest for the current crawl (swapped per run when export is on).</summary>
     public ClassificationManifest Manifest { get; set; } = new();
 
+    /// <summary>
+    /// Append-only, hash-chained audit ledger of compliance DECISIONS (No-MNE
+    /// exclusions + classification ACL restrictions). Swapped per run when
+    /// DECISION_LEDGER=true; a no-op in-memory ledger otherwise.
+    /// </summary>
+    public DecisionLedger Ledger { get; set; } = new();
+
     /// <summary>Current phase, surfaced on the dashboard.</summary>
     public volatile string Phase = "idle";
 
@@ -210,7 +217,7 @@ public sealed class IngestPipeline
         _store = store;
         _filter = filter ?? new ExclusionFilter(config.Exclusions);
         _aclMapper = aclMapper ?? new AclMapper(store, config.Seismic.FallbackAcl, config.Graph.TenantId);
-        _transformer = transformer ?? new ItemTransformer();
+        _transformer = transformer ?? new ItemTransformer(ttlDays: config.Seismic.GraphItemTtlDays);
         _ha = ha ?? new HaCoordinator(config.Connector.Id);
         _classifier = config.Seismic.Classification ? new ContentClassifier(config.Classification) : null;
         _concurrency = new AdaptiveConcurrency(config.Ingest.BatchWorkers);
@@ -231,6 +238,15 @@ public sealed class IngestPipeline
     /// consumed in SendOneBatchAsync.
     /// </summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _pendingFingerprints =
+        new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// contentId → true when this item was ACL-locked to the classification
+    /// enforcement group in ClassifyItem (CLASSIFICATION_ENFORCE_ACL). Consumed
+    /// in SendOneBatchAsync so the persisted tracked item remembers the lock and
+    /// the re-ACL sweep never re-widens it to source principals.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _pendingLocked =
         new(StringComparer.Ordinal);
 
     /// <summary>Set once a critical breaker is seen open during a crawl (degraded pause).</summary>
@@ -270,6 +286,7 @@ public sealed class IngestPipeline
     {
         Metrics.IncCrawlsStarted();
         _pendingFingerprints.Clear();
+        _pendingLocked.Clear();
         _degradedPause = false;
         var crawlStartUtc = DateTime.UtcNow;
         var since = fullCrawl ? (DateTime?)null : SyncState.ReadLastSync(ConnectorId);
@@ -744,6 +761,7 @@ public sealed class IngestPipeline
         {
             Stats.AddExcluded();
             Report.RecordExcluded(content.Id, content.TeamsiteId, decision.Rule!, decision.Reason!);
+            Ledger.Append(content.Id, DecisionLedger.DecisionExclude, $"{decision.Rule}: {decision.Reason}");
             Logger.Info($"EXCLUDED {content.Id} ({decision.Rule}): {decision.Reason}");
             if (tracked?.Status == "ingested")
             {
@@ -882,17 +900,25 @@ public sealed class IngestPipeline
         transformSpan?.SetTag("seismic.content_id", content.Id);
         var item = _transformer.Transform(content, teamsite, payload, acl, usage, liveDocFields);
 
-        // Data classification & sensitivity labeling (CLASSIFICATION): runs over
+        // Data classification & sensitivity TAGGING (CLASSIFICATION): runs over
         // the FINAL indexed text and folds the item's distribution restriction
-        // into a unified taxonomy label. Only ever applied to content that IS
-        // ingested — the No-MNE exclusion above already dropped excluded items.
+        // into a unified taxonomy tag. The tag is ADVISORY (a connector-applied
+        // classification, NOT a Purview-enforced label). Only ever applied to
+        // content that IS ingested — the No-MNE exclusion above already dropped
+        // excluded items.
         if (_classifier is not null)
             ClassifyItem(content, item);
 
         return (content.Id, item);
     }
 
-    /// <summary>Classify one prepared item and stamp the sensitivity properties + metrics/manifest.</summary>
+    /// <summary>
+    /// Classify one prepared item and stamp the advisory sensitivity properties
+    /// + metrics/manifest. When CLASSIFICATION_ENFORCE_ACL is on, a top-tier
+    /// (Restricted) tag additionally RESTRICTS the item's Graph ACL to the
+    /// configured Entra group (advisory tag → real access control) and records
+    /// the restriction in the decision ledger.
+    /// </summary>
     private void ClassifyItem(SeismicContent content, JsonNode item)
     {
         using var span = Tracing.StartActivity("item.classify");
@@ -908,7 +934,38 @@ public sealed class IngestPipeline
         span?.SetTag("classification.category_count", result.Categories.Count);
         Metrics.RecordClassification(result.Label.ToString().ToLowerInvariant(), result.Categories);
         Manifest.RecordItem(content.Id, content.TeamsiteId, result.Label, result.Categories);
+
+        // Optional enforcement (default OFF): lock a Restricted item down to the
+        // configured Entra group at the Graph ACL. Config load guarantees the
+        // group is present whenever the flag is on.
+        if (_config.Seismic.ClassificationEnforceAcl
+            && result.Label == SensitivityLabel.Restricted
+            && !string.IsNullOrWhiteSpace(_config.Seismic.ClassificationEnforceGroup))
+        {
+            var group = _config.Seismic.ClassificationEnforceGroup!;
+            var enforced = EnforcedGroupAcl(group);
+            item["acl"] = enforced.ToJsonArray();
+            // Persist the APPLIED (group) fingerprint and mark the item locked so
+            // the tracked-item upsert after $batch records both. The re-ACL sweep
+            // then keeps the item locked to the group instead of re-widening it to
+            // the resolved source principals on a later source-permission drift.
+            _pendingFingerprints[content.Id] = enforced.Fingerprint();
+            _pendingLocked[content.Id] = true;
+            Ledger.Append(
+                content.Id,
+                DecisionLedger.DecisionAclRestrict,
+                $"classification={result.Label}; ACL restricted to Entra group {group}");
+            span?.SetTag("classification.acl_restricted", true);
+            Logger.Info(
+                $"ACL-RESTRICT {content.Id}: Restricted tag → ACL locked to Entra group {group} "
+                + "(CLASSIFICATION_ENFORCE_ACL).");
+        }
     }
+
+    /// <summary>The single-group ACL a classification-locked (Restricted) item is
+    /// restricted to under CLASSIFICATION_ENFORCE_ACL.</summary>
+    private static AclResult EnforcedGroupAcl(string group) =>
+        new(new[] { AclEntry.GrantGroup(group) }, UnmappedPrincipals: 0, Skipped: false);
 
     /// <summary>
     /// PUT a prepared batch through the $batch retry ladder, dispatching
@@ -1010,11 +1067,13 @@ public sealed class IngestPipeline
                 if (contentById is not null && contentById.TryGetValue(result.ItemId, out var content))
                 {
                     _pendingFingerprints.TryRemove(content.Id, out var fingerprint);
+                    _pendingLocked.TryRemove(content.Id, out var locked);
                     _store.UpsertTrackedItem(new TrackedItem(
                         content.Id, content.CurrentVersionId, content.TeamsiteId,
                         content.ExpiresAt?.ToUniversalTime(), nowUtc, "ingested")
                     {
                         AclFingerprint = fingerprint,
+                        ClassificationLocked = locked,
                     });
                 }
             }
@@ -1271,6 +1330,21 @@ public sealed class IngestPipeline
         SeismicContent content, SeismicTeamsite? teamsite, TrackedItem tracked, DateTime nowUtc,
         bool repair, CancellationToken ct)
     {
+        // Classification lock (CLASSIFICATION_ENFORCE_ACL): an item that
+        // classified as Restricted was locked to the enforcement group at ingest.
+        // Re-ACL resolves the SOURCE principal set; applying it here would
+        // silently RE-WIDEN a compliance-locked item on a source-permission
+        // drift. Keep it locked to the group and never PATCH it to source — the
+        // lock is the whole point of the control. (Content changes that alter the
+        // classification are re-evaluated on the full-crawl transform path, which
+        // resets the lock; re-ACL only touches unchanged content.)
+        if (tracked.ClassificationLocked
+            && _config.Seismic.ClassificationEnforceAcl
+            && !string.IsNullOrWhiteSpace(_config.Seismic.ClassificationEnforceGroup))
+        {
+            return await ReAclLockedAsync(content, tracked, nowUtc, repair, ct).ConfigureAwait(false);
+        }
+
         var acl = _aclMapper.Resolve(content.Permissions, teamsite?.Permissions);
         if (acl.Skipped || acl.Unresolved)
         {
@@ -1314,6 +1388,10 @@ public sealed class IngestPipeline
                 {
                     AclFingerprint = fingerprint,
                     LastSeenUtc = nowUtc,
+                    // Reaching the source-based path means the item is NOT
+                    // classification-locked (or enforcement was disabled); clear
+                    // any stale lock so state matches the applied source ACL.
+                    ClassificationLocked = false,
                 });
             }
             catch (GraphApiError ex)
@@ -1336,6 +1414,78 @@ public sealed class IngestPipeline
         {
             // Audit-only (dry run): still bump last-seen so the item isn't reaped.
             _store.UpsertTrackedItem(tracked with { LastSeenUtc = nowUtc });
+        }
+
+        return isBaseline ? ReAclOutcome.Baseline : ReAclOutcome.Drifted;
+    }
+
+    /// <summary>
+    /// Re-ACL path for a classification-locked item: the target ACL is ALWAYS the
+    /// enforcement group, never the resolved source principals — so a
+    /// source-permission drift can never re-widen a Restricted item. The stored
+    /// fingerprint is the group's, so a matching lock is a no-op; a mismatch means
+    /// the enforcement group was reconfigured, which we re-apply (and ledger) —
+    /// still a lock, never a widen.
+    /// </summary>
+    private async Task<ReAclOutcome> ReAclLockedAsync(
+        SeismicContent content, TrackedItem tracked, DateTime nowUtc, bool repair, CancellationToken ct)
+    {
+        var group = _config.Seismic.ClassificationEnforceGroup!;
+        var enforced = EnforcedGroupAcl(group);
+        var fingerprint = enforced.Fingerprint();
+
+        if (tracked.AclFingerprint == fingerprint)
+        {
+            _store.UpsertTrackedItem(tracked with { LastSeenUtc = nowUtc, ClassificationLocked = true });
+            return ReAclOutcome.NoChange;
+        }
+
+        // The enforcement group changed (or this is a pre-lock baseline): re-lock
+        // to the CURRENT group. This is the only ACL change a locked item allows.
+        var isBaseline = tracked.AclFingerprint is null;
+        if (!isBaseline)
+        {
+            Stats.AddAclDrift();
+            Logger.Info(
+                $"CLASSIFICATION RE-LOCK {content.Id}: enforcement group changed, ACL kept locked to "
+                + $"Entra group {group} (never widened to source).");
+        }
+
+        if (repair)
+        {
+            try
+            {
+                await _graph.PatchExternalItemAclAsync(ConnectorId, content.Id, enforced.ToJsonArray(), ct)
+                    .ConfigureAwait(false);
+                Stats.AddReAcled();
+                Ledger.Append(
+                    content.Id,
+                    DecisionLedger.DecisionAclRestrict,
+                    $"re-acl: classification lock re-applied; ACL restricted to Entra group {group}");
+                _store.UpsertTrackedItem(tracked with
+                {
+                    AclFingerprint = fingerprint,
+                    LastSeenUtc = nowUtc,
+                    ClassificationLocked = true,
+                });
+            }
+            catch (GraphApiError ex)
+            {
+                Logger.Error(
+                    $"CLASSIFICATION RE-LOCK FAILED {content.Id} ('{content.Name}', teamsite {content.TeamsiteId}): "
+                    + $"ACL lock to Entra group {group} not applied — {ex.Message}. The indexed ACL is "
+                    + "unchanged; dead-lettered as ReAcl for retry-failed.");
+                Stats.AddFailed();
+                SyncState.AppendFailedRecords(
+                    SyncState.FailedRecordsPath(ConnectorId),
+                    new List<(string, string)> { (content.Id, $"re-acl (classification lock) failed: {ex.Message}") },
+                    "ReAcl");
+                return isBaseline ? ReAclOutcome.Baseline : ReAclOutcome.Drifted;
+            }
+        }
+        else
+        {
+            _store.UpsertTrackedItem(tracked with { LastSeenUtc = nowUtc, ClassificationLocked = true });
         }
 
         return isBaseline ? ReAclOutcome.Baseline : ReAclOutcome.Drifted;

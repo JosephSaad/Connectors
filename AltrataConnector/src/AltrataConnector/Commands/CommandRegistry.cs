@@ -115,16 +115,28 @@ public static class CommandRegistry
                 };
                 var transformer = new ItemTransformer(
                     new Identity.EntityResolver(runtime.Identity, fuzzy),
-                    classification: new ClassificationOptions
-                    {
-                        Enabled = runtime.Config.Classification,
-                        Residency = runtime.Config.DataResidency,
-                    });
+                    classification: ClassificationOptionsFor(runtime.Config),
+                    ttlDays: runtime.Config.GraphItemTtlDays);
                 var item = transformer.Transform(record, acl);
                 await runtime.Graph.PutItemAsync(item, ServiceStop.Token);
                 runtime.Identity.RecordIngestedItem(new Identity.IngestedItem(
                     item.Id, record.Dataset, seatSync.SeatHash, DateTime.UtcNow));
                 Metrics.Increment("altrata_items_ingested_total");
+                if (runtime.Config.GraphItemTtlDays > 0)
+                    Metrics.Increment("altrata_items_expiring_total");
+                // #11 ACL-restriction decision: this on-demand item was locked to
+                // the reviewer group by classification enforcement (#6b) — record
+                // the single decision (per-item, inherently low-volume here).
+                if (runtime.Config.Classification && runtime.Config.ClassificationEnforceAcl
+                    && !string.IsNullOrWhiteSpace(runtime.Config.ClassificationEnforceGroupId)
+                    && item.Properties.TryGetValue(ItemTransformer.SensitivityLabelProp, out var lbl)
+                    && lbl as string == SensitivityLabel.Restricted.ToString())
+                {
+                    runtime.Decisions.RecordAclRestriction(item.Id,
+                        $"Restricted item ACL-locked to group {runtime.Config.ClassificationEnforceGroupId} " +
+                        "(CLASSIFICATION_ENFORCE_ACL)", actor);
+                    Metrics.Increment("altrata_items_acl_restricted_total");
+                }
 
                 Console.WriteLine($"Ingested {item.Id} (billable lookups to date: {runtime.State.GetBillableLookupCount()})");
                 return (object?)true;
@@ -267,6 +279,9 @@ public static class CommandRegistry
         {
             Logging.Verbose = args.Verbose;
             Logging.StartRun(logPrefix);
+            // Owner-only permissions on the logs + state directories (POSIX 0700
+            // / best-effort Windows ACLs). Best-effort; never fatal.
+            DirectoryHardening.HardenStartupDirectories();
             LogPruner.Prune();
             Dashboard.HookCancelKey();
             using var runtime = Runtime.Create();
@@ -822,12 +837,18 @@ public static class CommandRegistry
         };
         return new ItemTransformer(
             new Identity.EntityResolver(runtime.Identity, fuzzy),
-            classification: new ClassificationOptions
-            {
-                Enabled = runtime.Config.Classification,
-                Residency = runtime.Config.DataResidency,
-            });
+            classification: ClassificationOptionsFor(runtime.Config),
+            ttlDays: runtime.Config.GraphItemTtlDays);
     }
+
+    /// <summary>Classification options (tag + optional #6b ACL enforcement) from config.</summary>
+    internal static ClassificationOptions ClassificationOptionsFor(AppConfig config) => new()
+    {
+        Enabled = config.Classification,
+        Residency = config.DataResidency,
+        EnforceAcl = config.ClassificationEnforceAcl,
+        EnforceGroupId = config.ClassificationEnforceGroupId,
+    };
 
     // ---- identity-dry-run -------------------------------------------------------------------
 

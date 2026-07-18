@@ -1,12 +1,23 @@
 // Seismic/ContentClassifier.cs
 // ----------------------------
-// Unified data classification & sensitivity labeling (Data Governance &
-// Compliance — Purview-aligned classification/labeling, PII controls).
+// Unified data classification & sensitivity TAGGING (Data Governance &
+// Compliance support).
+//
+// IMPORTANT — WHAT THIS IS (AND IS NOT):
+//   The value stamped on each item (the `sensitivityLabel` property) is an
+//   ADVISORY, CONNECTOR-APPLIED CLASSIFICATION TAG. It is NOT a Microsoft
+//   Purview sensitivity label and carries NONE of Purview's ENFORCEMENT
+//   (no encryption, no DLP policy, no downstream honouring of the label).
+//   The taxonomy is Purview-*aligned* in NAMING only; there is no live Purview
+//   API call anywhere. Treat it as a search/ranking/triage signal, not a
+//   control. (Optional ACL enforcement of the top tier is a SEPARATE, explicit
+//   opt-in — see CLASSIFICATION_ENFORCE_ACL — and is applied by THIS connector
+//   at the Graph ACL, still independent of Purview.)
 //
 // A DEPENDENCY-FREE, regex/heuristic classifier over the extracted content
 // text. It detects sensitive-data categories (PII: email/phone/national-id;
 // PCI: Luhn-valid card numbers; secrets: key-like tokens) and derives a single
-// unified sensitivity label for every ingested externalItem:
+// unified sensitivity tag for every ingested externalItem:
 //
 //     Public < Internal < Confidential < Restricted
 //

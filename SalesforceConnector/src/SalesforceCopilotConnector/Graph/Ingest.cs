@@ -564,9 +564,18 @@ public static class Ingest
         string objectType = "",
         IngestionDashboard? dashboard = null,
         AdaptiveConcurrency? concurrency = null,
-        object? statsLock = null)
+        object? statsLock = null,
+        DecisionLedger? decisionLedger = null)
     {
-        // 1. Transform all records into Graph external-item payloads
+        // 1. Transform all records into Graph external-item payloads.
+        // Per-crawl policy snapshots (read once, not per record): classification
+        // enforcement (#6b), the ACL scale guard (#9) and item TTL (#8) are all
+        // no-ops unless their env vars are configured.
+        var classificationPolicy = Classification.Policy.Read();
+        var scaleGuardPolicy = AclScaleGuard.Policy.Read();
+        var ttlDays = ItemExpiry.TtlDays;
+        var ingestNow = DateTimeOffset.UtcNow;
+
         var transformSw = Stopwatch.StartNew();
         var itemsToProcess = new List<JsonObject>();
         var transformFailures = new List<(string ItemId, string Error)>();
@@ -579,6 +588,44 @@ public static class Ingest
                 Logger.Warning(
                     $"No ACL found for item {itemId} ({record["objectType"]?.ToString()}) — using fallback ACL");
             }
+
+            // #6b — classification enforcement (advisory by default). Only narrows the
+            // ACL to the configured Entra group when enforcement is active AND the
+            // record is top-tier ("Restricted"); otherwise the ACL is untouched.
+            var classification = Classification.Evaluate(classificationPolicy, record, acl);
+            if (classification.Restricted)
+            {
+                acl = classification.Acl;
+                Metrics.IncClassificationAclRestricted();
+                Logger.Info(
+                    $"[Classification] {objectType}/{itemId}: tag '{classification.Tag}' is top-tier — " +
+                    $"ACL restricted to Entra group '{classificationPolicy.RestrictedGroup}' (CLASSIFICATION_ENFORCE_ACL).");
+                decisionLedger?.Append(
+                    DecisionKinds.AclRestriction, itemId, objectType,
+                    $"classification tag '{classification.Tag}' restricted to Entra group {classificationPolicy.RestrictedGroup}");
+            }
+
+            // #9 — large-group ACL scale guard. Always records the ACE-count metric;
+            // only alters the ACL when it fires with a group/fallback action.
+            var guard = AclScaleGuard.Apply(scaleGuardPolicy, itemId, objectType, acl);
+            if (guard.Fired)
+            {
+                if (guard.Action == AclScaleGuardActions.Group)
+                {
+                    acl = guard.Acl;
+                    decisionLedger?.Append(
+                        DecisionKinds.AclRestriction, itemId, objectType,
+                        $"ACL scale guard: {guard.AceCount} ACE(s) > {scaleGuardPolicy.Threshold} — collapsed to group {scaleGuardPolicy.Group}");
+                }
+                else if (guard.Action == AclScaleGuardActions.Fallback)
+                {
+                    acl = guard.Acl;
+                    decisionLedger?.Append(
+                        DecisionKinds.Exclusion, itemId, objectType,
+                        $"ACL scale guard: {guard.AceCount} ACE(s) > {scaleGuardPolicy.Threshold} — deny-everyone fallback");
+                }
+            }
+
             try
             {
                 var transformedItems = transformer.TransformRecord(record, acl);
@@ -590,7 +637,13 @@ public static class Ingest
                     continue;
                 }
                 foreach (var transformed in transformedItems)
+                {
+                    // #8 — stamp expirationDateTime (skip DELETE markers). No-op when
+                    // GRAPH_ITEM_TTL_DAYS is unset.
+                    if (transformed["type"]?.ToString() != "deleted")
+                        ItemExpiry.ApplyExpiry(transformed, ingestNow, ttlDays);
                     itemsToProcess.Add(transformed);
+                }
             }
             catch (Exception exc)
             {
@@ -1092,7 +1145,8 @@ public static class Ingest
         string? sinceIso,
         string? dlPath,
         IngestionDashboard? dashboard,
-        object statsLock)
+        object statsLock,
+        DecisionLedger? decisionLedger = null)
     {
         var useNewAclEngine = config.UseNewAclEngine;
         var useGroupAcl = config.UseGroupAcl;
@@ -1288,7 +1342,7 @@ public static class Ingest
                     var submitted = await IngestChunkGraphBatchAsync(
                         config, client, transformer, chunkRecords, chunkAcl, stats, graphBatchSize,
                         dlPath: dlPath, objectType: chunkOt, dashboard: dashboard,
-                        concurrency: concurrency, statsLock: statsLock);
+                        concurrency: concurrency, statsLock: statsLock, decisionLedger: decisionLedger);
                     try
                     {
                         SyncState.WriteCheckpoint(connectorId, sinceIso, chunkOt, chunkCi);
@@ -1368,6 +1422,13 @@ public static class Ingest
         var stats = new IngestionStats();
         var statsLock = new object();
         Logger.Info("Starting ingestion process...");
+
+        // #11 — immutable decision ledger (append-only, hash-chained). Created once
+        // per crawl and shared by every object worker so the chain is single. Null
+        // unless DECISION_LEDGER is enabled ⇒ no decision recording, byte-identical.
+        var decisionLedger = DecisionLedger.CreateIfEnabled(config.Connector.Id);
+        if (decisionLedger != null)
+            Logger.Info($"Decision ledger enabled — access decisions recorded to {decisionLedger.Path}");
 
         if (since != null)
             Logger.Info($"Incremental sync from: {PyIsoFormat(since.Value)}");
@@ -1544,7 +1605,7 @@ public static class Ingest
                 workSource, effectiveWorkers, config, client, transformer,
                 legacyResolver, newAclResolver, newAclMapper, groupAclBuilder,
                 stats, concurrency, since, checkpoint, sinceIso, dlPath,
-                dashboard, statsLock);
+                dashboard, statsLock, decisionLedger);
         }
         else
         using (var pool = new SemaphoreSlim(effectiveWorkers, effectiveWorkers))
@@ -1574,7 +1635,8 @@ public static class Ingest
                             sinceIso,
                             dlPath,
                             dashboard,
-                            statsLock);
+                            statsLock,
+                            decisionLedger);
                     }
                     finally
                     {
@@ -1690,7 +1752,8 @@ public static class Ingest
         string? sinceIso,
         string? dlPath,
         IngestionDashboard? dashboard,
-        object statsLock)
+        object statsLock,
+        DecisionLedger? decisionLedger = null)
     {
         var totalIngested = 0;
         var totalLock = new object();
@@ -1757,7 +1820,8 @@ public static class Ingest
                         sinceIso,
                         dlPath,
                         dashboard,
-                        statsLock);
+                        statsLock,
+                        decisionLedger);
                 }
                 catch (_SkipObjectError exc)
                 {

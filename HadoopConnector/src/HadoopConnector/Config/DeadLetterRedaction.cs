@@ -15,9 +15,10 @@
 //
 // retry-failed is unaffected by design: it re-locates the record in BDH by
 // item_id + object_type (fresh fields + fresh ACL) and never replays the
-// stored payload. Default is `full` (unchanged behaviour); an UNRECOGNIZED
-// mode redacts and warns — at this data's sensitivity a typo must fail toward
-// less exposure, mirroring the chassis' fail-closed filter philosophy.
+// stored payload. Default is `redacted` (safe default — the queue never becomes
+// a second, less-protected copy of record VALUES unless an operator opts into
+// `full` deliberately); an UNRECOGNIZED mode FAILS FAST at config load (throws)
+// so a typo can never silently pick a payload-storage mode.
 
 using System.Security.Cryptography;
 using System.Text;
@@ -30,36 +31,42 @@ public static class DeadLetterRedaction
 {
     public const string ModeEnvVar = "DEADLETTER_PAYLOAD_MODE";
 
-    private static readonly IAppLogger Logger = Logging.GetLogger("hadoop_connector");
-    private static int _warnedUnknownMode;
+    /// <summary>
+    /// True when DEADLETTER_PAYLOAD_MODE requires payload redaction. The default
+    /// (unset) is <c>redacted</c>: at this data's sensitivity the dead-letter
+    /// queue must not silently become a second, less-protected copy of record
+    /// VALUES — an operator opts into <c>full</c> deliberately. An UNRECOGNIZED
+    /// value throws (fail fast) rather than guessing a payload-storage mode.
+    /// </summary>
+    public static bool RedactionEnabled => ResolveMode();
 
-    /// <summary>True when DEADLETTER_PAYLOAD_MODE requires payload redaction.</summary>
-    public static bool RedactionEnabled
+    /// <summary>
+    /// Validate DEADLETTER_PAYLOAD_MODE at config load. Throws
+    /// <see cref="ArgumentException"/> on an unrecognized value so a typo fails
+    /// fast at startup instead of silently selecting a mode later.
+    /// </summary>
+    public static void Validate() => ResolveMode();
+
+    /// <summary>Parse the mode: false=full, true=redacted (the unset default);
+    /// throws <see cref="ArgumentException"/> on anything else.</summary>
+    private static bool ResolveMode()
     {
-        get
+        var raw = EnvFlags.GetString(ModeEnvVar, "redacted").Trim().ToLowerInvariant();
+        return raw switch
         {
-            var raw = EnvFlags.GetString(ModeEnvVar, "full").Trim().ToLowerInvariant();
-            switch (raw)
-            {
-                case "full":
-                    return false;
-                case "redacted":
-                    return true;
-                default:
-                    // Fail toward LESS exposure: an unknown value redacts.
-                    if (Interlocked.Exchange(ref _warnedUnknownMode, 1) == 0)
-                    {
-                        Logger.Warning(
-                            $"{ModeEnvVar}='{raw}' is not recognized (expected full|redacted); "
-                            + "treating it as 'redacted' so payloads are not stored by accident.");
-                    }
-                    return true;
-            }
-        }
+            "full" => false,
+            "redacted" => true,
+            _ => throw new ArgumentException(
+                $"Invalid configuration: {ModeEnvVar}='{raw}' is not recognized "
+                + "(expected 'full' or 'redacted')."),
+        };
     }
 
-    /// <summary>Test seam: re-arm the one-time unknown-mode warning.</summary>
-    internal static void ResetForTests() => Interlocked.Exchange(ref _warnedUnknownMode, 0);
+    /// <summary>Test seam retained for call-site compatibility. The mode is now
+    /// stateless (no warn-once latch), so this is a no-op.</summary>
+    internal static void ResetForTests()
+    {
+    }
 
     /// <summary>
     /// Redact one externalItem request body: keep the id, the property NAMES,

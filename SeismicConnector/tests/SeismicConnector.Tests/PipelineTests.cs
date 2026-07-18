@@ -33,6 +33,8 @@ public sealed class PipelineHarness : IDisposable
     public PipelineHarness(
         ExclusionRules? exclusions = null, string fallbackAcl = "skip", bool enrichUsage = false,
         bool liveDocFieldIndexing = false, bool permissionReacl = false,
+        bool classification = false, bool classificationEnforceAcl = false,
+        string? classificationEnforceGroup = null, int graphItemTtlDays = 0,
         IEnumerable<string>? objects = null,
         int chunkSize = 10, int graphBatchSize = 5, int batchWorkers = 2,
         HaCoordinator? ha = null)
@@ -40,6 +42,8 @@ public sealed class PipelineHarness : IDisposable
         Config = TestConfig.Build(
             exclusions: exclusions, fallbackAcl: fallbackAcl, enrichUsage: enrichUsage,
             liveDocFieldIndexing: liveDocFieldIndexing, permissionReacl: permissionReacl,
+            classification: classification, classificationEnforceAcl: classificationEnforceAcl,
+            classificationEnforceGroup: classificationEnforceGroup, graphItemTtlDays: graphItemTtlDays,
             objects: objects, chunkSize: chunkSize, graphBatchSize: graphBatchSize,
             batchWorkers: batchWorkers);
         _ha = ha;

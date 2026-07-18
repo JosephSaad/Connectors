@@ -95,11 +95,13 @@ public sealed class CrawlEngine
     private readonly SeatService _seats;
     private readonly IAlertSink _alerts;
     private readonly HaCoordinator? _ha;
+    private readonly IDecisionLedger? _decisions;
 
     public CrawlProgress Progress { get; } = new();
 
     public CrawlEngine(AppConfig config, IGraphClient graph, IStateStore state,
-        IIdentityStore identity, SeatService seats, IAlertSink alerts, HaCoordinator? ha = null)
+        IIdentityStore identity, SeatService seats, IAlertSink alerts, HaCoordinator? ha = null,
+        IDecisionLedger? decisions = null)
     {
         _config = config;
         _graph = graph;
@@ -108,7 +110,14 @@ public sealed class CrawlEngine
         _seats = seats;
         _alerts = alerts;
         _ha = ha;
+        _decisions = decisions;
     }
+
+    /// <summary>True when classification-enforcement ACL restrictions should be
+    /// recorded to the decision ledger (all opt-in prerequisites met).</summary>
+    private bool AclRestrictionLedgerActive =>
+        _decisions != null && _config.Classification && _config.ClassificationEnforceAcl
+        && !string.IsNullOrWhiteSpace(_config.ClassificationEnforceGroupId);
 
     // ---- crawl entry points ---------------------------------------------------
 
@@ -156,8 +165,19 @@ public sealed class CrawlEngine
             Telemetry.SetTag(seatSpan, "altrata.seat.changed", seatSync.Changed);
         }
         var acl = SeatAclBuilder.BuildAcl(seatSync.Seats);
-        if (seatSync.RequiresReAcl)
+        // #5 Entitlement freshness: the seat list is re-loaded on EVERY crawl, so
+        // new items always get the current ACL and a seat change is detected each
+        // crawl. IDENTITY_SYNC_ON_INCREMENTAL (default true) additionally runs the
+        // re-ACL SWEEP over existing items on INCREMENTAL crawls, shrinking
+        // entitlement lag to the incremental cadence (not real-time — a mid-cycle
+        // seat removal is enforced at the next crawl). Set false to defer that
+        // potentially large sweep to full crawls only.
+        var reAclNow = kind != CrawlKind.Incremental || _config.IdentitySyncOnIncremental;
+        if (seatSync.RequiresReAcl && reAclNow)
             await ReAclPassAsync(seatSync, ct);
+        else if (seatSync.RequiresReAcl)
+            Logger.Info("Seat list changed but IDENTITY_SYNC_ON_INCREMENTAL=false — re-ACL sweep " +
+                        "deferred to the next full crawl (newly ingested items still use the current seats).");
         else if (seatSync.Changed)
             _seats.CommitSeatHash(seatSync.SeatHash);  // first ever sync — nothing to re-ACL
 
@@ -172,7 +192,8 @@ public sealed class CrawlEngine
         // 2b. Relationship-path index (opt-in) — built before the transformer so
         // person items can join their bounded path summary at transform time.
         var pathIndex = BuildPathIndex(allDeliveries);
-        var transformer = new ItemTransformer(resolver, pathIndex, BuildClassificationOptions());
+        var transformer = new ItemTransformer(resolver, pathIndex, BuildClassificationOptions(),
+            _config.GraphItemTtlDays);
 
         // 3. Deliveries to process.
         var deliveries = kind == CrawlKind.Incremental
@@ -338,6 +359,10 @@ public sealed class CrawlEngine
             Telemetry.SetTag(deliverySpan, "altrata.delivery.status", Reconciliation.StatusRejected);
             Logger.Error($"Delivery '{delivery.Id}' REJECTED: {exc.Message}");
             Metrics.Increment("altrata_deliveries_rejected_total");
+            // Immutable decision audit (#11): the delivery is EXCLUDED from the
+            // index — record it in the tamper-evident decision ledger (PII-safe:
+            // delivery id + checksum/file reason only).
+            _decisions?.RecordExclusion(delivery.Id, $"delivery rejected at checksum gate: {exc.Message}");
             await _alerts.SendAsync("critical", "delivery_rejected", exc.Message,
                 new Dictionary<string, object?> { ["deliveryId"] = delivery.Id });
             var rejectedSummary = Reconciliation.Summarize(
@@ -360,6 +385,11 @@ public sealed class CrawlEngine
         var classificationEntries = _config.Classification && _config.ClassificationManifest
             ? new List<ClassificationEntry>()
             : null;
+        // #11 ACL-restriction audit accumulator: item ids whose ACL was tightened
+        // to the reviewer group by classification enforcement (#6b). Collected
+        // per-delivery and ledgered as ONE summary decision below (low-volume,
+        // never per-ingest). Only active when all enforcement prerequisites hold.
+        var aclRestrictedItemIds = AclRestrictionLedgerActive ? new List<string>() : null;
 
         foreach (var file in delivery.Manifest.Files)
         {
@@ -386,6 +416,9 @@ public sealed class CrawlEngine
                 Telemetry.SetTag(deliverySpan, "altrata.delivery.status", Reconciliation.StatusRejected);
                 Logger.Error($"Delivery '{delivery.Id}' REJECTED at read time: {exc.Message}");
                 Metrics.Increment("altrata_deliveries_rejected_total");
+                // Immutable decision audit (#11): exclusion at read time (TOCTOU
+                // swap / read failure) — ledgered PII-safe.
+                _decisions?.RecordExclusion(delivery.Id, $"delivery rejected at read time: {exc.Message}");
                 await _alerts.SendAsync("critical", "delivery_rejected", exc.Message,
                     new Dictionary<string, object?> { ["deliveryId"] = delivery.Id });
                 var readRejected = Reconciliation.Summarize(delivery.Id, fileResults, exc.Message);
@@ -440,7 +473,7 @@ public sealed class CrawlEngine
 
             var (ingested, deleted, suppressed, deadLettered, stopped) = await IngestRecordsAsync(
                 delivery, file, dataset, records, startIndex, acl, transformer, seatHash,
-                classificationEntries, ct);
+                classificationEntries, aclRestrictedItemIds, ct);
 
             Telemetry.SetTag(datasetSpan, "altrata.records.ingested", ingested);
             Telemetry.SetTag(datasetSpan, "altrata.records.deleted", deleted);
@@ -483,6 +516,18 @@ public sealed class CrawlEngine
                 _config.ConnectorId, delivery.Id, classificationEntries);
             Logger.Info($"Delivery '{delivery.Id}': classification manifest ({classificationEntries.Count} item(s)) — {manifestPath}");
         }
+        // #11 ACL-restriction decision: one tamper-evident summary entry per
+        // delivery when classification enforcement (#6b) locked top-tier items to
+        // the reviewer group. Low-volume by design (per delivery, not per item).
+        if (aclRestrictedItemIds is { Count: > 0 })
+        {
+            _decisions!.RecordAclRestriction(delivery.Id,
+                $"{aclRestrictedItemIds.Count} Restricted item(s) ACL-locked to group " +
+                $"{_config.ClassificationEnforceGroupId} (CLASSIFICATION_ENFORCE_ACL)");
+            Metrics.Increment("altrata_items_acl_restricted_total", aclRestrictedItemIds.Count);
+            Logger.Info($"Delivery '{delivery.Id}': {aclRestrictedItemIds.Count} item(s) ACL-restricted " +
+                        "to the reviewer group (classification enforcement) — decision ledgered.");
+        }
         var summary = Reconciliation.Summarize(delivery.Id, fileResults);
         Telemetry.SetTag(deliverySpan, "altrata.delivery.status", summary.Status);
         var reportPath = Reconciliation.WriteReport(_config.ConnectorId, summary);
@@ -516,7 +561,8 @@ public sealed class CrawlEngine
     private async Task<(int Ingested, int Deleted, int Suppressed, int DeadLettered, bool Stopped)> IngestRecordsAsync(
         Delivery delivery, ManifestFile file, string dataset, IReadOnlyList<FeedRecord> records,
         int startIndex, IReadOnlyList<AclEntry> acl, ItemTransformer transformer, string seatHash,
-        List<ClassificationEntry>? classificationEntries, CancellationToken ct)
+        List<ClassificationEntry>? classificationEntries, List<string>? aclRestrictedItemIds,
+        CancellationToken ct)
     {
         var ingested = 0;
         var deleted = 0;
@@ -718,6 +764,13 @@ public sealed class CrawlEngine
             var suppressedNow = itemSubjects.Count == 0 || succeededPuts.Count == 0
                 ? null
                 : new HashSet<string>(_state.ListSuppressedSubjects(), StringComparer.Ordinal);
+            // #11: item ids whose ACL was tightened to the reviewer group by
+            // classification enforcement (#6b) — a top-tier item is detected by
+            // its Restricted classification tag (only present when classification
+            // is on, which enforcement requires).
+            var itemsById = aclRestrictedItemIds == null
+                ? null
+                : items.ToDictionary(i => i.Id, StringComparer.Ordinal);
             var resurrected = new List<string>();
             foreach (var itemId in succeededPuts)
             {
@@ -731,9 +784,18 @@ public sealed class CrawlEngine
                 // Classification manifest: id → label + categories (no values).
                 if (classificationEntries != null && classificationByItem!.TryGetValue(itemId, out var ce))
                     classificationEntries.Add(ce);
+                if (aclRestrictedItemIds != null
+                    && itemsById!.TryGetValue(itemId, out var putItem)
+                    && putItem.Properties.TryGetValue(ItemTransformer.SensitivityLabelProp, out var labelValue)
+                    && labelValue as string == SensitivityLabel.Restricted.ToString())
+                {
+                    aclRestrictedItemIds.Add(itemId);
+                }
                 ingested++;
                 Progress.AddIngested();
                 Metrics.Increment("altrata_items_ingested_total");
+                if (_config.GraphItemTtlDays > 0)
+                    Metrics.Increment("altrata_items_expiring_total");
             }
 
             // Tombstone withdrawals: success removes the item from the registry;
@@ -1058,6 +1120,8 @@ public sealed class CrawlEngine
     {
         Enabled = _config.Classification,
         Residency = _config.DataResidency,
+        EnforceAcl = _config.ClassificationEnforceAcl,
+        EnforceGroupId = _config.ClassificationEnforceGroupId,
     };
 
     /// <summary>Harvest a manifest entry from the item's classification props —

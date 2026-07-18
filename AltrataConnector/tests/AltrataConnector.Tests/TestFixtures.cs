@@ -126,6 +126,7 @@ public static class TestFixtures
             Alerts = new Alerting(config.ConnectorId),
             Audit = new AuditLog(config.ConnectorId, logsDir: Path.Combine(tempRoot, "logs")),
             Erasure = new ErasureLedger(config.ConnectorId, logsDir: Path.Combine(tempRoot, "logs")),
+            Decisions = new DecisionLedger(config.ConnectorId, logsDir: Path.Combine(tempRoot, "logs")),
             GraphBreaker = new CircuitBreaker("graph", new CircuitBreakerOptions { Critical = true }),
             ApiBreaker = new CircuitBreaker("altrata-api", new CircuitBreakerOptions { Critical = false }),
         };

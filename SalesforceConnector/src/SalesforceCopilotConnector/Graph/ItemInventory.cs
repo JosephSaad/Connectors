@@ -70,7 +70,7 @@ public sealed class ItemInventory : IItemInventory
         var path = dbPath ?? DbPath(connectorId);
         var dir = Path.GetDirectoryName(Path.GetFullPath(path));
         if (!string.IsNullOrEmpty(dir))
-            Directory.CreateDirectory(dir);
+            SecureDirectory.EnsureOwnerOnly(dir);  // #3: state dir owner-only
 
         _connection = new SqliteConnection($"Data Source={path}");
         _connection.Open();

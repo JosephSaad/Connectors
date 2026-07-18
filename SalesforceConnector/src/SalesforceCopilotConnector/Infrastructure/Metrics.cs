@@ -36,12 +36,20 @@ public static class Metrics
     private static long _crawlsStarted;
     private static long _crawlsCompleted;
     private static long _throttle429Total;
+    // #9: times the per-item ACL scale guard fired (item ACE count > threshold).
+    private static long _aclScaleGuardFiredTotal;
+    // #6b: items whose ACL was restricted to a group by classification enforcement.
+    private static long _classificationAclRestrictedTotal;
+    // #8: items stamped with an expirationDateTime (GRAPH_ITEM_TTL_DAYS set).
+    private static long _itemsExpiryStampedTotal;
 
     // Gauges (can go up or down / be set to an absolute value).
     private static long _deadLetterDepth;
     private static long _lastCrawlCompletedUnix;
     private static long _adaptiveConcurrencyLevel;
     private static long _haClaimsHeld;
+    // #9: high-water mark of ACEs observed on a single item this process lifetime.
+    private static long _maxItemAceCount;
 
     // Per-object crawl progress (records fetched vs the count reported by
     // Salesforce at crawl start). Rendered as two labeled gauge families.
@@ -76,6 +84,33 @@ public static class Metrics
 
     /// <summary>Record <paramref name="count"/> HTTP 429 (throttling) responses seen.</summary>
     public static void IncThrottle429(long count = 1) => Interlocked.Add(ref _throttle429Total, count);
+
+    /// <summary>#9 — record that the per-item ACL scale guard fired.</summary>
+    public static void IncAclScaleGuardFired(long count = 1) =>
+        Interlocked.Add(ref _aclScaleGuardFiredTotal, count);
+
+    /// <summary>#6b — record that classification enforcement restricted an item's ACL to a group.</summary>
+    public static void IncClassificationAclRestricted(long count = 1) =>
+        Interlocked.Add(ref _classificationAclRestrictedTotal, count);
+
+    /// <summary>#8 — record that an item was stamped with an expirationDateTime.</summary>
+    public static void IncItemsExpiryStamped(long count = 1) =>
+        Interlocked.Add(ref _itemsExpiryStampedTotal, count);
+
+    /// <summary>
+    /// #9 — observe an item's ACE count, raising the high-water gauge if it is a new
+    /// maximum. Called for every item so the ceiling risk is visible even when the
+    /// guard threshold is not configured. Lock-free monotonic max.
+    /// </summary>
+    public static void ObserveItemAceCount(long count)
+    {
+        long current;
+        while ((current = Interlocked.Read(ref _maxItemAceCount)) < count)
+        {
+            if (Interlocked.CompareExchange(ref _maxItemAceCount, count, current) == current)
+                return;
+        }
+    }
 
     // ── Gauge setters ────────────────────────────────────────────────────────
 
@@ -138,10 +173,14 @@ public static class Metrics
     public static long CrawlsStarted => Interlocked.Read(ref _crawlsStarted);
     public static long CrawlsCompleted => Interlocked.Read(ref _crawlsCompleted);
     public static long Throttle429Total => Interlocked.Read(ref _throttle429Total);
+    public static long AclScaleGuardFiredTotal => Interlocked.Read(ref _aclScaleGuardFiredTotal);
+    public static long ClassificationAclRestrictedTotal => Interlocked.Read(ref _classificationAclRestrictedTotal);
+    public static long ItemsExpiryStampedTotal => Interlocked.Read(ref _itemsExpiryStampedTotal);
     public static long DeadLetterDepth => Interlocked.Read(ref _deadLetterDepth);
     public static long LastCrawlCompletedUnix => Interlocked.Read(ref _lastCrawlCompletedUnix);
     public static long AdaptiveConcurrencyLevel => Interlocked.Read(ref _adaptiveConcurrencyLevel);
     public static long HaClaimsHeld => Interlocked.Read(ref _haClaimsHeld);
+    public static long MaxItemAceCount => Interlocked.Read(ref _maxItemAceCount);
 
     /// <summary>Seconds since the process (metrics registry) started.</summary>
     public static double UptimeSeconds => (DateTime.UtcNow - StartUtc).TotalSeconds;
@@ -159,10 +198,14 @@ public static class Metrics
         Interlocked.Exchange(ref _crawlsStarted, 0);
         Interlocked.Exchange(ref _crawlsCompleted, 0);
         Interlocked.Exchange(ref _throttle429Total, 0);
+        Interlocked.Exchange(ref _aclScaleGuardFiredTotal, 0);
+        Interlocked.Exchange(ref _classificationAclRestrictedTotal, 0);
+        Interlocked.Exchange(ref _itemsExpiryStampedTotal, 0);
         Interlocked.Exchange(ref _deadLetterDepth, 0);
         Interlocked.Exchange(ref _lastCrawlCompletedUnix, 0);
         Interlocked.Exchange(ref _adaptiveConcurrencyLevel, 0);
         Interlocked.Exchange(ref _haClaimsHeld, 0);
+        Interlocked.Exchange(ref _maxItemAceCount, 0);
         ResetObjectProgress();
     }
 
@@ -187,7 +230,11 @@ public static class Metrics
         Counter(sb, "crawls_started_total", "Total crawl/ingestion runs started.", CrawlsStarted);
         Counter(sb, "crawls_completed_total", "Total crawl/ingestion runs completed.", CrawlsCompleted);
         Counter(sb, "throttled_429_total", "Total HTTP 429 (throttling) responses observed from the Graph API.", Throttle429Total);
+        Counter(sb, "acl_scale_guard_fired_total", "Times the per-item ACL scale guard fired (item ACE count exceeded ACL_MAX_ACES).", AclScaleGuardFiredTotal);
+        Counter(sb, "classification_acl_restricted_total", "Items whose ACL was restricted to a group by classification enforcement (CLASSIFICATION_ENFORCE_ACL).", ClassificationAclRestrictedTotal);
+        Counter(sb, "items_expiry_stamped_total", "Items stamped with an expirationDateTime (GRAPH_ITEM_TTL_DAYS set).", ItemsExpiryStampedTotal);
 
+        Gauge(sb, "max_item_ace_count", "High-water mark of ACEs seen on a single item this process lifetime (per-item ACL ceiling risk).", MaxItemAceCount);
         Gauge(sb, "dead_letter_depth", "Current number of records in the dead-letter queue.", DeadLetterDepth);
         Gauge(sb, "last_crawl_completed_timestamp_seconds", "Unix timestamp (seconds) of the last completed crawl; 0 if none yet.", LastCrawlCompletedUnix);
         Gauge(sb, "adaptive_concurrency_level", "Current adaptive Graph batch concurrency level (dials down on 429s, up on sustained success); 0 until the first crawl.", AdaptiveConcurrencyLevel);

@@ -107,8 +107,11 @@ public static class Logging
             try
             {
                 var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+                // Owner-only (POSIX 0700 / Windows owner+admins) on the log root
+                // and per-run dir: connector.log holds ids/errors at rest.
+                DirectoryHardening.EnsureOwnerOnly(LogsRoot);
                 var dir = Path.Combine(LogsRoot, $"{runPrefix}_{stamp}");
-                Directory.CreateDirectory(dir);
+                DirectoryHardening.EnsureOwnerOnly(dir);
                 RunDirectory = dir;
                 _fileWriter = new StreamWriter(
                     Path.Combine(dir, "connector.log"), append: true, Utf8NoBom)

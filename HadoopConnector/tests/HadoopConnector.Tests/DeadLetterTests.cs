@@ -51,6 +51,9 @@ public class DeadLetterTests
     [Fact]
     public void Append_IncludesRequestAndResponseBodies()
     {
+        // Genuine full-mode round-trip (checks the response body value verbatim):
+        // the DEFAULT is now 'redacted', so pin 'full' explicitly here.
+        using var env = new EnvScope((DeadLetterRedaction.ModeEnvVar, "full"));
         using var scope = new SyncStateScope();
         var request = new Dictionary<string, JsonNode?>
         {

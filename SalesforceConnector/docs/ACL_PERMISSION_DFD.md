@@ -568,6 +568,30 @@ ELSE → Return deny all (no access)
 
 ---
 
+## Entitlement Freshness (#5)
+
+ACLs are re-evaluated only when a crawl runs — access is **not real-time**. To
+shrink the lag, `IDENTITY_SYNC_ON_INCREMENTAL` now **defaults ON** (opt-out): the
+identity sync (group membership → external-group members) runs on every
+incremental content crawl, not just on full crawls, so a user removed from a
+Salesforce role/group loses Copilot access at the next incremental
+(`USE_GROUP_ACL=true` path).
+
+**Residual lag**: bounded by the incremental crawl interval — a membership change
+between crawls is not reflected until the next crawl. Item-level ACLs (who is
+listed on each external item) are re-resolved only on a crawl that re-ingests the
+item; a **full crawl re-ACLs every item**. For tighter guarantees:
+
+- shorten the incremental cadence (smaller `IDENTITY_SYNC_ON_INCREMENTAL` lag), and
+- **schedule a periodic full crawl** (the re-ACL sweep) on a cadence matched to
+  your entitlement-change risk — e.g. nightly — so item ACLs never drift further
+  than one full-crawl interval from Salesforce sharing.
+
+Set `IDENTITY_SYNC_ON_INCREMENTAL=false` to restore the previous full-only
+behavior.
+
+---
+
 ## Summary
 
 **Total Data Flow Steps**: 

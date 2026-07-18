@@ -68,15 +68,28 @@ public class WebhookReceiverTests : IDisposable
         return ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
     }
 
-    private static EnvScope Enabled(int port, string? secret = Secret) => new(
+    private static EnvScope Enabled(int port, string? secret = Secret, string? requireTimestamp = null) => new(
         (WebhookReceiver.PortEnvVar, port.ToString()),
         (WebhookReceiver.SecretEnvVar, secret),
         (WebhookReceiver.PathEnvVar, null),
         (WebhookReceiver.HeaderEnvVar, null),
+        (WebhookAuthenticator.RequireTimestampEnvVar, requireTimestamp),
+        (WebhookAuthenticator.ToleranceEnvVar, null),
+        (WebhookAuthenticator.TimestampHeaderEnvVar, null),
         ("USE_KEY_VAULT", null));
 
+    /// <summary>Unix-seconds timestamp, optionally offset (negative = in the past).</summary>
+    private static string Ts(int offsetSeconds = 0) =>
+        DateTimeOffset.UtcNow.AddSeconds(offsetSeconds).ToUnixTimeSeconds()
+            .ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>HMAC over the anti-replay canonical message "{ts}.{body}".</summary>
+    private static string SignedWithTs(string timestamp, string body) =>
+        new SignatureValidator(Secret).ComputeHex(timestamp, Encoding.UTF8.GetBytes(body));
+
     private static async Task<HttpResponseMessage> PostAsync(
-        int port, string body, string? signature, string path = "/webhook", string method = "POST")
+        int port, string body, string? signature, string? timestamp = null,
+        string path = "/webhook", string method = "POST")
     {
         using var client = new HttpClient();
         using var request = new HttpRequestMessage(new HttpMethod(method), $"http://localhost:{port}{path}")
@@ -85,6 +98,8 @@ public class WebhookReceiverTests : IDisposable
         };
         if (signature is not null)
             request.Headers.TryAddWithoutValidation(SignatureValidator.DefaultHeader, signature);
+        if (timestamp is not null)
+            request.Headers.TryAddWithoutValidation(WebhookAuthenticator.DefaultTimestampHeader, timestamp);
         return await client.SendAsync(request);
     }
 
@@ -112,9 +127,8 @@ public class WebhookReceiverTests : IDisposable
         using var receiver = WebhookReceiver.StartIfConfigured(_processor);
         Assert.NotNull(receiver);
 
-        var body = Encoding.UTF8.GetBytes(Body);
-        var sig = new SignatureValidator(Secret).ComputeHex(body);
-        var response = await PostAsync(port, Body, sig);
+        var ts = Ts();
+        var response = await PostAsync(port, Body, SignedWithTs(ts, Body), ts);
 
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         Assert.Equal(1, _processor.Debouncer.PendingCount);
@@ -131,7 +145,8 @@ public class WebhookReceiverTests : IDisposable
         using var scope = Enabled(port);
         using var receiver = WebhookReceiver.StartIfConfigured(_processor);
 
-        var response = await PostAsync(port, Body, signature: "deadbeef");
+        // Fresh timestamp, but a signature that does not match it → bad signature.
+        var response = await PostAsync(port, Body, signature: "deadbeef", timestamp: Ts());
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.Equal(0, _processor.Debouncer.PendingCount);
         Assert.Equal(1, Metrics.WebhookEventsRejected);
@@ -145,9 +160,72 @@ public class WebhookReceiverTests : IDisposable
         using var scope = Enabled(port);
         using var receiver = WebhookReceiver.StartIfConfigured(_processor);
 
-        var response = await PostAsync(port, Body, signature: null);
+        var response = await PostAsync(port, Body, signature: null, timestamp: Ts());
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.Equal(0, _processor.Debouncer.PendingCount);
+    }
+
+    [Fact]
+    public async Task StaleTimestamp_Rejected_FailClosed()
+    {
+        var port = FreePort();
+        using var scope = Enabled(port);
+        using var receiver = WebhookReceiver.StartIfConfigured(_processor);
+
+        // 10 minutes old, correctly signed for that timestamp — outside the
+        // default 5-minute window, so it must be rejected fail-closed.
+        var ts = Ts(-600);
+        var response = await PostAsync(port, Body, SignedWithTs(ts, Body), ts);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(0, _processor.Debouncer.PendingCount);
+        Assert.Equal(1, Metrics.WebhookEventsRejected);
+    }
+
+    [Fact]
+    public async Task ReplayWithinWindow_Rejected()
+    {
+        var port = FreePort();
+        using var scope = Enabled(port);
+        using var receiver = WebhookReceiver.StartIfConfigured(_processor);
+
+        var ts = Ts();
+        var sig = SignedWithTs(ts, Body);
+        var first = await PostAsync(port, Body, sig, ts);
+        var replay = await PostAsync(port, Body, sig, ts);   // byte-for-byte replay
+
+        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, replay.StatusCode);
+        Assert.Equal(1, _processor.Debouncer.PendingCount);   // only the first enqueued
+        Assert.Equal(1, Metrics.WebhookEventsAccepted);
+    }
+
+    [Fact]
+    public async Task MissingTimestamp_Rejected_WhenStrict()
+    {
+        var port = FreePort();
+        using var scope = Enabled(port);   // require-timestamp defaults ON
+        using var receiver = WebhookReceiver.StartIfConfigured(_processor);
+
+        // Legacy body-only signature, no timestamp header → rejected under strict.
+        var bodyOnly = new SignatureValidator(Secret).ComputeHex(Encoding.UTF8.GetBytes(Body));
+        var response = await PostAsync(port, Body, bodyOnly);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(0, _processor.Debouncer.PendingCount);
+    }
+
+    [Fact]
+    public async Task MissingTimestamp_Accepted_InMigrationMode()
+    {
+        var port = FreePort();
+        using var scope = Enabled(port, requireTimestamp: "false");
+        using var receiver = WebhookReceiver.StartIfConfigured(_processor);
+
+        // Migration: body-only signature with no timestamp is accepted (no replay
+        // protection) so senders that cannot yet send a timestamp keep working.
+        var bodyOnly = new SignatureValidator(Secret).ComputeHex(Encoding.UTF8.GetBytes(Body));
+        var response = await PostAsync(port, Body, bodyOnly);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Equal(1, _processor.Debouncer.PendingCount);
     }
 
     [Fact]
@@ -158,8 +236,9 @@ public class WebhookReceiverTests : IDisposable
         using var receiver = WebhookReceiver.StartIfConfigured(_processor);
 
         const string garbage = "not even json";
-        var sig = new SignatureValidator(Secret).ComputeHex(Encoding.UTF8.GetBytes(garbage));
-        var response = await PostAsync(port, garbage, sig);
+        var ts = Ts();
+        var sig = SignedWithTs(ts, garbage);
+        var response = await PostAsync(port, garbage, sig, ts);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Equal(0, _processor.Debouncer.PendingCount);
@@ -187,9 +266,9 @@ public class WebhookReceiverTests : IDisposable
         using var scope = Enabled(port);
         using var receiver = WebhookReceiver.StartIfConfigured(_processor);
 
-        var body = Encoding.UTF8.GetBytes(Body);
-        var sig = "sha256=" + new SignatureValidator(Secret).ComputeHex(body);
-        var response = await PostAsync(port, Body, sig);
+        var ts = Ts();
+        var sig = "sha256=" + SignedWithTs(ts, Body);
+        var response = await PostAsync(port, Body, sig, ts);
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
     }
 

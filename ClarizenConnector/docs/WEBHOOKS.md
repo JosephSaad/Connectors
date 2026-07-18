@@ -64,11 +64,21 @@ Accepted body shapes (tolerant, field aliases case-insensitive):
 ## Security
 
 - **Shared-secret HMAC.** The sender computes `HMAC-SHA256(CLARIZEN_WEBHOOK_SECRET,
-  raw-body)` and sends it in `CLARIZEN_WEBHOOK_SIGNATURE_HEADER` (default
-  `X-Clarizen-Signature`), hex (optionally `sha256=`-prefixed) or base64.
-- **Validate before act.** The signature is checked over the exact raw bytes
-  **before** any JSON parse or enqueue — an unvalidated payload is never
-  interpreted.
+  "{timestamp}.{raw-body}")` and sends it in `CLARIZEN_WEBHOOK_SIGNATURE_HEADER`
+  (default `X-Clarizen-Signature`), hex (optionally `sha256=`-prefixed) or
+  base64, alongside the timestamp in `CLARIZEN_WEBHOOK_TIMESTAMP_HEADER` (default
+  `X-Clarizen-Timestamp`, Unix seconds or ISO-8601).
+- **Anti-replay.** Because the timestamp is bound INTO the HMAC it cannot be
+  altered. The receiver rejects (fail-closed) a request whose timestamp is
+  outside `CLARIZEN_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS` (default 300s), and
+  rejects a duplicate signature seen again within that window (a bounded,
+  short-lived, self-pruning cache — it cannot grow unbounded). With
+  `CLARIZEN_WEBHOOK_REQUIRE_TIMESTAMP=true` (the default) a post without a
+  timestamp is rejected; set it to `false` only to migrate legacy senders, which
+  then fall back to body-only HMAC **without** replay protection.
+- **Validate before act.** The signature (and timestamp) is checked over the
+  exact raw bytes **before** any JSON parse or enqueue — an unvalidated payload
+  is never interpreted.
 - **Constant-time compare** (`CryptographicOperations.FixedTimeEquals`) — no
   timing oracle on the MAC.
 - **Fail-closed.** If `CLARIZEN_WEBHOOK_PORT` is set but
@@ -95,13 +105,17 @@ Accepted body shapes (tolerant, field aliases case-insensitive):
 | `CLARIZEN_WEBHOOK_SECRET` | unset | HMAC shared secret. **Required** when the port is set. |
 | `CLARIZEN_WEBHOOK_PATH` | `/webhook` | Path the receiver accepts POSTs on. |
 | `CLARIZEN_WEBHOOK_SIGNATURE_HEADER` | `X-Clarizen-Signature` | Header carrying the signature. |
+| `CLARIZEN_WEBHOOK_TIMESTAMP_HEADER` | `X-Clarizen-Timestamp` | Header carrying the signed timestamp (Unix seconds or ISO-8601). |
+| `CLARIZEN_WEBHOOK_REQUIRE_TIMESTAMP` | `true` | Strict anti-replay: reject posts with no timestamp. `false` = migration (body-only, no replay protection). |
+| `CLARIZEN_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS` | `300` | Freshness window; older/newer requests rejected fail-closed. |
 | `CLARIZEN_WEBHOOK_DEBOUNCE_MS` | `2000` | Coalesce window per entity. |
+| `CLARIZEN_WEBHOOK_MAX_PENDING` | `100000` | Cap on distinct pending entities (drop-oldest back-pressure). |
 
 ## Observability
 
 - `webhook_events_received_total` — posts received (before validation).
 - `webhook_events_accepted_total` — validated events enqueued.
-- `webhook_events_rejected_total` — bad signature / malformed / oversize.
+- `webhook_events_rejected_total` — bad/missing signature, missing/stale timestamp, replay, malformed, or oversize.
 - `webhook_receiver_up` — gauge, 1 while the receiver is bound and listening.
 
 The health endpoint's `/metrics` route surfaces all four, so the receiver's

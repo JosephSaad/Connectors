@@ -251,23 +251,40 @@ public static class SyncState
     // ── Dead-letter queue ────────────────────────────────────────────────────
 
     /// <summary>
-    /// DEADLETTER_PAYLOAD_MODE: <c>full</c> (default — request/response bodies
-    /// stored verbatim for debugging) or <c>redacted</c> — indexed content and
+    /// DEADLETTER_PAYLOAD_MODE: <c>redacted</c> (DEFAULT — indexed content and
     /// property VALUES are stripped before the record is persisted (file or
     /// SQL backend alike), keeping ids, teamsite/version identifiers, error
     /// details, attempt metadata and a SHA-256 of each stripped value so
-    /// payloads can still be compared. retry-failed is unaffected: it re-reads
-    /// only <c>item_id</c>/<c>object_type</c> and re-fetches content from
-    /// Seismic — it never replays stored payloads.
+    /// payloads can still be compared) or <c>full</c> — request/response bodies
+    /// stored verbatim for debugging. retry-failed is unaffected either way: it
+    /// re-reads only <c>item_id</c>/<c>object_type</c> and re-fetches content
+    /// from Seismic — it never replays stored payloads. An unrecognized value
+    /// fails fast at config load (see AppConfig.Load); this live reader
+    /// fails SAFE (anything that is not <c>full</c> redacts).
     /// </summary>
     public const string PayloadModeEnvVar = "DEADLETTER_PAYLOAD_MODE";
 
-    /// <summary>True when DEADLETTER_PAYLOAD_MODE=redacted (case-insensitive). Read live.</summary>
-    internal static bool RedactDeadLetterPayloads =>
-        string.Equals(
-            Environment.GetEnvironmentVariable(PayloadModeEnvVar),
-            "redacted",
-            StringComparison.OrdinalIgnoreCase);
+    /// <summary>The two recognized DEADLETTER_PAYLOAD_MODE values.</summary>
+    internal const string PayloadModeFull = "full";
+    internal const string PayloadModeRedacted = "redacted";
+
+    /// <summary>
+    /// True unless DEADLETTER_PAYLOAD_MODE=full (case-insensitive). Read live.
+    /// The default (unset) is REDACTED — a dead-letter record never writes raw
+    /// indexed content/PII to disk unless an operator explicitly opts into
+    /// <c>full</c>. Fails safe: an unrecognized value redacts (config load
+    /// rejects it, so it never reaches production).
+    /// </summary>
+    internal static bool RedactDeadLetterPayloads
+    {
+        get
+        {
+            var value = Environment.GetEnvironmentVariable(PayloadModeEnvVar);
+            if (string.IsNullOrWhiteSpace(value))
+                return true;  // default: redacted
+            return !string.Equals(value.Trim(), PayloadModeFull, StringComparison.OrdinalIgnoreCase);
+        }
+    }
 
     /// <summary>Top-level keys whose values survive redaction verbatim (identifiers,
     /// error/attempt metadata — never indexed content). Key match is
@@ -364,7 +381,8 @@ public static class SyncState
     /// <summary>Return the path to the dead-letter JSONL file for <paramref name="connectorId"/>.</summary>
     public static string FailedRecordsPath(string connectorId)
     {
-        Directory.CreateDirectory(LogsDir);
+        // Owner-only: dead-letter records can carry indexed content in full mode.
+        SecureDirectory.EnsureHardened(LogsDir);
         return Path.Combine(LogsDir, $"failed_records_{connectorId}.jsonl");
     }
 

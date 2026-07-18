@@ -101,10 +101,11 @@ public sealed class SqlServerIdentityStore : IIdentityStore
                     ON target.ConnectorId = source.ConnectorId AND target.ItemId = source.ItemId
                 WHEN MATCHED THEN UPDATE SET
                     VersionId = @VersionId, TeamsiteId = @TeamsiteId, ExpiresUtc = @ExpiresUtc,
-                    LastSeenUtc = @LastSeenUtc, Status = @Status, AclFingerprint = @AclFingerprint
+                    LastSeenUtc = @LastSeenUtc, Status = @Status, AclFingerprint = @AclFingerprint,
+                    ClassificationLocked = @ClassificationLocked
                 WHEN NOT MATCHED THEN INSERT
-                    (ConnectorId, ItemId, VersionId, TeamsiteId, ExpiresUtc, LastSeenUtc, Status, AclFingerprint)
-                    VALUES (@ConnectorId, @ItemId, @VersionId, @TeamsiteId, @ExpiresUtc, @LastSeenUtc, @Status, @AclFingerprint);
+                    (ConnectorId, ItemId, VersionId, TeamsiteId, ExpiresUtc, LastSeenUtc, Status, AclFingerprint, ClassificationLocked)
+                    VALUES (@ConnectorId, @ItemId, @VersionId, @TeamsiteId, @ExpiresUtc, @LastSeenUtc, @Status, @AclFingerprint, @ClassificationLocked);
                 """;
             cmd.Parameters.AddWithValue("@ConnectorId", _connectorId);
             cmd.Parameters.AddWithValue("@ItemId", item.ItemId);
@@ -114,6 +115,7 @@ public sealed class SqlServerIdentityStore : IIdentityStore
             cmd.Parameters.AddWithValue("@LastSeenUtc", item.LastSeenUtc);
             cmd.Parameters.AddWithValue("@Status", item.Status);
             cmd.Parameters.AddWithValue("@AclFingerprint", (object?)item.AclFingerprint ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@ClassificationLocked", item.ClassificationLocked);
             cmd.ExecuteNonQuery();
         });
 
@@ -153,7 +155,7 @@ public sealed class SqlServerIdentityStore : IIdentityStore
         });
 
     private const string SelectTracked = """
-        SELECT ItemId, VersionId, TeamsiteId, ExpiresUtc, LastSeenUtc, Status, AclFingerprint
+        SELECT ItemId, VersionId, TeamsiteId, ExpiresUtc, LastSeenUtc, Status, AclFingerprint, ClassificationLocked
         FROM dbo.TrackedItems WHERE ConnectorId = @ConnectorId
         """;
 
@@ -180,6 +182,7 @@ public sealed class SqlServerIdentityStore : IIdentityStore
         reader.GetString(5))
     {
         AclFingerprint = reader.IsDBNull(6) ? null : reader.GetString(6),
+        ClassificationLocked = !reader.IsDBNull(7) && reader.GetBoolean(7),
     };
 
     public void Dispose()

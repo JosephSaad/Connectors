@@ -216,6 +216,38 @@ public static class ValidateConfig
             result.Errors.Add("USE_KEY_VAULT=true requires KEY_VAULT_URI.");
         }
 
+        // Dead-letter payload mode: default is the safe 'redacted'; 'full' is an
+        // explicit opt-in. An unrecognized value fails fast at config load, so
+        // surface it here as a preflight ERROR too.
+        var deadLetterMode = Environment.GetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar);
+        if (!string.IsNullOrWhiteSpace(deadLetterMode)
+            && !deadLetterMode.Trim().Equals("full", StringComparison.OrdinalIgnoreCase)
+            && !deadLetterMode.Trim().Equals("redacted", StringComparison.OrdinalIgnoreCase))
+        {
+            result.Errors.Add(
+                $"{DeadLetterRedaction.ModeEnvVar} '{deadLetterMode}' is invalid (full | redacted).");
+        }
+
+        // Classification enforcement (advisory by default). SensitivityLabel is a
+        // connector-applied tag, NOT a Purview-enforced label; ACL enforcement is
+        // opt-in and needs a target group.
+        if (EnvFlags.IsTrue("CLASSIFICATION_ENFORCE_ACL"))
+        {
+            if (string.IsNullOrWhiteSpace(
+                    Environment.GetEnvironmentVariable("CLASSIFICATION_RESTRICTED_GROUP_ID")))
+            {
+                result.Errors.Add(
+                    "CLASSIFICATION_ENFORCE_ACL=true requires CLASSIFICATION_RESTRICTED_GROUP_ID "
+                    + "(the Entra group Restricted items are limited to).");
+            }
+            if (!EnvFlags.IsTrue("CLASSIFICATION"))
+            {
+                result.Warnings.Add(
+                    "CLASSIFICATION_ENFORCE_ACL=true has no effect without CLASSIFICATION=true "
+                    + "(nothing is classified, so no item is ever narrowed).");
+            }
+        }
+
         var logFormat = Environment.GetEnvironmentVariable("LOG_FORMAT");
         if (!string.IsNullOrEmpty(logFormat)
             && !logFormat.Equals("json", StringComparison.OrdinalIgnoreCase)

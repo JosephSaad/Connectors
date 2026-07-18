@@ -21,14 +21,31 @@ public sealed class TransformException : Exception
     public TransformException(string message) : base(message) { }
 }
 
-/// <summary>Unified data-classification options (default off = no extra props).</summary>
+/// <summary>
+/// Data-classification options (default off = no extra props). The label this
+/// produces is a CONNECTOR-APPLIED CLASSIFICATION TAG — advisory metadata the
+/// connector stamps on the item; it is NOT a Microsoft Purview sensitivity
+/// LABEL and is not enforced by Purview. It is searchable/refinable so admins
+/// can build Search policies on it, and — only when EnforceAcl is on — the
+/// connector itself applies a hard ACL restriction on the top tier (#6b).
+/// </summary>
 public sealed record ClassificationOptions
 {
-    /// <summary>CLASSIFICATION — stamp sensitivityLabel/detectedCategories/dataResidency.</summary>
+    /// <summary>CLASSIFICATION — stamp the advisory sensitivityLabel /
+    /// detectedCategories / dataResidency classification-tag properties.</summary>
     public bool Enabled { get; init; }
 
     /// <summary>DATA_RESIDENCY — governance residency tag, e.g. "US" / "EU".</summary>
     public string? Residency { get; init; }
+
+    /// <summary>CLASSIFICATION_ENFORCE_ACL (#6b, default off): when on AND a
+    /// group is configured, top-tier (Restricted) items have their ACL tightened
+    /// to that group ONLY — the one place the tag is actually enforced.</summary>
+    public bool EnforceAcl { get; init; }
+
+    /// <summary>CLASSIFICATION_ENFORCE_GROUP_ID — the Entra group id Restricted
+    /// items are locked to when EnforceAcl is on.</summary>
+    public string? EnforceGroupId { get; init; }
 }
 
 public sealed class ItemTransformer
@@ -36,13 +53,18 @@ public sealed class ItemTransformer
     private readonly EntityResolver? _resolver;
     private readonly RelationshipPathIndex? _pathIndex;
     private readonly ClassificationOptions _classification;
+    private readonly int? _ttlDays;
+    private readonly Func<DateTime> _clock;
 
     public ItemTransformer(EntityResolver? resolver = null, RelationshipPathIndex? pathIndex = null,
-        ClassificationOptions? classification = null)
+        ClassificationOptions? classification = null, int? ttlDays = null, Func<DateTime>? clock = null)
     {
         _resolver = resolver;
         _pathIndex = pathIndex;
         _classification = classification ?? new ClassificationOptions();
+        // Stale-index expiry (#8): null/<=0 = no TTL (default, unchanged wire).
+        _ttlDays = ttlDays is > 0 ? ttlDays : null;
+        _clock = clock ?? (() => DateTime.UtcNow);
     }
 
     /// <summary>Property keys the classification feature adds (used by the manifest reader).</summary>
@@ -203,31 +225,53 @@ public sealed class ItemTransformer
             }
         }
 
-        // Unified data classification & sensitivity labeling (opt-in). Folds the
-        // existing PII label in as one input; only LABELS/categories are stamped
-        // (never the raw detected values — those already live on the seat-gated
-        // item, and must not leak to spans/logs/manifests).
+        // Data classification & sensitivity TAGGING (opt-in). This stamps an
+        // ADVISORY connector-applied classification tag — NOT a Purview-enforced
+        // label. Folds the existing PII label in as one input; only LABELS/
+        // categories are stamped (never the raw detected values — those already
+        // live on the seat-gated item, and must not leak to spans/logs/manifests).
+        var effectiveAcl = acl;
         if (_classification.Enabled)
         {
-            var label = SensitivityClassifier.ClassifyLabel(record);
+            var label = SensitivityClassifier.Classify(record);
             var categories = SensitivityClassifier.DetectCategories(record);
-            properties[SensitivityLabelProp] = label;
+            properties[SensitivityLabelProp] = SensitivityClassifier.LabelName(label);
             if (categories.Count > 0)
                 properties[DetectedCategoriesProp] = categories.ToList();
             if (!string.IsNullOrWhiteSpace(_classification.Residency))
                 properties[DataResidencyProp] = _classification.Residency;
-            ClassificationStats.RecordItem(label, categories);
+            ClassificationStats.RecordItem(SensitivityClassifier.LabelName(label), categories);
+
+            // Optional enforcement (#6b): top-tier (Restricted) items get their
+            // ACL tightened to the configured reviewer group ONLY. Default off,
+            // so this is where the advisory tag becomes a hard control. The
+            // group grant is a subset-of-seats intent (operator responsibility);
+            // it can never be an everyone-grant (asserted below).
+            if (_classification.EnforceAcl
+                && label == SensitivityLabel.Restricted
+                && !string.IsNullOrWhiteSpace(_classification.EnforceGroupId))
+            {
+                effectiveAcl = new[]
+                {
+                    new AclEntry { Type = "group", Value = _classification.EnforceGroupId.Trim() },
+                };
+            }
         }
 
         // Defence in depth: classification/path metadata must never widen visibility.
-        SeatAclBuilder.AssertNeverEveryone(acl);
+        SeatAclBuilder.AssertNeverEveryone(effectiveAcl);
 
         return new ExternalItem
         {
             Id = BuildItemId(record.Dataset, recordId),
-            Acl = acl,
+            Acl = effectiveAcl,
             Properties = properties,
             Content = new ExternalItemContent { Type = "text", Value = BuildContent(record) },
+            // Stale-index expiry (#8): stamp expirationDateTime = now + TTL when
+            // GRAPH_ITEM_TTL_DAYS is set; null (default) leaves the wire unchanged.
+            ExpirationDateTime = _ttlDays.HasValue
+                ? _clock().AddDays(_ttlDays.Value)
+                : null,
         };
     }
 

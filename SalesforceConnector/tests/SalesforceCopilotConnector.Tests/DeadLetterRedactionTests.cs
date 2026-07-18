@@ -70,13 +70,18 @@ public sealed class DeadLetterRedactionTests : IDisposable
     // ── Mode parsing ─────────────────────────────────────────────────────────
 
     [Fact]
-    public void FullIsTheDefaultAndUnknownValuesStayFull()
+    public void RedactedIsTheDefaultAndFullMustBeExplicit()
     {
+        // NEW DEFAULT (#2): unset ⇒ redacted (raw values never hit disk unless
+        // an operator opts in to full). Case-insensitive; garbage fails fast.
         Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, null);
-        Assert.False(DeadLetterRedaction.RedactedMode);
+        Assert.Equal(DeadLetterRedaction.Redacted, DeadLetterRedaction.Mode);
+        Assert.True(DeadLetterRedaction.RedactedMode);
+        Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, "");
+        Assert.True(DeadLetterRedaction.RedactedMode);
         Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, "full");
         Assert.False(DeadLetterRedaction.RedactedMode);
-        Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, "banana");
+        Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, "FULL");
         Assert.False(DeadLetterRedaction.RedactedMode);
         Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, "redacted");
         Assert.True(DeadLetterRedaction.RedactedMode);
@@ -84,12 +89,44 @@ public sealed class DeadLetterRedactionTests : IDisposable
         Assert.True(DeadLetterRedaction.RedactedMode);
     }
 
-    // ── Full mode preserves current behavior ─────────────────────────────────
+    [Fact]
+    public void UnrecognizedModeFailsFast()
+    {
+        // An unrecognized value must throw naming the setting (fail-fast at config
+        // load), never silently fall back to full and leak raw values.
+        Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, "banana");
+        var ex = Assert.Throws<ArgumentException>(() => _ = DeadLetterRedaction.Mode);
+        Assert.Contains("DEADLETTER_PAYLOAD_MODE", ex.Message);
+        Assert.Throws<ArgumentException>(() => _ = DeadLetterRedaction.RedactedMode);
+    }
+
+    [Fact]
+    public void DefaultModeRedactsRawValuesOffDisk()
+    {
+        // Pin the NEW default: with the env var UNSET, PII must not reach disk.
+        Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, null);
+        Assert.True(DeadLetterRedaction.RedactedMode);
+        var dlPath = Path.Combine(_tmpPath, "dl_default.jsonl");
+        SyncState.AppendFailedRecords(
+            dlPath,
+            new List<(string, string)> { ("001A", "HTTP 500") },
+            "Account",
+            requestBodies: new Dictionary<string, JsonNode?> { ["001A"] = SampleRequestBody() });
+
+        var rawLine = File.ReadAllText(dlPath);
+        Assert.DoesNotContain("Acme Corp (confidential)", rawLine);
+        Assert.DoesNotContain("Customer PII body text", rawLine);
+        var body = Assert.Single(ReadJsonl(dlPath))["request_body"]!.AsObject();
+        Assert.Contains("payload redacted per DEADLETTER_PAYLOAD_MODE", body[DeadLetterRedaction.NoteKey]!.GetValue<string>());
+    }
+
+    // ── Full mode preserves current behavior (now opt-in) ────────────────────
 
     [Fact]
     public void FullModeWritesThePayloadVerbatim()
     {
-        Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, null);
+        // Full is now opt-in — this test genuinely exercises the full round-trip.
+        Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, "full");
         var dlPath = Path.Combine(_tmpPath, "dl_full.jsonl");
         SyncState.AppendFailedRecords(
             dlPath,

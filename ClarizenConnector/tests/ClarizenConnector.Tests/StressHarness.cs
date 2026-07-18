@@ -310,7 +310,7 @@ public class WebhookFloodStressTests : IDisposable
         // flight), just not a self-inflicted socket-exhaustion DoS on the test.
         using var gate = new SemaphoreSlim(128);
 
-        async Task<HttpStatusCode> Post(string body, string? sig)
+        async Task<HttpStatusCode> Post(string body, string? sig, string? ts = null)
         {
             await gate.WaitAsync();
             try
@@ -321,6 +321,8 @@ public class WebhookFloodStressTests : IDisposable
                 };
                 if (sig is not null)
                     req.Headers.TryAddWithoutValidation(SignatureValidator.DefaultHeader, sig);
+                if (ts is not null)
+                    req.Headers.TryAddWithoutValidation(WebhookAuthenticator.DefaultTimestampHeader, ts);
                 using var resp = await client.SendAsync(req);
                 return resp.StatusCode;
             }
@@ -330,20 +332,26 @@ public class WebhookFloodStressTests : IDisposable
             }
         }
 
+        static string Now() =>
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+
         // 300 valid (distinct entities) + 300 forged, all fired concurrently.
+        // Valid posts carry a fresh signed timestamp (anti-replay contract).
         var jobs = new List<Task<(bool Valid, HttpStatusCode Code)>>();
         for (var i = 0; i < validCount; i++)
         {
             var body = $"{{\"events\":[{{\"entityType\":\"Task\",\"id\":\"/Task/{i}\",\"operation\":\"update\"}}]}}";
-            var sig = validator.ComputeHex(Encoding.UTF8.GetBytes(body));
-            jobs.Add(Task.Run(async () => (true, await Post(body, sig))));
+            var ts = Now();
+            var sig = validator.ComputeHex(ts, Encoding.UTF8.GetBytes(body));
+            jobs.Add(Task.Run(async () => (true, await Post(body, sig, ts))));
         }
         for (var i = 0; i < forgedCount; i++)
         {
             var body = $"{{\"events\":[{{\"entityType\":\"Task\",\"id\":\"/Task/f{i}\",\"operation\":\"update\"}}]}}";
             // Wrong secret → forged signature; must be rejected (fail-closed).
-            var sig = new SignatureValidator("attacker-secret").ComputeHex(Encoding.UTF8.GetBytes(body));
-            jobs.Add(Task.Run(async () => (false, await Post(body, sig))));
+            var ts = Now();
+            var sig = new SignatureValidator("attacker-secret").ComputeHex(ts, Encoding.UTF8.GetBytes(body));
+            jobs.Add(Task.Run(async () => (false, await Post(body, sig, ts))));
         }
 
         var sw = Stopwatch.StartNew();

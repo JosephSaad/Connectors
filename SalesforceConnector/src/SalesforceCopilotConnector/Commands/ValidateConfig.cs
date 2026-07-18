@@ -36,6 +36,7 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 using Azure.Core;
 using Azure.Identity;
+using SalesforceCopilotConnector.Config;
 using SalesforceCopilotConnector.Graph;
 using SalesforceCopilotConnector.Infrastructure;
 using SalesforceCopilotConnector.Salesforce;
@@ -169,6 +170,19 @@ public static class ValidateConfig
             report.Pass($"Connector name:      {config.Connector.Name}");
             report.Pass($"Salesforce instance: {config.Connector.Salesforce.InstanceUrl}");
             report.Pass($"ACL mode:            {AclModeLabel(config)}");
+            try
+            {
+                report.Pass($"Dead-letter mode:    {DeadLetterRedaction.Mode}");
+            }
+            catch (ArgumentException ex)
+            {
+                // An unrecognized DEADLETTER_PAYLOAD_MODE is a real misconfiguration
+                // (Settings.LoadConfig fails fast on it in production). Report it as a
+                // finding rather than letting it read as a generic config-load failure.
+                report.WarnOrFail(ex.Message);
+            }
+            ReportClassification(report);
+            ReportItemTtl(report);
         }
         catch (Exception ex)
         {
@@ -229,6 +243,52 @@ public static class ValidateConfig
 
     private static string AclModeLabel(AppConfig config) =>
         config.UseGroupAcl ? "GROUP" : (config.UseNewAclEngine ? "NEW" : "LEGACY");
+
+    /// <summary>
+    /// Report the classification tag config with HONEST wording (#6a): it is a
+    /// connector-applied ADVISORY tag derived from a Salesforce field — NOT a
+    /// Microsoft Purview sensitivity label, and by itself it does not restrict
+    /// access. Only the optional ACL-enforcement path narrows access.
+    /// </summary>
+    private static void ReportClassification(Report report)
+    {
+        if (!Classification.Enabled)
+        {
+            report.Pass("Classification tag:  off (no CLASSIFICATION_FIELD set)");
+            return;
+        }
+
+        report.Pass(
+            $"Classification tag:  ADVISORY — connector-applied from Salesforce field " +
+            $"'{Classification.Field}' (NOT a Microsoft Purview label; advisory metadata only)");
+        report.Pass(
+            $"  top tier values:   {string.Join(", ", Classification.RestrictedValues)}");
+
+        if (Classification.EnforceAcl)
+        {
+            if (string.IsNullOrEmpty(Classification.RestrictedGroup))
+                report.WarnOrFail(
+                    "  CLASSIFICATION_ENFORCE_ACL=true but CLASSIFICATION_RESTRICTED_GROUP is unset — " +
+                    "enforcement is INACTIVE (top-tier ACLs are not restricted).");
+            else
+                report.Pass(
+                    $"  enforcement:       ON — top-tier items' ACL restricted to Entra group " +
+                    $"'{Classification.RestrictedGroup}'");
+        }
+        else
+        {
+            report.Pass("  enforcement:       off (advisory only; ACLs follow the Salesforce sharing model)");
+        }
+    }
+
+    /// <summary>Report the optional stale-index item TTL (#8).</summary>
+    private static void ReportItemTtl(Report report)
+    {
+        var ttl = ItemExpiry.TtlDays;
+        report.Pass(ttl is > 0
+            ? $"Item TTL:            {ttl.Value} day(s) — ingested items self-expire if crawling stops (GRAPH_ITEM_TTL_DAYS)"
+            : "Item TTL:            off (items never auto-expire; set GRAPH_ITEM_TTL_DAYS to enable)");
+    }
 
     // ── Check 2 helpers ───────────────────────────────────────────────────────
 

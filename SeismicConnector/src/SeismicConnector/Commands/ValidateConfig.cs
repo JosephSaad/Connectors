@@ -71,12 +71,20 @@ public static class ValidateConfig
                 Fail($"config/graph-schema.json: {ex.Message}");
             }
 
-            // 4. Exclusion rules (the No-MNE filter).
+            // 4. Exclusion rules (the No-MNE filter). LoadFile already fails
+            // CLOSED on a missing/empty/malformed/rule-less file (step 1 catches
+            // it), so reaching here with no rules means acknowledgeNoExclusions:true
+            // was set — a deliberately rule-less MNPI posture. Surface it, and
+            // under --strict treat that no-rules posture as a hard FAIL.
             var rules = config.Exclusions;
-            if (rules.ExcludedFlags.Count == 0 && rules.RestrictedLibraries.Count == 0
-                && rules.RestrictedTeamsiteIds.Count == 0 && rules.PropertyRules.Count == 0)
+            if (rules.HasNoRules)
             {
-                Warn("config/exclusions.json defines NO rules — every item is eligible for ingest");
+                if (strict)
+                    Fail("config/exclusions.json defines NO rules (acknowledgeNoExclusions:true) — every "
+                        + "item is eligible for ingest; --strict rejects a rule-less No-MNE posture");
+                else
+                    Warn("config/exclusions.json defines NO rules (acknowledgeNoExclusions:true) — "
+                        + "every item is eligible for ingest");
             }
             else
             {

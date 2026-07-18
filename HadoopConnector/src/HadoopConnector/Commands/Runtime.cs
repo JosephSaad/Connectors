@@ -121,6 +121,16 @@ internal static class Runtime
     public static RuntimeContext Create(ParsedArgs args, string runPrefix)
     {
         EnvLoader.LoadLayered();
+        // Restrictive filesystem permissions FIRST: the local state directories
+        // hold a second copy of business data (dead-letter payloads, identity /
+        // inventory DBs, run logs), so create them owner-only (0700 POSIX; NTFS
+        // owner+admins best-effort on Windows) before anything writes into them.
+        // Best-effort — never fatal.
+        SecureDirectories.HardenStartupDirectories(
+            Logging.LogsRoot,
+            Config.SyncState.LogsDir,
+            Graph.IdentityStore.DataDir,
+            Graph.ItemInventory.DataDir);
         Logging.Initialize(runPrefix, args.Verbose);
         // Windows Event Log mirroring (EVENTLOG_ENABLED; no-op off-Windows).
         // After Logging.Initialize so the lifecycle-start event carries the pid

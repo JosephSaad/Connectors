@@ -207,19 +207,30 @@ public sealed class CmdFullDeploymentTests : IDisposable
     }
 
     [Fact]
-    public async Task IdentitySyncSkippedOnIncremental()
+    public async Task IdentitySyncSkippedOnIncrementalWhenFlagDisabled()
     {
-        // Identity crawl should NOT run during incremental sync.
-        _patches.Config = GroupAclConfig();
+        // With IDENTITY_SYNC_ON_INCREMENTAL explicitly disabled, the identity
+        // crawl must NOT run during incremental sync (the pre-#5 behavior).
+        var saved = Environment.GetEnvironmentVariable("IDENTITY_SYNC_ON_INCREMENTAL");
+        Environment.SetEnvironmentVariable("IDENTITY_SYNC_ON_INCREMENTAL", "false");
+        try
+        {
+            _patches.Config = GroupAclConfig();
 
-        // Simulate incremental by calling _run_full_deployment with since
-        await Deploy.RunFullDeploymentAsync(
-            MockArgs(),
-            since: new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+            // Simulate incremental by calling _run_full_deployment with since
+            await Deploy.RunFullDeploymentAsync(
+                MockArgs(),
+                since: new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
 
-        // Identity sync should NOT be called for incremental
-        Assert.Equal(0, _patches.RunIdentitySyncCallCount);
+            // Identity sync should NOT be called for incremental
+            Assert.Equal(0, _patches.RunIdentitySyncCallCount);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("IDENTITY_SYNC_ON_INCREMENTAL", saved);
+        }
     }
+
 
     [Fact]
     public async Task IdentitySyncRunsOnFull()

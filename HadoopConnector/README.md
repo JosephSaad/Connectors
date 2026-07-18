@@ -265,15 +265,18 @@ half-open probe. `/ready` returns 503 while degraded (liveness stays 200);
 default but inert on the happy path; `CIRCUIT_BREAKER=false` is a
 pure-passthrough escape hatch. Details: `docs/RESILIENCE.md`.
 
-### Unified data classification (optional)
+### Connector-applied data classification (optional)
 
 With `CLASSIFICATION=true` every item gets a `SensitivityLabel`
 (Public/Internal/Confidential/Restricted) and `DetectedCategories`
 (PII/PCI/Secret) derived from a dependency-free, timeout-bounded regex scan
 (`config/classification.json`) floored at the object's `sensitivityDefault`;
-`CLASSIFICATION_MANIFEST=true` additionally writes a per-crawl,
-Purview-aligned JSONL export. Off by default — no properties are added when
-off. Details: `docs/CLASSIFICATION.md`.
+`CLASSIFICATION_MANIFEST=true` additionally writes a per-crawl advisory
+catalog/DLP JSONL export. `SensitivityLabel` is a **connector-applied advisory
+tag** (a Graph refiner), **not** a Microsoft Purview-enforced label — it does
+not gate access on its own; `CLASSIFICATION_ENFORCE_ACL=true` (with a group)
+opts into narrowing `Restricted` items' ACLs. Off by default — no properties
+are added when off. Details: `docs/CLASSIFICATION.md`.
 
 ## Optional operational knobs (all off by default)
 

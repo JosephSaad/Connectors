@@ -49,8 +49,11 @@ public sealed class WebhookProcessor
         _schema = schema;
         _clarizen = clarizen;
         _pipeline = pipeline;
-        _debouncer = new EventDebouncer(debounceWindow
-            ?? TimeSpan.FromMilliseconds(EnvFlags.GetInt("CLARIZEN_WEBHOOK_DEBOUNCE_MS", 2000)));
+        _debouncer = new EventDebouncer(
+            debounceWindow
+                ?? TimeSpan.FromMilliseconds(EnvFlags.GetInt("CLARIZEN_WEBHOOK_DEBOUNCE_MS", 2000)),
+            maxPending: Math.Max(1, EnvFlags.GetInt(
+                "CLARIZEN_WEBHOOK_MAX_PENDING", EventDebouncer.DefaultMaxPending)));
     }
 
     public EventDebouncer Debouncer => _debouncer;

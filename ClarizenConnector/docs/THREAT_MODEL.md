@@ -78,8 +78,16 @@ variants.
 
 | Threat | Existing mitigation | Residual |
 |---|---|---|
-| Source data (incl. financials) parked in files (I) | `DEADLETTER_PAYLOAD_MODE=redacted` strips property/content values and response bodies at the shared choke point (`SyncState.AppendFailedRecords` → `DeadLetterRedactor`), keeping ids/error/SHA-256 field hashes; covers the financial-classification paths (tested); `retry-failed` re-fetches from source so redaction costs nothing. Unknown mode values fail fast. | Default is `full` (diagnostic-rich). Tenants under FINANCIAL_DATA governance should run `redacted` — stated in `docs/DEPLOYMENT_ENTERPRISE.md`. The `error` string itself is kept verbatim. |
+| Source data (incl. financials) parked in files (I) | **Default `DEADLETTER_PAYLOAD_MODE=redacted`** (protective by default) strips property/content values and response bodies at the shared choke point (`SyncState.AppendFailedRecords` → `DeadLetterRedactor`), keeping ids/error/SHA-256 field hashes; covers the financial-classification paths (tested); `retry-failed` re-fetches from source so redaction costs nothing. Unknown mode values fail fast. | `full` is now opt-in (diagnostic-rich) — use it only where the queue is ACL'd tightly. The `error` string itself is kept verbatim. |
 | Queue growth (D) | `dead_letter` alert at `ALERT_DEADLETTER_THRESHOLD`, `clarizen_connector_dead_letter_depth` gauge, runbook. | — |
+
+## 6a. Directories at rest & governance decisions
+
+| Threat | Existing mitigation | Residual |
+|---|---|---|
+| Log/state/dead-letter dirs world-readable on a shared host (I) | Created owner-only at startup (`DirectoryHardening`): POSIX `chmod 0700`; Windows best-effort owner+Administrators+SYSTEM via `icacls`, inheritance reset. Best-effort — never throws (logs a warning). | Best-effort on Windows / non-POSIX mounts; env files remain the trust root — ACL them. |
+| Undetectable tampering with why an item was hidden/restricted (T,R) | `DECISION_LEDGER` (default on): append-only, SHA-256 hash-chained ledger of EXCLUSION and ACL-RESTRICTION decisions (`logs/decisions_<id>.jsonl`), self-verifiable — any edit/reorder/removal breaks the chain. Low-volume (not every ingest). | Ledger integrity depends on the file not being wholesale replaced; store off-host for strong non-repudiation. |
+| Stale index served after crawling stops (I) | Optional `GRAPH_ITEM_TTL_DAYS` stamps `expirationDateTime` so the index self-expires after an outage. | Off by default; set above the full-crawl cadence so healthy items never expire. |
 
 ## 7. Service account + host
 

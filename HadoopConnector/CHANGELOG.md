@@ -5,6 +5,53 @@ All notable changes to the BDH Hadoop Copilot Connector. The format follows
 [SemVer](https://semver.org/). Assembly version: `<Version>` in
 `src/HadoopConnector/HadoopConnector.csproj`; release tags are `v<version>`.
 
+## [Unreleased]
+
+Bank-grade hardening follow-ups. Two safe-default flips (operators should note
+them); everything else is additive and off/unchanged by default.
+
+### Changed (safe-default flips — action may be required)
+
+- **Dead-letter payload mode now defaults to `redacted`** (was `full`):
+  `DEADLETTER_PAYLOAD_MODE` unset no longer stores record VALUES in the
+  dead-letter queue — only ids, object type, error, property names, sizes and
+  SHA-256 hashes. Set `DEADLETTER_PAYLOAD_MODE=full` to restore the verbatim
+  payloads for fast diagnosis. An **unrecognized value now fails fast at config
+  load** (a typo can no longer silently pick a mode). `validate-config` reports
+  it too. (`Config/DeadLetterRedaction.cs`, `Config/AppConfig.cs`)
+- **`IDENTITY_SYNC_ON_INCREMENTAL` now defaults to ON**: the entitlement
+  (BDH→Entra) mapping re-syncs on incremental crawls too, shrinking entitlement
+  lag to the incremental cadence. Set it `false` to restrict identity sync to
+  full crawls. Residual, non-real-time lag documented (an item's ACL is only
+  re-emitted when its source record changes — schedule full crawls at your
+  entitlement-freshness SLA). (`Infrastructure/EnvFlags.cs`)
+
+### Added
+
+- **Restrictive filesystem permissions at startup**: the local state
+  directories (logs / state / dead-letter) are created **owner-only** — POSIX
+  `0700`; on Windows a best-effort `icacls` lock-down (owner + Administrators +
+  SYSTEM, inheritance broken). Best-effort, never fatal.
+  (`Infrastructure/SecureDirectories.cs`)
+- **Optional classification ACL enforcement** (`CLASSIFICATION_ENFORCE_ACL` +
+  `CLASSIFICATION_RESTRICTED_GROUP_ID`, default OFF): when on, top-tier
+  (`Restricted`) items have their ACL narrowed to the configured Entra group so
+  the classification tag actually gates retrieval. (`Graph/Ingest.cs`)
+- **Stale-index expiry** (`GRAPH_ITEM_TTL_DAYS`, default unset): stamps ingested
+  items with `expirationDateTime = now + TTL` so the index self-expires if
+  crawling stops. (`Graph/Models.cs`, `Item/ItemConverter.cs`)
+- **Immutable decision ledger** (`DECISION_LEDGER`, default ON): append-only,
+  SHA-256 hash-chained audit of EXCLUSION and ACL_RESTRICTION decisions with a
+  `Verify()` that detects any edit, deletion or reorder.
+  (`Infrastructure/DecisionLedger.cs`)
+
+### Documentation / honesty
+
+- Classification naming/docs corrected: `SensitivityLabel` is a
+  connector-applied **advisory tag** (a Graph refiner), **not** a Microsoft
+  Purview-enforced label — it does not encrypt or gate access on its own (the
+  wire schema property name is unchanged for back-compat).
+
 ## [1.0.0] — 2026-07-18
 
 First production release: the full connector chassis plus the enterprise

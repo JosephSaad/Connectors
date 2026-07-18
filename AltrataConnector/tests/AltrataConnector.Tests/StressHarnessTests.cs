@@ -329,6 +329,7 @@ public class DsarErasureStressTests
             Alerts = new Alerting("AltrataScale"),
             Audit = new AuditLog("AltrataScale", logsDir: System.IO.Path.Combine(root, "logs")),
             Erasure = new ErasureLedger("AltrataScale", logsDir: System.IO.Path.Combine(root, "logs")),
+            Decisions = new DecisionLedger("AltrataScale", logsDir: System.IO.Path.Combine(root, "logs")),
             GraphBreaker = new CircuitBreaker("graph", new CircuitBreakerOptions { Enabled = false }),
             ApiBreaker = new CircuitBreaker("api", new CircuitBreakerOptions { Enabled = false }),
         };
@@ -404,6 +405,7 @@ public class DsarErasureStressTests
             Alerts = new Alerting("AltrataConc"),
             Audit = new AuditLog("AltrataConc", logsDir: System.IO.Path.Combine(root, "logs")),
             Erasure = new ErasureLedger("AltrataConc", logsDir: System.IO.Path.Combine(root, "logs")),
+            Decisions = new DecisionLedger("AltrataConc", logsDir: System.IO.Path.Combine(root, "logs")),
             GraphBreaker = new CircuitBreaker("graph", new CircuitBreakerOptions { Enabled = false }),
             ApiBreaker = new CircuitBreaker("api", new CircuitBreakerOptions { Enabled = false }),
         };

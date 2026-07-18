@@ -93,10 +93,18 @@ Tiers: **1** = licensed PII or compliance record — strictest ACLs
 **2** = ids/hashes/operational metadata — service-account-only ACLs;
 **3** = low sensitivity.
 
+**Startup filesystem hardening.** The connector creates the logs + state
+directories **owner-only** at startup — POSIX `chmod 0700`; on Windows a
+best-effort `icacls` breaks inheritance and grants owner + Administrators only.
+This is defence-in-depth beneath the deployment ACLs, not a replacement: it is
+best-effort (a share/volume that cannot express the mode logs a WARNING and
+continues), so still apply the tier ACLs above out of band.
+
 | Store | Contents | Tier | Protection |
 |---|---|---|---|
 | Identity DB (`data/{ID}_identity.db` / `dbo.altrata_id_*`) | CRM contacts (names, emails, employers), altrata↔CRM crosswalk, ingested-item inventory + ACL hashes, item↔subject reverse index, path index, seat list | **1** | strict ACLs; SQL login least-privilege; backed up tier 2 cadence, erasure-verified on restore |
 | Erasure ledger (`logs/erasure_ledger_{ID}.jsonl`) | subject ids (+email when given), items removed, actor, hash chain | **1** (compliance record — retained across purge-all by design) | append-only handle, hash chain + `Verify` gauge/SIEM alert, strict ACLs, per-erasure backup, SIEM copy |
+| Decision ledger (`logs/decision_ledger_{ID}.jsonl`) | exclusion / ACL-restriction decisions: opaque item/delivery id, decision, PII-safe reason, actor, hash chain | **2** (ids/decisions only — no personal values, test-enforced) | append-only handle, hash chain + `Verify` (`altrata_decision_ledger_broken`), strict ACLs |
 | Suppression list (inside `data/{ID}_state.json` / `dbo.altrata_suppressed`) | erased subject ids | **1** (erasure durability depends on it) | strict ACLs; **per-erasure backup — the ONLY state whose loss re-exposes erased subjects** (`docs/DR.md`) |
 | Dead-letter queue (`logs/failed_records_{ID}.jsonl` / `dbo.altrata_deadletter`) | REDACTED mode (default): item/delivery ids, subject HASHES, error, attempts. FULL mode: + the complete transformed profile payload | **2** redacted / **1** full | strict ACLs either way; forget-subject scrubs the subject's queued upserts; replay guard refuses erased subjects; no-PII test over the file in redacted mode |
 | Review queue (`logs/match_review_{ID}.jsonl`) | ids, scores, 16-hex hashes of normalized name/employer — never raw values | **2** | service-account ACLs; adjudicators dereference via stores |
@@ -149,9 +157,18 @@ replayable; the never-everyone ACL invariant holds on every replay path
 - Suppression precedes withdrawal in `forget-subject`; crawls re-check
   suppression post-PUT; replays refuse erased subjects; DELETEs always
   complete.
-- Ledger appends refuse a corrupt chain; verification failures set
-  `altrata_erasure_ledger_broken` and are a SECURITY incident
-  (`docs/SIEM.md`).
-- Logs, spans, Event Log mirror, dead-letter file (redacted), review queue:
-  ids/counts/hashes/enums only — never names, emails, wealth figures
-  (test-enforced).
+- Ledger appends (erasure AND decision) refuse a corrupt chain; verification
+  failures set `altrata_erasure_ledger_broken` / `altrata_decision_ledger_broken`
+  and are a SECURITY incident (`docs/SIEM.md`). Both share one hash-chain
+  implementation (`HashChainedLedger<T>`).
+- Purpose-based authorization: when `PURPOSE_ALLOWLIST` is set, a disallowed
+  purpose is DENIED **before** any billable/sensitive action, audited
+  (`Decision=deny`) and metered (`altrata_purpose_denied_total`); unset =
+  record-only (back-compat), logged so the posture is never silent.
+- `sensitivityLabel` is an ADVISORY connector-applied classification TAG, not a
+  Purview-enforced label. The only hard enforcement is `CLASSIFICATION_ENFORCE_ACL`
+  (top-tier items locked to the reviewer group); that ACL restriction can never
+  be an everyone-grant and is recorded in the decision ledger.
+- Logs, spans, Event Log mirror, dead-letter file (redacted), review queue,
+  decision ledger, purpose audit: ids/counts/hashes/enums only — never names,
+  emails, wealth figures (test-enforced).

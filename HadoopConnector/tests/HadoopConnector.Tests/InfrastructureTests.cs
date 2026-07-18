@@ -362,6 +362,31 @@ public class EnvFlagsTests
         using (new EnvScope(("USE_SQL_SERVER", null), ("SQL_CONNECTION_STRING", "Server=x")))
             Assert.False(EnvFlags.UseSqlServer);
     }
+
+    // Entitlement freshness (#5): identity sync runs on incrementals BY DEFAULT
+    // (unset → ON) so the mapping tracks the incremental cadence; an explicit
+    // false/0/no opts out to full-crawls-only.
+    [Fact]
+    public void IdentitySyncOnIncremental_DefaultsOn()
+    {
+        using (new EnvScope(("IDENTITY_SYNC_ON_INCREMENTAL", null)))
+            Assert.True(EnvFlags.IdentitySyncOnIncremental);
+        using (new EnvScope(("IDENTITY_SYNC_ON_INCREMENTAL", "")))
+            Assert.True(EnvFlags.IdentitySyncOnIncremental);
+    }
+
+    [Theory]
+    [InlineData("false", false)]
+    [InlineData("0", false)]
+    [InlineData("no", false)]
+    [InlineData("true", true)]
+    [InlineData("1", true)]
+    [InlineData("yes", true)]
+    public void IdentitySyncOnIncremental_ExplicitValueWins(string value, bool expected)
+    {
+        using var scope = new EnvScope(("IDENTITY_SYNC_ON_INCREMENTAL", value));
+        Assert.Equal(expected, EnvFlags.IdentitySyncOnIncremental);
+    }
 }
 
 public class ServiceStopTests

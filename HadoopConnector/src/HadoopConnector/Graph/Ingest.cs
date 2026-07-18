@@ -126,6 +126,9 @@ public sealed class IngestPipeline
     private readonly Func<string, IItemInventory> _inventoryFactory;
     private readonly Item.SensitivityClassifier? _classifier;
     private Item.ClassificationManifest? _manifest;
+    private readonly bool _enforceRestrictedAcl;
+    private readonly string? _restrictedGroupId;
+    private readonly DecisionLedger? _decisionLedger;
     private readonly object _statsLock = new();
     private readonly object _inventoryLock = new();
 
@@ -170,6 +173,17 @@ public sealed class IngestPipeline
             ?? (config.Classification
                 ? new Item.SensitivityClassifier(Content.ContentClassifier.Load())
                 : null);
+        // Optional classification enforcement (advisory-by-default): only narrow
+        // Restricted-tier ACLs when the operator opted in AND named a group.
+        _enforceRestrictedAcl = config.ClassificationEnforceAcl
+            && !string.IsNullOrWhiteSpace(config.ClassificationRestrictedGroupId);
+        _restrictedGroupId = config.ClassificationRestrictedGroupId;
+        // Immutable, hash-chained audit of the low-volume access decisions
+        // (exclusions + ACL restrictions). Node-local file under logs/; on by
+        // default (DECISION_LEDGER=false disables it).
+        _decisionLedger = DecisionLedger.Enabled
+            ? new DecisionLedger(config.ConnectorId, Config.SyncState.LogsDir)
+            : null;
     }
 
     /// <summary>DELETION_SYNC — existence-sweep deletion sync on full crawls. Default ON.</summary>
@@ -202,7 +216,8 @@ public sealed class IngestPipeline
         var summary = new IngestSummary();
         Metrics.IncCrawlsStarted();
 
-        // Optional Purview-aligned classification manifest for this crawl.
+        // Optional advisory-classification manifest for this crawl (a file-based
+        // catalog/DLP export — NOT a live Microsoft Purview label operation).
         _manifest = _classifier is not null && _config.ClassificationManifest
             ? new Item.ClassificationManifest(_config.ConnectorId, Config.SyncState.LogsDir)
             : null;
@@ -275,6 +290,24 @@ public sealed class IngestPipeline
             return;
         var outcome = _classifier.Classify(item, objectConfig);
         _manifest?.Record(item.Id, objectConfig.ObjectName, outcome.Label, outcome.Categories);
+
+        // Advisory by default: the SensitivityLabel is a connector-applied tag /
+        // refiner, not a Purview-enforced label, so it does NOT gate access on its
+        // own. Optional enforcement (CLASSIFICATION_ENFORCE_ACL): narrow top-tier
+        // (Restricted) items to the configured group so the tag actually limits
+        // retrieval. Non-Restricted items are never touched. Recorded in the
+        // immutable decision ledger.
+        if (_enforceRestrictedAcl && outcome.Label == Item.SensitivityLabel.Restricted)
+        {
+            var before = item.Acl.Count;
+            item.Acl.Clear();
+            item.Acl.Add(new AclEntry(AclEntryType.Group, _restrictedGroupId!, AclAccessType.Grant));
+            _decisionLedger?.Record(
+                item.Id, objectConfig.ObjectName, DecisionLedger.AclRestriction,
+                $"Restricted-tier item ACL narrowed to group {_restrictedGroupId} "
+                + $"(was {before} ACL entr{(before == 1 ? "y" : "ies")}; "
+                + $"categories: {string.Join(",", outcome.Categories)}).");
+        }
     }
 
     /// <summary>One crawl pass against a single Graph connection (the whole run, or one shard).</summary>
@@ -790,6 +823,9 @@ public sealed class IngestPipeline
                     + "(set FALLBACK_ACL_GROUP_ID to grant a default group).");
                 summary.NoAclSkipped++;
                 Metrics.IncItemsSkipped();
+                _decisionLedger?.Record(
+                    record.ItemId, objectConfig.ObjectName, DecisionLedger.Exclusion,
+                    "no resolvable ACL principals (item withheld from the index).");
                 continue;
             }
             // Per-RECORD isolation for the pure transform: a conversion crash is
@@ -1074,7 +1110,12 @@ public sealed class IngestPipeline
     {
         var acl = _aclResolver.Resolve(record, objectConfig);
         if (acl.Count == 0)
+        {
+            _decisionLedger?.Record(
+                record.ItemId, objectConfig.ObjectName, DecisionLedger.Exclusion,
+                "no resolvable ACL principals (item withheld from the index).");
             return (false, "No resolvable ACL principals");
+        }
         var item = _converter.Convert(record, objectConfig, acl);
         ApplyClassification(item, objectConfig);
 

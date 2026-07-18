@@ -1,7 +1,12 @@
 // Infrastructure/DeadLetterRedactor.cs
 // ------------------------------------
 // Dead-letter payload protection (DEADLETTER_PAYLOAD_MODE=full|redacted,
-// default full — validated in AppConfig.Load).
+// default REDACTED — validated in AppConfig.Load).
+//
+// The shipped default is `redacted` (protective): a dead-letter file/table is
+// long-lived source data at rest, so it is stripped unless an operator opts
+// into `full` for diagnostic-rich records. Set DEADLETTER_PAYLOAD_MODE=full to
+// keep verbatim payloads (do this only where the queue is ACL'd tightly).
 //
 // Dead-letter records optionally carry the failed externalItem request body
 // for diagnosis. That body contains real source data — including financial
@@ -33,10 +38,16 @@ public static class DeadLetterRedactor
 {
     public const string ModeEnvVar = "DEADLETTER_PAYLOAD_MODE";
 
-    /// <summary>True when DEADLETTER_PAYLOAD_MODE=redacted (read at write time).</summary>
+    /// <summary>
+    /// True unless DEADLETTER_PAYLOAD_MODE is explicitly <c>full</c> (read at
+    /// write time). The default (unset) is redacted — protective by default —
+    /// so only a deliberate <c>full</c> keeps verbatim payloads on disk. Any
+    /// other value is rejected at config load (AppConfig.Load), so treating an
+    /// unrecognised value here as redacted is the fail-safe.
+    /// </summary>
     public static bool RedactionEnabled =>
-        string.Equals(
-            Environment.GetEnvironmentVariable(ModeEnvVar), "redacted",
+        !string.Equals(
+            Environment.GetEnvironmentVariable(ModeEnvVar)?.Trim(), "full",
             StringComparison.OrdinalIgnoreCase);
 
     /// <summary>

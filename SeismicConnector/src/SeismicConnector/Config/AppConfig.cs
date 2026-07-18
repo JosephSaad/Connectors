@@ -75,8 +75,11 @@ public sealed class SeismicSettings
 
     /// <summary>
     /// CLASSIFICATION=true → run the dependency-free content classifier over the
-    /// indexed text of every ingested item and stamp a unified sensitivity
-    /// label + detected categories as properties. Default off (behaviour
+    /// indexed text of every ingested item and stamp an ADVISORY, connector-
+    /// applied sensitivity classification TAG (the <c>sensitivityLabel</c>
+    /// property) + detected categories. This is NOT a Microsoft Purview-enforced
+    /// label — it carries no encryption/DLP enforcement; it is a search/triage
+    /// signal (Purview-aligned in naming only). Default off (behaviour
     /// unchanged). Never weakens the No-MNE exclusion — excluded content is
     /// still never ingested; classification applies only to what IS ingested.
     /// </summary>
@@ -84,9 +87,9 @@ public sealed class SeismicSettings
 
     /// <summary>
     /// CLASSIFICATION_MANIFEST=true → additionally write a per-crawl
-    /// Purview-aligned classification manifest (item → label + categories, plus
-    /// counts) for a downstream catalog/DLP job. Requires CLASSIFICATION=true.
-    /// Default off.
+    /// classification manifest (item → advisory tag + categories, plus counts)
+    /// for a downstream catalog/DLP job. Purview-aligned in naming only — no
+    /// Purview API call. Requires CLASSIFICATION=true. Default off.
     /// </summary>
     public bool ClassificationManifest { get; init; }
 
@@ -96,6 +99,28 @@ public sealed class SeismicSettings
     /// <c>tenant</c> (grant everyone in the tenant).
     /// </summary>
     public string FallbackAcl { get; init; } = "skip";
+
+    /// <summary>
+    /// GRAPH_ITEM_TTL_DAYS: when &gt; 0, every ingested externalItem is stamped
+    /// with <c>expirationDateTime = now + TTL</c> so the index self-expires if
+    /// crawling stops (defense-in-depth after an outage — a stale, no-longer-
+    /// refreshed item ages out instead of lingering forever). 0 = unset =
+    /// current behaviour (items never auto-expire; withdrawal is crawl-driven).
+    /// </summary>
+    public int GraphItemTtlDays { get; init; }
+
+    /// <summary>
+    /// CLASSIFICATION_ENFORCE_ACL: when true (and an Entra enforcement group is
+    /// configured) items whose derived sensitivity label is the top tier
+    /// (<c>Restricted</c>) have their ACL RESTRICTED to that group. Default off
+    /// (the sensitivity label stays advisory only). Requires CLASSIFICATION=true
+    /// to have any effect.
+    /// </summary>
+    public bool ClassificationEnforceAcl { get; init; }
+
+    /// <summary>CLASSIFICATION_ENFORCE_GROUP: Entra group object id that Restricted
+    /// items are locked to when <see cref="ClassificationEnforceAcl"/> is on.</summary>
+    public string? ClassificationEnforceGroup { get; init; }
 }
 
 public sealed class GraphSettings
@@ -220,6 +245,10 @@ public sealed class AppConfig
                 ClassificationManifest = Settings.BoolEnv("CLASSIFICATION")
                     && Settings.BoolEnv("CLASSIFICATION_MANIFEST"),
                 FallbackAcl = Settings.EnvOr("SEISMIC_FALLBACK_ACL", "skip").ToLowerInvariant(),
+                GraphItemTtlDays = Math.Max(0, Settings.IntEnv("GRAPH_ITEM_TTL_DAYS", 0)),
+                ClassificationEnforceAcl = Settings.BoolEnv("CLASSIFICATION_ENFORCE_ACL"),
+                ClassificationEnforceGroup =
+                    Environment.GetEnvironmentVariable("CLASSIFICATION_ENFORCE_GROUP")?.Trim(),
             },
             Graph = new GraphSettings
             {
@@ -268,6 +297,30 @@ public sealed class AppConfig
         if (config.Seismic.FallbackAcl is not ("skip" or "tenant"))
             throw new ConfigException(
                 $"Invalid SEISMIC_FALLBACK_ACL '{config.Seismic.FallbackAcl}': expected 'skip' or 'tenant'.");
+
+        // Dead-letter payload mode: reject an unrecognized value at load rather
+        // than silently falling back — the live reader fails safe (redacts), but
+        // a typo like DEADLETTER_PAYLOAD_MODE=redact must be surfaced, not
+        // quietly honoured as some default.
+        var payloadMode = Environment.GetEnvironmentVariable(SyncState.PayloadModeEnvVar)?.Trim();
+        if (!string.IsNullOrWhiteSpace(payloadMode)
+            && !payloadMode.Equals("full", StringComparison.OrdinalIgnoreCase)
+            && !payloadMode.Equals("redacted", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ConfigException(
+                $"Invalid {SyncState.PayloadModeEnvVar} '{payloadMode}': expected 'full' or 'redacted'.");
+        }
+
+        // Classification-enforced ACL requires a target Entra group to lock
+        // Restricted items to — a naked CLASSIFICATION_ENFORCE_ACL=true with no
+        // group would have nothing to restrict TO, so fail fast.
+        if (config.Seismic.ClassificationEnforceAcl
+            && string.IsNullOrWhiteSpace(config.Seismic.ClassificationEnforceGroup))
+        {
+            throw new ConfigException(
+                "Invalid configuration: CLASSIFICATION_ENFORCE_ACL=true requires CLASSIFICATION_ENFORCE_GROUP "
+                + "(the Entra group object id that Restricted items are locked to).");
+        }
 
         // HA requires the shared SQL backend — fail fast, matching the reference contract.
         if (Settings.BoolEnv("HA_MODE") && !Settings.BoolEnv("USE_SQL_SERVER"))

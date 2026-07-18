@@ -142,12 +142,91 @@ public class ExclusionFilterTests
         Assert.NotEmpty(rules.FlagProperties);
     }
 
+    // ── MNPI fail-closed: LoadFile must never silently mean "nothing excluded" ──
+
     [Fact]
-    public void MissingRulesFile_MeansNoRules()
+    public void MissingRulesFile_FailsClosed()
     {
-        var rules = ExclusionRules.LoadFile(Path.Combine(Path.GetTempPath(), "nope-" + Guid.NewGuid() + ".json"));
-        Assert.Empty(rules.ExcludedFlags);
-        Assert.Empty(rules.RestrictedLibraries);
+        var path = Path.Combine(Path.GetTempPath(), "nope-" + Guid.NewGuid() + ".json");
+        var ex = Assert.Throws<ConfigException>(() => ExclusionRules.LoadFile(path));
+        Assert.Contains(path, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EmptyFile_FailsClosed()
+    {
+        var path = WriteTemp("");
+        try
+        {
+            var ex = Assert.Throws<ConfigException>(() => ExclusionRules.LoadFile(path));
+            Assert.Contains(path, ex.Message, StringComparison.Ordinal);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void EmptyObjectFile_FailsClosed()
+    {
+        var path = WriteTemp("{}");
+        try
+        {
+            Assert.Throws<ConfigException>(() => ExclusionRules.LoadFile(path));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void NullLiteralFile_FailsClosed()
+    {
+        var path = WriteTemp("null");
+        try
+        {
+            Assert.Throws<ConfigException>(() => ExclusionRules.LoadFile(path));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void MalformedFile_FailsClosed()
+    {
+        var path = WriteTemp("{ this is not json ");
+        try
+        {
+            Assert.Throws<ConfigException>(() => ExclusionRules.LoadFile(path));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void RuleLessFileWithoutSentinel_FailsClosed()
+    {
+        // Structure present but no effective rule → still fail closed.
+        var path = WriteTemp("""{"flagProperties":["classification"]}""");
+        try
+        {
+            Assert.Throws<ConfigException>(() => ExclusionRules.LoadFile(path));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void AcknowledgeNoExclusionsSentinel_OptsIntoRuleLessRun()
+    {
+        var path = WriteTemp("""{"acknowledgeNoExclusions":true}""");
+        try
+        {
+            var rules = ExclusionRules.LoadFile(path);   // must NOT throw
+            Assert.True(rules.HasNoRules);
+            Assert.True(rules.AcknowledgeNoExclusions);
+        }
+        finally { File.Delete(path); }
+    }
+
+    private static string WriteTemp(string content)
+    {
+        var path = Path.Combine(Path.GetTempPath(), "excl-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, content);
+        return path;
     }
 }
 

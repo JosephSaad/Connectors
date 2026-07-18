@@ -81,6 +81,17 @@ ClarizenConnector reconcile --type Project  # one object type
 ClarizenConnector reconcile --fix           # also delete stale items
 ```
 
+## Stale-index expiry (`GRAPH_ITEM_TTL_DAYS`)
+
+Deletion sync is *active* — it needs a full crawl to see that a record is gone.
+As defense-in-depth for the case where crawling itself **stops** (a prolonged
+outage, a wedged host), set `GRAPH_ITEM_TTL_DAYS` > 0: every ingested item is
+stamped with `expirationDateTime = now + TTL`, so the Graph index self-expires
+if it is never refreshed. A healthy connector re-stamps items on each crawl, so
+choose a TTL comfortably above your full-crawl cadence (e.g. cadence × 3) — too
+low and live items expire between crawls. Unset (default) keeps the current
+behaviour: items never expire on their own.
+
 ## Bootstrapping an existing deployment
 
 Deployments created before the inventory existed have indexed items the

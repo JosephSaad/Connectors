@@ -1,9 +1,15 @@
 // Item/SensitivityClassifier.cs
 // -----------------------------
-// Unified data-classification & sensitivity labeling (docs/CLASSIFICATION.md).
+// Connector-applied data classification TAG (docs/CLASSIFICATION.md). This is an
+// ADVISORY classification the connector computes and stamps as Graph refiner
+// properties — it is NOT a Microsoft Purview-enforced sensitivity label: on its
+// own it does not encrypt content or gate access (see CLASSIFICATION_ENFORCE_ACL
+// in Graph/Ingest.cs for the optional, opt-in ACL enforcement). The wire property
+// name stays "SensitivityLabel" for schema back-compat.
+//
 // Derives, for every externalItem, a single taxonomy:
 //
-//   SensitivityLabel ∈ { Public, Internal, Confidential, Restricted }
+//   SensitivityLabel ∈ { Public, Internal, Confidential, Restricted }  (tag)
 //   DetectedCategories : string collection (PII, PCI, Secret, Financial, ...)
 //
 // from two inputs, in precedence order (highest wins):

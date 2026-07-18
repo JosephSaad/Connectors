@@ -303,6 +303,12 @@ public static class Settings
         // TypeInitializationException from the first static HttpClient.
         HttpClientFactory.ValidateStartupConfiguration();
 
+        // Dead-letter payload mode preflight: an unrecognized DEADLETTER_PAYLOAD_MODE
+        // must fail HERE naming the setting, not silently downgrade to full at the
+        // first dead-letter write (which would leak raw CRM values to disk). The
+        // getter throws on a garbage value; the default (unset) is 'redacted'.
+        _ = Config.DeadLetterRedaction.Mode;
+
         var connectorId = RequireEnv("CONNECTOR_ID");
         ValidateConnectorId(connectorId);
 

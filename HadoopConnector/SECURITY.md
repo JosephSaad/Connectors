@@ -98,11 +98,12 @@ ACLs per `docs/DEPLOYMENT_ENTERPRISE.md`.
 |---|---|---|---|
 | Sync watermark | `logs/sync_state.json` / `dbo.SyncTimestamps` | connector id + timestamp | low |
 | Checkpoints | `logs/checkpoint_<id>.json` / `dbo.Checkpoints` | object names, chunk indexes | low |
-| Dead-letter queue | `logs/failed_records_<id>.jsonl` / `dbo.DeadLetter` | item ids, errors, correlation ids — and with `DEADLETTER_PAYLOAD_MODE=full` (default) the FULL failed record payloads | **highest-risk store**; set `redacted` where queue storage is less protected than the source (`docs/THREAT_MODEL.md` §5) |
+| Dead-letter queue | `logs/failed_records_<id>.jsonl` / `dbo.DeadLetter` | item ids, errors, correlation ids — and only with `DEADLETTER_PAYLOAD_MODE=full` (opt-in) the FULL failed record payloads; the **default is now `redacted`** (values stripped pre-write) | **highest-risk store** when in `full`; keep the default `redacted` unless queue storage is protected like the source (`docs/THREAT_MODEL.md` §5) |
 | Ingested-item inventory | `data/<id>_inventory.db` / `dbo.ItemInventory` | item ids + object types + timestamps | ids reveal existence, not content |
 | Identity store | `data/<id>_identity.db` / `dbo.Principals` | Salesforce user id ↔ email ↔ Entra object id | personal data (emails) — in scope for DSAR/retention policy |
 | Run logs | `logs/{prefix}_{ts}/connector.log` | operational text; record VALUES only in rare error paths; never credentials | prune with `LOG_RETENTION_DAYS`; SIEM retention governs the shipped copy |
-| Classification manifest (opt-in) | `logs/classification_<id>_<stamp>.jsonl` | item ids + labels + detected categories (never matched text) | metadata about sensitivity, not the sensitive text |
+| Classification manifest (opt-in) | `logs/classification_<id>_<stamp>.jsonl` | item ids + advisory tags + detected categories (never matched text) | metadata about sensitivity, not the sensitive text |
+| Decision ledger | `logs/decisions_<id>.jsonl` | item ids + object types + EXCLUSION / ACL_RESTRICTION decisions + reason, SHA-256 hash-chained | tamper-evident audit of access decisions; protect with the same 0700/NTFS ACLs |
 | Config | `config/*.json`, `env/.env.local` | topology, filters, ACL modes | no secrets by contract; filters are a security control |
 | Secrets | `env/.env.local.user` / Key Vault | see credential inventory | never committed; file ACLs or vault RBAC |
 | The Graph connection | tenant-side | the indexed content + per-item ACLs | governed by M365; deletion sweep + `reconcile --fix` keep it faithful to BDH |

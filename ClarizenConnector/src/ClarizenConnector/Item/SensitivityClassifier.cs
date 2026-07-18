@@ -1,6 +1,16 @@
 // Item/SensitivityClassifier.cs
 // -----------------------------
-// Unified data-classification & sensitivity labeling (docs/CLASSIFICATION.md).
+// Unified data-classification & sensitivity tagging (docs/CLASSIFICATION.md).
+//
+// IMPORTANT: the "SensitivityLabel" this derives is a connector-applied,
+// ADVISORY classification TAG stamped as a Graph external-item property. It is
+// NOT a Microsoft Purview / MIP sensitivity label and is NOT enforced by
+// Purview, DLP, or encryption. By itself it only informs search verticals and
+// downstream tooling. To make the top tier actually restrictive, turn on
+// CLASSIFICATION_ENFORCE_ACL (see EnforceRestrictedAcl) — that locks Restricted
+// items to a configured Entra group at the connector's own ACL layer. The Graph
+// property name stays "SensitivityLabel" for wire back-compat.
+//
 // Derives, for every externalItem, a single taxonomy:
 //
 //   SensitivityLabel ∈ { Public, Internal, Confidential, Restricted }
@@ -80,6 +90,32 @@ public sealed class SensitivityClassifier
             Metrics.IncSensitiveDetection(category);
 
         return new ClassificationOutcome(label, detected.ToArray());
+    }
+
+    /// <summary>
+    /// Optional enforcement (CLASSIFICATION_ENFORCE_ACL): when on and a group is
+    /// configured, a top-tier (Restricted) item has its ACL grants replaced with
+    /// a single grant to <see cref="AppConfig.ClassificationRestrictedGroupId"/>,
+    /// preserving explicit denies — turning the advisory tag into a real ACL
+    /// restriction at the connector layer. Returns true when it restricted the
+    /// item. No-op (returns false) when enforcement is off, the label is below
+    /// Restricted, or no group is configured. Non-Restricted items are untouched.
+    /// </summary>
+    public static bool EnforceRestrictedAcl(ExternalItem item, SensitivityLabel label, AppConfig config)
+    {
+        if (!config.ClassificationEnforceAcl
+            || label != SensitivityLabel.Restricted
+            || string.IsNullOrWhiteSpace(config.ClassificationRestrictedGroupId))
+        {
+            return false;
+        }
+
+        var denies = item.Acl.Where(e => e.AccessType == AclAccessType.Deny).ToList();
+        item.Acl.Clear();
+        item.Acl.Add(new AclEntry(
+            AclEntryType.Group, config.ClassificationRestrictedGroupId!, AclAccessType.Grant));
+        item.Acl.AddRange(denies);
+        return true;
     }
 
     /// <summary>Precedence: Restricted (PII/PCI/Secret) &gt; Confidential

@@ -1,10 +1,12 @@
 // Item/ClassificationManifest.cs
 // ------------------------------
-// Optional Purview-aligned classification export (CLASSIFICATION_MANIFEST=true).
-// A per-crawl JSONL under logs/ mapping each item to its sensitivity label +
-// detected categories, plus a summary line with per-label counts — for catalog
-// / DLP ingestion. File-based, like the reconciliation reports: NO live Purview
-// API call. Thread-safe (concurrent object/batch workers append).
+// Optional advisory-classification export (CLASSIFICATION_MANIFEST=true).
+// A per-crawl JSONL under logs/ mapping each item to its connector-applied
+// sensitivity TAG + detected categories, plus a summary line with per-label
+// counts — for catalog / DLP ingestion. File-based, like the reconciliation
+// reports: NO live Microsoft Purview API call, and the tag is advisory (it is
+// not a Purview-enforced label). Thread-safe (concurrent object/batch workers
+// append).
 //
 // File: logs/classification_{connectorId}_{yyyyMMdd_HHmmss}.jsonl
 //   per item:  {"item_id","object_type","sensitivity_label","categories":[...]}

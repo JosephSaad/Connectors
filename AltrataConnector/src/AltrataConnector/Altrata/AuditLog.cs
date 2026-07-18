@@ -25,6 +25,9 @@ public sealed record AuditEntry
     public string? AltrataId { get; init; }
     public required string Purpose { get; init; }
     public bool Billable { get; init; }
+    /// <summary>Purpose-policy outcome: "allow" | "deny" (null for legacy
+    /// entries and non-purpose actions). See PurposePolicy.</summary>
+    public string? Decision { get; init; }
 }
 
 public interface IAuditLog

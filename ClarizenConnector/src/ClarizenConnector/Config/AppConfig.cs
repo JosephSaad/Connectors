@@ -65,8 +65,9 @@ public sealed partial class AppConfig
 
     // ── Financial-field classification ───────────────────────────────────────
     public string? FinancialDataGroupId { get; init; }
-    /// <summary>tag | filter | acl — see docs/OBSERVABILITY.md and README.</summary>
-    public string FinancialDataMode { get; init; } = "tag";
+    /// <summary>tag | filter | acl — default <c>filter</c> (protective: financial
+    /// values are redacted). See docs/OBSERVABILITY.md and README.</summary>
+    public string FinancialDataMode { get; init; } = "filter";
 
     // ── Attachment content ingestion (docs/ATTACHMENTS.md) ───────────────────
     /// <summary>ATTACHMENT_INGESTION — download + extract attachment text. Default OFF.</summary>
@@ -78,10 +79,26 @@ public sealed partial class AppConfig
         DefaultAttachmentTypes;
 
     // ── Unified data classification & sensitivity labeling (docs/CLASSIFICATION.md) ─
-    /// <summary>CLASSIFICATION — derive SensitivityLabel + DetectedCategories. Default OFF.</summary>
+    /// <summary>CLASSIFICATION — derive SensitivityLabel + DetectedCategories. Default OFF.
+    /// NOTE: SensitivityLabel is a connector-applied ADVISORY classification tag,
+    /// NOT a Microsoft Purview-enforced sensitivity label.</summary>
     public bool Classification { get; init; }
     /// <summary>CLASSIFICATION_MANIFEST — write a per-crawl classification JSONL. Default OFF.</summary>
     public bool ClassificationManifest { get; init; }
+    /// <summary>CLASSIFICATION_ENFORCE_ACL — when true (and a group is configured),
+    /// top-tier (Restricted) items get their ACL grants replaced with a single
+    /// grant to <see cref="ClassificationRestrictedGroupId"/> (denies preserved).
+    /// Default OFF (the classification tag stays advisory). Requires CLASSIFICATION.</summary>
+    public bool ClassificationEnforceAcl { get; init; }
+    /// <summary>CLASSIFICATION_RESTRICTED_GROUP_ID — Entra group that Restricted
+    /// items are locked to when CLASSIFICATION_ENFORCE_ACL is on.</summary>
+    public string? ClassificationRestrictedGroupId { get; init; }
+
+    // ── Stale-index expiry (docs/DELETION_SYNC.md) ───────────────────────────
+    /// <summary>GRAPH_ITEM_TTL_DAYS — when &gt; 0, ingested items are stamped with
+    /// expirationDateTime = now + TTL so the search index self-expires if crawling
+    /// stops (defense-in-depth after an outage). 0 (default/unset) = no expiry.</summary>
+    public int GraphItemTtlDays { get; init; }
 
     internal static readonly IReadOnlySet<string> DefaultAttachmentTypes =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -121,7 +138,10 @@ public sealed partial class AppConfig
         if (idError is not null)
             throw new ArgumentException($"Invalid configuration: {idError}");
 
-        var mode = EnvFlags.GetString("FINANCIAL_DATA_MODE", "tag").ToLowerInvariant();
+        // FINANCIAL_DATA_MODE default is `filter` (protective: financial values
+        // are redacted). `tag` classifies but does NOT restrict — an operator
+        // must opt into it deliberately.
+        var mode = EnvFlags.GetString("FINANCIAL_DATA_MODE", "filter").ToLowerInvariant();
         if (mode is not ("tag" or "filter" or "acl"))
             throw new ArgumentException(
                 "Invalid configuration: FINANCIAL_DATA_MODE must be one of tag | filter | acl.");
@@ -131,10 +151,22 @@ public sealed partial class AppConfig
             throw new ArgumentException(
                 "Invalid configuration: FINANCIAL_DATA_MODE=acl requires FINANCIAL_DATA_GROUP_ID.");
 
+        // Classification ACL enforcement needs a target group — otherwise there
+        // is nothing to lock Restricted items to (a silent no-op would be a
+        // governance surprise).
+        var classificationEnforceAcl = EnvFlags.IsTrue("CLASSIFICATION_ENFORCE_ACL");
+        var classificationRestrictedGroup =
+            Environment.GetEnvironmentVariable("CLASSIFICATION_RESTRICTED_GROUP_ID");
+        if (classificationEnforceAcl && string.IsNullOrWhiteSpace(classificationRestrictedGroup))
+            throw new ArgumentException(
+                "Invalid configuration: CLASSIFICATION_ENFORCE_ACL=true requires "
+                + "CLASSIFICATION_RESTRICTED_GROUP_ID.");
+
         // DEADLETTER_PAYLOAD_MODE must be an exact known value — a typo silently
         // meaning "full" would be a data-governance hazard (docs/THREAT_MODEL.md).
+        // The shipped default is `redacted` (protective by default).
         var deadLetterMode = EnvFlags.GetString(
-            Infrastructure.DeadLetterRedactor.ModeEnvVar, "full").ToLowerInvariant();
+            Infrastructure.DeadLetterRedactor.ModeEnvVar, "redacted").ToLowerInvariant();
         if (deadLetterMode is not ("full" or "redacted"))
             throw new ArgumentException(
                 $"Invalid configuration: {Infrastructure.DeadLetterRedactor.ModeEnvVar} "
@@ -227,6 +259,10 @@ public sealed partial class AppConfig
 
             Classification = EnvFlags.IsTrue("CLASSIFICATION"),
             ClassificationManifest = EnvFlags.IsTrue("CLASSIFICATION_MANIFEST"),
+            ClassificationEnforceAcl = classificationEnforceAcl,
+            ClassificationRestrictedGroupId = classificationRestrictedGroup,
+
+            GraphItemTtlDays = Math.Max(0, EnvFlags.GetInt("GRAPH_ITEM_TTL_DAYS", 0)),
         };
     }
 
@@ -299,6 +335,9 @@ public sealed partial class AppConfig
         AttachmentAllowedTypes = AttachmentAllowedTypes,
         Classification = Classification,
         ClassificationManifest = ClassificationManifest,
+        ClassificationEnforceAcl = ClassificationEnforceAcl,
+        ClassificationRestrictedGroupId = ClassificationRestrictedGroupId,
+        GraphItemTtlDays = GraphItemTtlDays,
     };
 
     private static string Require(string name) =>

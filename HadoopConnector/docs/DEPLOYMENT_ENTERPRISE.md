@@ -122,12 +122,27 @@ script, never at runtime.
 | `config\` | Administrators/deploy tooling: Full; service account: Read; everyone else: none. Filters are a security control — write access here IS the ability to weaken it. |
 | `env\.env.local` | as `config\` |
 | `env\.env.local.user` | SYSTEM + service account: Read; Administrators: Full; **no other principal** — or eliminate the file with Key Vault |
-| `logs\`, `data\` | service account: Modify; operators: Read. These hold record ids, error text and — with `DEADLETTER_PAYLOAD_MODE=full` — failed record payloads; classify accordingly or set `redacted` (`docs/THREAT_MODEL.md` §5) |
+| `logs\`, `data\` | service account: Modify; operators: Read. These hold record ids, error text, the identity/inventory DBs, the decision ledger and — only with `DEADLETTER_PAYLOAD_MODE=full` — failed record payloads (the default is `redacted`); classify accordingly (`docs/THREAT_MODEL.md` §5) |
 | certificate PFX (if file-based) | prefer the cert store instead; a PFX on disk gets the `.env.local.user` treatment |
 
 Disable inheritance on the runtime home and audit-log ACL changes on
 `config\` (SACL) — that is the tamper alarm for the filter-as-security-control
 story.
+
+**Startup hardening (belt-and-braces).** The connector also creates its local
+state directories (`logs`, `data`, dead-letter) **owner-only** at startup —
+POSIX `0700`, and on Windows a best-effort `icacls` lock-down that breaks
+inheritance and grants only the current user, Administrators and SYSTEM
+(`Infrastructure/SecureDirectories.cs`). This is best-effort and never fatal: on
+a host where the mode cannot be set it logs a warning and continues, so the
+out-of-band ACLs above remain the authoritative control.
+
+**Entitlement freshness cadence.** Identity (BDH→Entra) re-syncs on incremental
+crawls by default (`IDENTITY_SYNC_ON_INCREMENTAL`, now default ON). The residual
+lag is not real-time: an item's ACL is only re-emitted when its source record
+changes, so unchanged records keep their prior ACL until the next **full** crawl.
+Schedule `--full-crawl-hours` at your entitlement-freshness / de-provisioning SLA
+(and, if you run a separate re-ACL sweep, put it on the same cadence).
 
 ## Fleet topology notes
 

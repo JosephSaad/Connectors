@@ -135,13 +135,41 @@ public static class ValidateConfig
             result.Errors.Add("USE_KEY_VAULT=true requires KEY_VAULT_URI.");
         }
 
-        var financialMode = EnvFlags.GetString("FINANCIAL_DATA_MODE", "tag").ToLowerInvariant();
+        var financialMode = EnvFlags.GetString("FINANCIAL_DATA_MODE", "filter").ToLowerInvariant();
         if (financialMode is not ("tag" or "filter" or "acl"))
             result.Errors.Add("FINANCIAL_DATA_MODE must be one of tag | filter | acl.");
         if (financialMode == "acl"
             && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FINANCIAL_DATA_GROUP_ID")))
         {
             result.Errors.Add("FINANCIAL_DATA_MODE=acl requires FINANCIAL_DATA_GROUP_ID.");
+        }
+        // Loud note: tag mode CLASSIFIES but does NOT restrict financial values —
+        // any reader with item access still sees the figures through Copilot.
+        if (financialMode == "tag")
+        {
+            result.Warnings.Add(
+                "FINANCIAL_DATA_MODE=tag classifies financial data but does NOT restrict it — "
+                + "figures remain visible to any reader with item access. Use filter (default) to "
+                + "redact values, or acl to lock items to FINANCIAL_DATA_GROUP_ID.");
+        }
+
+        // Classification is an ADVISORY connector tag, not a Purview-enforced
+        // label. Enforcement (CLASSIFICATION_ENFORCE_ACL) needs a target group,
+        // and only does anything when CLASSIFICATION is on.
+        if (EnvFlags.IsTrue("CLASSIFICATION_ENFORCE_ACL"))
+        {
+            if (string.IsNullOrWhiteSpace(
+                    Environment.GetEnvironmentVariable("CLASSIFICATION_RESTRICTED_GROUP_ID")))
+            {
+                result.Errors.Add(
+                    "CLASSIFICATION_ENFORCE_ACL=true requires CLASSIFICATION_RESTRICTED_GROUP_ID.");
+            }
+            if (!EnvFlags.IsTrue("CLASSIFICATION"))
+            {
+                result.Warnings.Add(
+                    "CLASSIFICATION_ENFORCE_ACL=true has no effect unless CLASSIFICATION=true "
+                    + "(the SensitivityLabel tag must be derived before it can be enforced).");
+            }
         }
 
         var tdwPath = Environment.GetEnvironmentVariable("TDW_EXPORT_PATH");

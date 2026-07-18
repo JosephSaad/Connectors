@@ -1,10 +1,12 @@
 // Dead-letter payload protection (DEADLETTER_PAYLOAD_MODE, Config/
-// DeadLetterRedaction.cs): full mode is byte-identical to before; redacted
-// mode strips record values (keeping ids, object type, error, property names,
-// sizes and SHA-256 hashes) BEFORE either backend writes; an unknown mode
-// fails toward redaction; and the retry-failed inputs — item_id + object_type
-// driving the FindByIdDetailedAsync re-fetch, including the round-2
-// oversize-inconclusive rule — survive redaction untouched.
+// DeadLetterRedaction.cs): the DEFAULT is now 'redacted' (record values never
+// hit disk unless an operator opts into 'full'); explicit 'full' mode is
+// byte-identical to before; redacted mode strips record values (keeping ids,
+// object type, error, property names, sizes and SHA-256 hashes) BEFORE either
+// backend writes; an unknown mode FAILS FAST (throws) rather than guessing; and
+// the retry-failed inputs — item_id + object_type driving the FindByIdDetailedAsync
+// re-fetch, including the round-2 oversize-inconclusive rule — survive redaction
+// untouched.
 
 using System.Security.Cryptography;
 using System.Text;
@@ -41,9 +43,11 @@ public class DeadLetterRedactionTests : IDisposable
     };
 
     [Fact]
-    public void DefaultMode_IsFull_PayloadStoredVerbatim()
+    public void ExplicitFullMode_PayloadStoredVerbatim()
     {
-        using var env = new EnvScope((DeadLetterRedaction.ModeEnvVar, null));
+        // 'full' must remain byte-identical to the pre-flip behaviour (explicit
+        // operator opt-in for fast diagnosis).
+        using var env = new EnvScope((DeadLetterRedaction.ModeEnvVar, "full"));
         using var scope = new SyncStateScope();
         SyncState.AppendFailedRecords(
             Connector, new List<(string, string)> { ("C1", "HTTP 400") }, "Contact",
@@ -52,6 +56,33 @@ public class DeadLetterRedactionTests : IDisposable
         var entry = Assert.Single(SyncState.ReadFailedRecords(Connector));
         Assert.Equal("Aisha Devi", entry["request_body"]!["properties"]!["Name"]!.GetValue<string>());
         Assert.Null(entry["request_body"]!["redacted"]);
+    }
+
+    [Fact]
+    public void DefaultMode_IsRedacted_NoRawValuesOnDisk()
+    {
+        // The shipped default (env var UNSET) is now 'redacted': record VALUES
+        // must never reach the dead-letter file, only the skeleton (id, names,
+        // sizes, hashes).
+        using var env = new EnvScope((DeadLetterRedaction.ModeEnvVar, null));
+        using var scope = new SyncStateScope();
+        Assert.True(DeadLetterRedaction.RedactionEnabled);
+
+        SyncState.AppendFailedRecords(
+            Connector, new List<(string, string)> { ("C1", "HTTP 400") }, "Contact",
+            SampleRequest("C1"));
+
+        var entry = Assert.Single(SyncState.ReadFailedRecords(Connector));
+        var body = entry["request_body"]!.AsObject();
+        Assert.True(body["redacted"]!.GetValue<bool>());
+        Assert.Equal("C1", body["id"]!.GetValue<string>());
+        Assert.Null(body["properties"]);
+
+        var raw = File.ReadAllText(SyncState.FailedRecordsPath(Connector));
+        Assert.DoesNotContain("Aisha Devi", raw);
+        Assert.DoesNotContain("aisha.devi@example.com", raw);
+        Assert.DoesNotContain("1250000", raw);
+        Assert.DoesNotContain("aad-object-id-1", raw);
     }
 
     [Fact]
@@ -113,29 +144,30 @@ public class DeadLetterRedactionTests : IDisposable
     }
 
     [Fact]
-    public void UnknownMode_FailsClosed_ToRedacted_AndWarnsOnce()
+    public void UnknownMode_FailsFast_OnResolveAndValidate()
     {
         using var env = new EnvScope((DeadLetterRedaction.ModeEnvVar, "redcated"));  // typo on purpose
-        using var scope = new SyncStateScope();
-        var warnings = new List<string>();
-        Infrastructure.Logging.TestSink = (level, _, message) =>
-        {
-            if (level == Infrastructure.LogLevel.Warning)
-                warnings.Add(message);
-        };
-        try
-        {
-            Assert.True(DeadLetterRedaction.RedactionEnabled);
-            Assert.True(DeadLetterRedaction.RedactionEnabled);  // warned once, not per read
-            SyncState.AppendFailedRecords(
-                Connector, new List<(string, string)> { ("C1", "e") }, "Contact", SampleRequest("C1"));
-            Assert.DoesNotContain("Aisha Devi", File.ReadAllText(SyncState.FailedRecordsPath(Connector)));
-            Assert.Single(warnings, w => w.Contains("DEADLETTER_PAYLOAD_MODE"));
-        }
-        finally
-        {
-            Infrastructure.Logging.TestSink = null;
-        }
+
+        // A typo must not silently pick a payload-storage mode — it throws.
+        var fromRead = Assert.Throws<ArgumentException>(() => DeadLetterRedaction.RedactionEnabled);
+        Assert.Contains("DEADLETTER_PAYLOAD_MODE", fromRead.Message);
+        Assert.Throws<ArgumentException>(DeadLetterRedaction.Validate);
+    }
+
+    [Fact]
+    public void UnknownMode_FailsFast_AtConfigLoad()
+    {
+        using var env = new EnvScope(
+            ("CONNECTOR_ID", "BdhHadoopMart"),
+            ("AAD_APP_TENANT_ID", "t"),
+            ("AAD_APP_CLIENT_ID", "c"),
+            ("SECRET_AAD_APP_CLIENT_SECRET", "s"),
+            ("HDFS_MODE", "webhdfs"),
+            ("HDFS_NAMENODE_URL", "http://namenode.example:9870/webhdfs/v1"),
+            (DeadLetterRedaction.ModeEnvVar, "bogus"));
+
+        var exc = Assert.Throws<ArgumentException>(() => AppConfig.Load());
+        Assert.Contains("DEADLETTER_PAYLOAD_MODE", exc.Message);
     }
 
     [Fact]

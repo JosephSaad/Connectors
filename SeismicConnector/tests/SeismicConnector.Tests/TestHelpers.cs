@@ -20,6 +20,10 @@ public static class TestConfig
         bool enrichUsage = false,
         bool liveDocFieldIndexing = false,
         bool permissionReacl = false,
+        bool classification = false,
+        bool classificationEnforceAcl = false,
+        string? classificationEnforceGroup = null,
+        int graphItemTtlDays = 0,
         int chunkSize = 10,
         int graphBatchSize = 5,
         int batchWorkers = 2)
@@ -43,6 +47,10 @@ public static class TestConfig
                 EnrichUsage = enrichUsage,
                 LiveDocFieldIndexing = liveDocFieldIndexing,
                 PermissionReacl = permissionReacl,
+                Classification = classification,
+                ClassificationEnforceAcl = classificationEnforceAcl,
+                ClassificationEnforceGroup = classificationEnforceGroup,
+                GraphItemTtlDays = graphItemTtlDays,
             },
             Graph = new GraphSettings
             {

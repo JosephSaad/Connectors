@@ -99,11 +99,30 @@ public sealed partial class AppConfig
     public int ConnectionTimeoutSeconds { get; init; } = 600;
     public int ConnectionRetryIntervalSeconds { get; init; } = 15;
 
-    // ── Unified data classification & sensitivity labeling (docs/CLASSIFICATION.md) ─
-    /// <summary>CLASSIFICATION — derive SensitivityLabel + DetectedCategories. Default OFF.</summary>
+    // ── Connector-applied data classification (advisory tag, docs/CLASSIFICATION.md) ─
+    /// <summary>CLASSIFICATION — derive the advisory SensitivityLabel tag +
+    /// DetectedCategories. This is a CONNECTOR-APPLIED classification tag (a
+    /// Graph refiner), NOT a Microsoft Purview-enforced sensitivity label —
+    /// it does not encrypt content or enforce access by itself. Default OFF.</summary>
     public bool Classification { get; init; }
     /// <summary>CLASSIFICATION_MANIFEST — write a per-crawl classification JSONL. Default OFF.</summary>
     public bool ClassificationManifest { get; init; }
+
+    /// <summary>CLASSIFICATION_ENFORCE_ACL — when true (and a restricted-tier
+    /// group is configured), top-tier (Restricted) items have their ACL narrowed
+    /// to that group so the advisory tag actually gates retrieval. Default OFF
+    /// (advisory only) — non-breaking.</summary>
+    public bool ClassificationEnforceAcl { get; init; }
+    /// <summary>CLASSIFICATION_RESTRICTED_GROUP_ID — the Entra group object id
+    /// that Restricted items are limited to when CLASSIFICATION_ENFORCE_ACL is on.</summary>
+    public string? ClassificationRestrictedGroupId { get; init; }
+
+    // ── Stale-index expiry (docs/DELETION_SYNC.md) ───────────────────────────
+    /// <summary>GRAPH_ITEM_TTL_DAYS — when &gt; 0, every ingested external item
+    /// is stamped with expirationDateTime = now + TTL so the index self-expires
+    /// if crawling stops (defense-in-depth after an outage). 0 (default/unset) =
+    /// current behaviour, no expiry stamped.</summary>
+    public int GraphItemTtlDays { get; init; }
 
     /// <summary>Reserved Graph connection-id prefixes (Microsoft first-party).</summary>
     internal static readonly string[] ReservedPrefixes =
@@ -154,6 +173,11 @@ public sealed partial class AppConfig
         var certThumbprint = Environment.GetEnvironmentVariable("GRAPH_CLIENT_CERT_THUMBPRINT");
         var certConfigured = !string.IsNullOrWhiteSpace(certPath)
             || !string.IsNullOrWhiteSpace(certThumbprint);
+
+        // Fail fast on an unrecognized dead-letter payload mode. The default is
+        // the safe 'redacted'; 'full' is an explicit opt-in — a typo must never
+        // silently pick a payload-storage mode at runtime.
+        DeadLetterRedaction.Validate();
 
         return new AppConfig
         {
@@ -213,6 +237,10 @@ public sealed partial class AppConfig
 
             Classification = EnvFlags.IsTrue("CLASSIFICATION"),
             ClassificationManifest = EnvFlags.IsTrue("CLASSIFICATION_MANIFEST"),
+            ClassificationEnforceAcl = EnvFlags.IsTrue("CLASSIFICATION_ENFORCE_ACL"),
+            ClassificationRestrictedGroupId =
+                Environment.GetEnvironmentVariable("CLASSIFICATION_RESTRICTED_GROUP_ID"),
+            GraphItemTtlDays = Math.Max(0, EnvFlags.GetInt("GRAPH_ITEM_TTL_DAYS", 0)),
         };
     }
 
@@ -258,6 +286,9 @@ public sealed partial class AppConfig
         ConnectionRetryIntervalSeconds = ConnectionRetryIntervalSeconds,
         Classification = Classification,
         ClassificationManifest = ClassificationManifest,
+        ClassificationEnforceAcl = ClassificationEnforceAcl,
+        ClassificationRestrictedGroupId = ClassificationRestrictedGroupId,
+        GraphItemTtlDays = GraphItemTtlDays,
     };
 
     private static string Require(string name) =>

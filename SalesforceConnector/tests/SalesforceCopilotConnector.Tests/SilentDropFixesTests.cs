@@ -717,6 +717,7 @@ public class IterObjectChunksMidPaginationFailureTests
 // =============================================================================
 
 /// <summary>config/sync_state.py — I/O errors don't lose failure information.</summary>
+[Collection("EnvVars")]  // RequestAndResponseBodiesIncluded pins DEADLETTER_PAYLOAD_MODE
 public class AppendFailedRecordsIOErrorTests
 {
     private readonly string _tmpPath = Directory.CreateTempSubdirectory("silent_drop_").FullName;
@@ -783,34 +784,45 @@ public class AppendFailedRecordsIOErrorTests
     [Fact]
     public void RequestAndResponseBodiesIncluded()
     {
-        // Request/response bodies are included in the JSONL entry.
-        var dlPath = Path.Combine(_tmpPath, "dl.jsonl");
-        SyncState.AppendFailedRecords(
-            dlPath,
-            new List<(string, string)> { ("item1", "error1") },
-            "Account",
-            requestBodies: new Dictionary<string, JsonNode?>
-            {
-                ["item1"] = new JsonObject
+        // Request/response bodies are included in the JSONL entry. This asserts the
+        // VERBATIM property value round-trips, so it pins full mode explicitly (the
+        // shipped default is now redacted, which would hash properties.Name).
+        var savedMode = Environment.GetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar);
+        Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, "full");
+        try
+        {
+            var dlPath = Path.Combine(_tmpPath, "dl.jsonl");
+            SyncState.AppendFailedRecords(
+                dlPath,
+                new List<(string, string)> { ("item1", "error1") },
+                "Account",
+                requestBodies: new Dictionary<string, JsonNode?>
                 {
-                    ["properties"] = new JsonObject { ["Name"] = "Test" },
-                },
-            },
-            responseBodies: new Dictionary<string, JsonNode?>
-            {
-                ["item1"] = new JsonObject
-                {
-                    ["status"] = 400,
-                    ["body"] = new JsonObject
+                    ["item1"] = new JsonObject
                     {
-                        ["error"] = new JsonObject { ["message"] = "bad" },
+                        ["properties"] = new JsonObject { ["Name"] = "Test" },
                     },
                 },
-            });
-        var entry = Assert.Single(SilentDropSupport.ReadDeadLetter(dlPath));
-        Assert.True(entry.ContainsKey("request_body"));
-        Assert.True(entry.ContainsKey("response_body"));
-        Assert.Equal("Test", entry["request_body"]!["properties"]!["Name"]!.GetValue<string>());
+                responseBodies: new Dictionary<string, JsonNode?>
+                {
+                    ["item1"] = new JsonObject
+                    {
+                        ["status"] = 400,
+                        ["body"] = new JsonObject
+                        {
+                            ["error"] = new JsonObject { ["message"] = "bad" },
+                        },
+                    },
+                });
+            var entry = Assert.Single(SilentDropSupport.ReadDeadLetter(dlPath));
+            Assert.True(entry.ContainsKey("request_body"));
+            Assert.True(entry.ContainsKey("response_body"));
+            Assert.Equal("Test", entry["request_body"]!["properties"]!["Name"]!.GetValue<string>());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, savedMode);
+        }
     }
 }
 

@@ -16,10 +16,16 @@ public sealed class ItemTransformer
     internal const int MaxContentChars = 400_000;
 
     private readonly CompositeExtractor _extractor;
+    private readonly int _ttlDays;
 
-    public ItemTransformer(CompositeExtractor? extractor = null)
+    /// <param name="extractor">Content text extractor (defaults to the shared composite).</param>
+    /// <param name="ttlDays">GRAPH_ITEM_TTL_DAYS: when &gt; 0, stamp every item with
+    /// <c>expirationDateTime = now + ttlDays</c> so the index self-expires if crawling
+    /// stops. 0 = unset = no expiration stamped (current behaviour).</param>
+    public ItemTransformer(CompositeExtractor? extractor = null, int ttlDays = 0)
     {
         _extractor = extractor ?? CompositeExtractor.Default;
+        _ttlDays = Math.Max(0, ttlDays);
     }
 
     /// <summary>Cap on the number of LiveDoc field labels folded into the content text.</summary>
@@ -103,7 +109,7 @@ public sealed class ItemTransformer
         if (text.Length > MaxContentChars)
             text = text[..MaxContentChars];
 
-        return new JsonObject
+        var externalItem = new JsonObject
         {
             ["id"] = content.Id,
             ["acl"] = acl.ToJsonArray(),
@@ -114,6 +120,15 @@ public sealed class ItemTransformer
                 ["value"] = text,
             },
         };
+
+        // Stale-index expiry (GRAPH_ITEM_TTL_DAYS): stamp a rolling expiration so
+        // an item that stops being refreshed (crawler outage, source drift) ages
+        // out of the index instead of lingering indefinitely. Each fresh crawl
+        // re-stamps a new now+TTL, so live content never expires.
+        if (_ttlDays > 0)
+            externalItem["expirationDateTime"] = Iso(DateTime.UtcNow.AddDays(_ttlDays));
+
+        return externalItem;
     }
 
     private static string Iso(DateTime value) =>

@@ -54,9 +54,17 @@ internal static class StressLog
 public sealed class LoopbackWebhookCollection { }
 
 [Collection("LoopbackWebhook")]
-public class Stress_HmacFlood
+public class Stress_HmacFlood : IDisposable
 {
     private const string Secret = "s3cr3t-shared-key";
+
+    // The flood exercises the body-only HMAC path (no timestamps), so it runs in
+    // anti-replay MIGRATION mode; timestamp/replay rejection has dedicated tests.
+    public Stress_HmacFlood() =>
+        Environment.SetEnvironmentVariable(WebhookAntiReplay.RequireTimestampEnvVar, "false");
+
+    public void Dispose() =>
+        Environment.SetEnvironmentVariable(WebhookAntiReplay.RequireTimestampEnvVar, null);
 
     [Fact]
     public async Task ConcurrentMixedFlood_OnlyValidSignedEventsEverEnqueue()

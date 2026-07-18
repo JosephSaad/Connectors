@@ -4,8 +4,13 @@
 // "User" object export (BDH_IDENTITY_OBJECT, default "User" — BDH mirrors the
 // Salesforce User table nightly like every other object) and resolves each
 // user to an Entra ID identity by email/UPN through Microsoft Graph,
-// persisting the mapping in the identity store. Runs before every full
-// content crawl (and on incrementals when IDENTITY_SYNC_ON_INCREMENTAL=true).
+// persisting the mapping in the identity store. Runs before every full content
+// crawl AND, by default, before every incremental crawl too
+// (IDENTITY_SYNC_ON_INCREMENTAL, default ON — set false to restrict it to full
+// crawls). Refreshing on incrementals shrinks entitlement lag to the incremental
+// cadence; note the residual, non-real-time lag: an item's ACL is only re-emitted
+// when its SOURCE record changes, so unchanged records keep their prior ACL until
+// the next FULL crawl (schedule full crawls at your entitlement-freshness SLA).
 // identity-dry-run executes the same resolution without persisting (--save
 // persists).
 

@@ -15,6 +15,8 @@ public static class Metrics
     // Labelled counters (classification): keyed by label / category value.
     private static readonly ConcurrentDictionary<string, long> ItemsClassified = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, long> SensitiveDetections = new(StringComparer.Ordinal);
+    // ACL-restriction decisions, keyed by reason ("financial" | "classification").
+    private static readonly ConcurrentDictionary<string, long> ItemsAclRestricted = new(StringComparer.Ordinal);
 
     // Monotonic counters.
     private static long _itemsIngested;
@@ -62,6 +64,11 @@ public static class Metrics
     public static void IncSensitiveDetection(string category) =>
         SensitiveDetections.AddOrUpdate(category, 1, (_, v) => v + 1);
 
+    /// <summary>Record one item whose ACL was restricted by governance
+    /// (reason: "financial" or "classification").</summary>
+    public static void IncItemsAclRestricted(string reason) =>
+        ItemsAclRestricted.AddOrUpdate(reason, 1, (_, v) => v + 1);
+
     public static void SetDeadLetterDepth(long depth) => Interlocked.Exchange(ref _deadLetterDepth, depth);
     /// <summary>HA object-type leases this node currently holds (0 outside HA mode).</summary>
     public static void SetHaClaimsHeld(long count) => Interlocked.Exchange(ref _haClaimsHeld, count);
@@ -102,6 +109,10 @@ public static class Metrics
     public static long SensitiveDetectionsFor(string category) =>
         SensitiveDetections.TryGetValue(category, out var v) ? v : 0;
 
+    /// <summary>Read the ACL-restriction count for a reason (0 when absent).</summary>
+    public static long ItemsAclRestrictedFor(string reason) =>
+        ItemsAclRestricted.TryGetValue(reason, out var v) ? v : 0;
+
     public static double UptimeSeconds => (DateTime.UtcNow - StartUtc).TotalSeconds;
 
     internal static void ResetForTests()
@@ -126,6 +137,7 @@ public static class Metrics
         Interlocked.Exchange(ref _lastCrawlCompletedUnix, 0);
         ItemsClassified.Clear();
         SensitiveDetections.Clear();
+        ItemsAclRestricted.Clear();
     }
 
     private const string Prefix = "clarizen_connector_";
@@ -166,6 +178,8 @@ public static class Metrics
             "Items classified, by sensitivity label.", "label", ItemsClassified);
         LabelledCounter(sb, "sensitive_detections_total",
             "Sensitive-data detections, by category.", "category", SensitiveDetections);
+        LabelledCounter(sb, "items_acl_restricted_total",
+            "Items whose ACL was restricted by governance, by reason.", "reason", ItemsAclRestricted);
 
         return sb.ToString();
     }

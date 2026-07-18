@@ -3,13 +3,18 @@
 
 // Config/DeadLetterRedaction.cs
 // -----------------------------
-// DEADLETTER_PAYLOAD_MODE=full|redacted (default full — current behavior).
+// DEADLETTER_PAYLOAD_MODE=redacted|full (DEFAULT redacted — the safe default,
+// matching the Altrata connector; see SECURITY.md / docs/THREAT_MODEL.md §4).
+// Set DEADLETTER_PAYLOAD_MODE=full to keep the complete request/response
+// payloads for standalone debugging. Any other value fails fast at config load
+// (Settings.LoadConfig) naming the setting — it is never silently downgraded to
+// full.
 //
 // Dead-letter records capture the full Graph request/response for debugging,
 // which means CRM field values (customer names, emails, case text) can sit in
 // logs/failed_records_*.jsonl (or dbo.DeadLetter) indefinitely. In redacted
-// mode the ITEM CONTENT is stripped before the record is written, keeping
-// everything retry and triage actually use:
+// mode (the default) the ITEM CONTENT is stripped before the record is written,
+// keeping everything retry and triage actually use:
 //
 //   kept    item_id, object_type, error, timestamp, acl entries, field NAMES
 //   hashed  every value under "properties", and "content.value"
@@ -33,6 +38,12 @@ public static class DeadLetterRedaction
 {
     public const string ModeEnvVar = "DEADLETTER_PAYLOAD_MODE";
 
+    /// <summary>Full-fidelity mode — capture the complete request/response payloads.</summary>
+    public const string Full = "full";
+
+    /// <summary>Redacted mode (the shipped default) — property values / content hashed.</summary>
+    public const string Redacted = "redacted";
+
     /// <summary>Note embedded in every redacted payload (spec'd wording — SIEM/triage keys on it).</summary>
     public const string Note =
         "payload redacted per DEADLETTER_PAYLOAD_MODE=redacted — property values and content hashed (sha256); " +
@@ -41,12 +52,29 @@ public static class DeadLetterRedaction
     /// <summary>Key carrying <see cref="Note"/> inside a redacted body ('@' avoids Graph field collisions).</summary>
     public const string NoteKey = "@redaction";
 
-    /// <summary>True when <c>DEADLETTER_PAYLOAD_MODE=redacted</c> (case-insensitive). Anything else = full.</summary>
-    public static bool RedactedMode =>
-        string.Equals(
-            Environment.GetEnvironmentVariable(ModeEnvVar),
-            "redacted",
-            StringComparison.OrdinalIgnoreCase);
+    /// <summary>
+    /// Effective mode (live env read). <b>Default <see cref="Redacted"/></b>: unset/blank ⇒
+    /// redacted, so raw CRM values never hit disk unless an operator explicitly opts in to
+    /// <see cref="Full"/>. An unrecognized value throws <see cref="ArgumentException"/> so the
+    /// misconfiguration fails fast at config load rather than silently defaulting to full.
+    /// </summary>
+    public static string Mode
+    {
+        get
+        {
+            var raw = Environment.GetEnvironmentVariable(ModeEnvVar);
+            if (string.IsNullOrWhiteSpace(raw))
+                return Redacted;
+            var value = raw.Trim().ToLowerInvariant();
+            if (value is Full or Redacted)
+                return value;
+            throw new ArgumentException(
+                $"Invalid configuration: {ModeEnvVar} must be '{Full}' or '{Redacted}', got '{raw.Trim()}'");
+        }
+    }
+
+    /// <summary>True unless <c>DEADLETTER_PAYLOAD_MODE=full</c> (redacted is the default).</summary>
+    public static bool RedactedMode => Mode == Redacted;
 
     /// <summary>Redact every body in a request/response dictionary (null-safe).</summary>
     internal static Dictionary<string, JsonNode?>? RedactBodies(Dictionary<string, JsonNode?>? bodies)

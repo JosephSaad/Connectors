@@ -39,25 +39,27 @@ public sealed class WebhookReceiver : IDisposable
     internal const int MaxBodyBytes = 1 * 1024 * 1024;
 
     private readonly HttpListener _listener;
-    private readonly SignatureValidator _validator;
+    private readonly WebhookAuthenticator _authenticator;
     private readonly WebhookProcessor _processor;
     private readonly string _path;
     private readonly string _signatureHeader;
+    private readonly string _timestampHeader;
     private readonly Thread _thread;
     private volatile bool _stopped;
 
     private WebhookReceiver(
         HttpListener listener,
-        SignatureValidator validator,
+        WebhookAuthenticator authenticator,
         WebhookProcessor processor,
         string path,
         string signatureHeader)
     {
         _listener = listener;
-        _validator = validator;
+        _authenticator = authenticator;
         _processor = processor;
         _path = path;
         _signatureHeader = signatureHeader;
+        _timestampHeader = authenticator.TimestampHeader;
         _thread = new Thread(ListenLoop) { IsBackground = true, Name = "webhook-receiver" };
         _thread.Start();
         Metrics.SetWebhookReceiverUp(true);
@@ -96,8 +98,13 @@ public sealed class WebhookReceiver : IDisposable
             if (listener is null)
                 return null;
 
-            Logger.Info($"Webhook receiver listening on port {port} (POST {path}).");
-            return new WebhookReceiver(listener, new SignatureValidator(secret!), processor, path, header);
+            var authenticator = WebhookAuthenticator.FromEnv(secret!);
+            Logger.Info(
+                $"Webhook receiver listening on port {port} (POST {path}). Anti-replay: "
+                + (authenticator.RequireTimestamp
+                    ? $"strict (timestamp required in '{authenticator.TimestampHeader}')."
+                    : "migration mode (timestamp optional; body-only senders accepted without replay protection)."));
+            return new WebhookReceiver(listener, authenticator, processor, path, header);
         }
         catch (Exception exc)
         {
@@ -211,15 +218,18 @@ public sealed class WebhookReceiver : IDisposable
             return;
         }
 
-        // SECURITY BOUNDARY: validate the signature over the raw bytes BEFORE
-        // parsing or enqueuing anything.
+        // SECURITY BOUNDARY: validate the signature (and anti-replay timestamp)
+        // over the raw bytes BEFORE parsing or enqueuing anything.
         var signature = request.Headers[_signatureHeader];
-        if (!_validator.IsValid(body, signature))
+        var timestamp = request.Headers[_timestampHeader];
+        var auth = _authenticator.Verify(body, signature, timestamp, DateTime.UtcNow);
+        if (auth != WebhookAuthResult.Ok)
         {
             Metrics.IncWebhookEventsRejected();
             Logger.Warning(
-                $"Webhook: rejected a post with an invalid or missing '{_signatureHeader}' signature.");
-            Write(context, 401, "Invalid signature");
+                $"Webhook: rejected a post ({auth}) — signature header '{_signatureHeader}', "
+                + $"timestamp header '{_timestampHeader}'.");
+            Write(context, 401, $"Rejected: {auth}");
             return;
         }
 

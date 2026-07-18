@@ -10,6 +10,7 @@ using HadoopConnector.Config;
 using HadoopConnector.Content;
 using HadoopConnector.Filters;
 using HadoopConnector.Graph;
+using HadoopConnector.Infrastructure;
 using HadoopConnector.Item;
 
 namespace HadoopConnector.Tests;
@@ -87,6 +88,12 @@ public class ClassificationPipelineTests : IDisposable
     {
         var put = Assert.Single(_graph.Sent, s => s.Method == HttpMethod.Put);
         return put.Body!.AsObject()["properties"]!.AsObject();
+    }
+
+    private JsonArray IngestedAcl()
+    {
+        var put = Assert.Single(_graph.Sent, s => s.Method == HttpMethod.Put);
+        return put.Body!.AsObject()["acl"]!.AsArray();
     }
 
     [Fact]
@@ -179,5 +186,72 @@ public class ClassificationPipelineTests : IDisposable
                 allowFullScan: true, classification: true, classificationManifest: false))
             .RunAsync(fullCrawl: true);
         Assert.Empty(Directory.GetFiles(SyncState.LogsDir, "classification_*.jsonl"));
+    }
+
+    // ── #6 classification enforcement (advisory by default) ──────────────────
+
+    [Fact]
+    public async Task Advisory_ByDefault_RestrictedItemKeepsResolvedAcl()
+    {
+        // Classification ON but enforcement OFF (default): the Restricted tag is
+        // advisory — the item keeps its resolved owner ACL, not narrowed.
+        var summary = await Pipeline(TestConfig.Make(allowFullScan: true, classification: true))
+            .RunAsync(fullCrawl: true);
+        Assert.Equal(1, summary.Ingested);
+        Assert.Equal("Restricted", IngestedProperties()["SensitivityLabel"]!.GetValue<string>());
+
+        var acl = IngestedAcl();
+        Assert.Contains(acl, e => e!["type"]!.GetValue<string>() == "user"
+                                  && e["value"]!.GetValue<string>() == "entra-owner");
+        Assert.DoesNotContain(acl, e => e!["value"]!.GetValue<string>() == "restricted-grp");
+    }
+
+    [Fact]
+    public async Task Enforce_RestrictsRestrictedItemAclToGroup_AndAuditsDecision()
+    {
+        var summary = await Pipeline(TestConfig.Make(
+                allowFullScan: true, classification: true,
+                classificationEnforceAcl: true, classificationRestrictedGroupId: "restricted-grp"))
+            .RunAsync(fullCrawl: true);
+        Assert.Equal(1, summary.Ingested);
+
+        // The Restricted item's ACL is narrowed to exactly the enforcement group.
+        var acl = IngestedAcl();
+        var only = Assert.Single(acl);
+        Assert.Equal("group", only!["type"]!.GetValue<string>());
+        Assert.Equal("restricted-grp", only["value"]!.GetValue<string>());
+        Assert.Equal("grant", only["accessType"]!.GetValue<string>());
+        Assert.DoesNotContain(acl, e => e!["value"]!.GetValue<string>() == "entra-owner");
+
+        // ...and the restriction is recorded in the immutable decision ledger.
+        var ledgerPath = Path.Combine(SyncState.LogsDir, "decisions_BdhHadoopMart.jsonl");
+        var entry = Assert.Single(File.ReadAllLines(ledgerPath).Where(l => l.Trim().Length > 0)
+            .Select(l => JsonNode.Parse(l)!.AsObject()));
+        Assert.Equal("ACL_RESTRICTION", entry["decision"]!.GetValue<string>());
+        Assert.Equal(RecordId, entry["item_id"]!.GetValue<string>());
+        Assert.True(DecisionLedger.Verify(ledgerPath).Ok);
+    }
+
+    [Fact]
+    public async Task Exclusion_NoResolvableAcl_IsAuditedInLedger()
+    {
+        // A record owned by an unmapped principal resolves to zero ACL entries →
+        // it is withheld from the index, and that EXCLUSION is audited.
+        var source = new FakeBdhSource();
+        source.Add(
+            "Task/dt=2026-07-15/part-0000.jsonl",
+            $$"""{"Id":"{{RecordId}}","Name":"Orphan task","OwnerId":"005U9999999"}""");
+
+        var summary = await Pipeline(TestConfig.Make(allowFullScan: true), source: source)
+            .RunAsync(fullCrawl: true);
+        Assert.Equal(0, summary.Ingested);
+        Assert.Equal(1, summary.NoAclSkipped);
+
+        var ledgerPath = Path.Combine(SyncState.LogsDir, "decisions_BdhHadoopMart.jsonl");
+        var entry = Assert.Single(File.ReadAllLines(ledgerPath).Where(l => l.Trim().Length > 0)
+            .Select(l => JsonNode.Parse(l)!.AsObject()));
+        Assert.Equal("EXCLUSION", entry["decision"]!.GetValue<string>());
+        Assert.Equal(RecordId, entry["item_id"]!.GetValue<string>());
+        Assert.True(DecisionLedger.Verify(ledgerPath).Ok);
     }
 }

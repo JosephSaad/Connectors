@@ -108,6 +108,9 @@ internal static class Runtime
     {
         EnvLoader.LoadLayered();
         Logging.Initialize(runPrefix, args.Verbose);
+        // Restrict the log / state / dead-letter directories to the owner at
+        // startup (POSIX 0700; Windows owner+admins best-effort). Never throws.
+        DirectoryHardening.HardenStateDirectories();
         LogPruner.PruneIfConfigured(Logging.LogsRoot);
 
         var config = AppConfig.Load();

@@ -184,15 +184,45 @@ public static class ValidateConfig
             else
                 Warn("Circuit breakers OFF (CIRCUIT_BREAKER=false) — passthrough, no fail-fast on outages");
 
-            // 9. Data classification & sensitivity labeling.
+            // 9. Data classification & sensitivity TAGGING (advisory, not Purview).
             if (config.Classification)
-                Pass($"Classification on: sensitivityLabel + detectedCategories" +
+                Pass($"Classification tagging on: advisory sensitivityLabel + detectedCategories " +
+                     "(connector-applied TAG, NOT a Purview-enforced label)" +
                      (string.IsNullOrWhiteSpace(config.DataResidency)
                          ? " (no DATA_RESIDENCY set)"
                          : $", residency={config.DataResidency}") +
                      (config.ClassificationManifest ? ", per-delivery manifest" : ""));
             else
-                Warn("Classification OFF (CLASSIFICATION=false) — no sensitivity/residency properties");
+                Warn("Classification tagging OFF (CLASSIFICATION=false) — no sensitivity/residency properties");
+
+            // 9b. Optional ACL enforcement of the top tier (#6b).
+            if (config.ClassificationEnforceAcl)
+                Pass($"Classification ACL enforcement ON: Restricted items locked to group " +
+                     $"{config.ClassificationEnforceGroupId} (this is where the advisory tag becomes a hard control)");
+            else
+                Warn("Classification ACL enforcement OFF (CLASSIFICATION_ENFORCE_ACL=false) — the tag is advisory only");
+
+            // 10. Purpose-based authorization / per-action veto (#7).
+            var purpose = Altrata.PurposePolicy.FromEnv();
+            if (purpose.Enforcing)
+                Pass("Purpose enforcement ON (PURPOSE_ALLOWLIST set) — enrichment lookups with a " +
+                     "non-allowlisted purpose are DENIED fail-closed and audited");
+            else
+                Warn("Purpose enforcement OFF (PURPOSE_ALLOWLIST unset) — purposes are recorded but not evaluated");
+
+            // 11. Entitlement freshness (#5).
+            if (config.IdentitySyncOnIncremental)
+                Pass("Entitlement re-syncs on incremental crawls (IDENTITY_SYNC_ON_INCREMENTAL=true) — " +
+                     "seat changes re-ACL at the incremental cadence (residual lag is non-real-time)");
+            else
+                Warn("IDENTITY_SYNC_ON_INCREMENTAL=false — the re-ACL sweep is deferred to full crawls only");
+
+            // 12. Stale-index expiry (#8).
+            if (config.GraphItemTtlDays > 0)
+                Pass($"Item TTL ON: items stamped expirationDateTime = now + {config.GraphItemTtlDays} day(s) " +
+                     "(index self-expires if crawling stops)");
+            else
+                Warn("Item TTL OFF (GRAPH_ITEM_TTL_DAYS unset) — items never self-expire");
         }
 
         Console.WriteLine();

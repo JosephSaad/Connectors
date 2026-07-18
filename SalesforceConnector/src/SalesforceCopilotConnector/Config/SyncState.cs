@@ -131,7 +131,7 @@ public static class SyncState
             // Python: except (FileNotFoundError, json.JSONDecodeError): pass
         }
         data[connectorId] = IsoFormat(timestamp);
-        Directory.CreateDirectory(LogsDir);
+        SecureDirectory.EnsureOwnerOnly(LogsDir);
         File.WriteAllText(SyncStateFile, PyJson.Dumps(data, indent: 2), Utf8NoBom);
         Logger.Info($"Saved last sync timestamp: {IsoFormat(timestamp)}");
     }
@@ -224,7 +224,7 @@ public static class SyncState
                 ? currentNode.GetValue<int>()
                 : 0;
             completed[objectType] = Math.Max(current, chunkIndex);
-            Directory.CreateDirectory(LogsDir);
+            SecureDirectory.EnsureOwnerOnly(LogsDir);
             File.WriteAllText(path, PyJson.Dumps(data, indent: 2), Utf8NoBom);
         }
     }
@@ -253,7 +253,7 @@ public static class SyncState
     /// <summary>Return the path to the dead-letter JSONL file for <paramref name="connectorId"/>.</summary>
     public static string FailedRecordsPath(string connectorId)
     {
-        Directory.CreateDirectory(LogsDir);
+        SecureDirectory.EnsureOwnerOnly(LogsDir);
         return Path.Combine(LogsDir, $"failed_records_{connectorId}.jsonl");
     }
 
@@ -306,7 +306,7 @@ public static class SyncState
             var parent = Path.GetDirectoryName(Path.GetFullPath(filePath));
             if (!string.IsNullOrEmpty(parent))
             {
-                Directory.CreateDirectory(parent);
+                SecureDirectory.EnsureOwnerOnly(parent);
             }
             lock (DeadLetterLock)
             {

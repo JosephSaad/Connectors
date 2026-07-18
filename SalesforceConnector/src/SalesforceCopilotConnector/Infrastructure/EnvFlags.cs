@@ -28,9 +28,29 @@ public static class EnvFlags
 
     /// <summary>
     /// <c>IDENTITY_SYNC_ON_INCREMENTAL</c> — run the (incremental) identity crawl on
-    /// incremental content crawls too, not just full crawls. Default false.
+    /// incremental content crawls too, not just full crawls.
+    /// <b>Default TRUE</b> (#5): re-syncing entitlements every incremental shrinks the
+    /// entitlement-freshness lag from the full-crawl cadence down to the incremental
+    /// cadence, so a user removed from a Salesforce role/group loses Copilot access at
+    /// the next incremental rather than only at the next full crawl. This is opt-OUT
+    /// (like <see cref="DeletionSync"/>) — set <c>false</c>/<c>0</c>/<c>no</c> to run
+    /// identity sync on full crawls only, as before.
+    /// <para>Residual lag: entitlement changes are NOT real-time — access is only
+    /// re-evaluated when a crawl runs. The lag is bounded by the incremental crawl
+    /// interval. For tighter guarantees, shorten the incremental cadence and schedule a
+    /// periodic re-ACL sweep (a full crawl re-resolves every item's ACL).</para>
     /// </summary>
-    public static bool IdentitySyncOnIncremental => IsTrue("IDENTITY_SYNC_ON_INCREMENTAL");
+    public static bool IdentitySyncOnIncremental
+    {
+        get
+        {
+            var raw = Environment.GetEnvironmentVariable("IDENTITY_SYNC_ON_INCREMENTAL");
+            // Default ON: unset/blank ⇒ true. Only an explicit false/0/no disables it.
+            if (string.IsNullOrWhiteSpace(raw))
+                return true;
+            return raw.Trim().ToLowerInvariant() is not ("false" or "0" or "no");
+        }
+    }
 
     /// <summary>
     /// <c>DELETION_SYNC</c> — run the automatic inventory-backed existence sweep after a

@@ -21,7 +21,10 @@ public static class CommandRegistry
     /// </summary>
     public static (string LogFile, string SummaryFile) SetupLogging(string prefix, bool verbose = false)
     {
-        Directory.CreateDirectory(LogsDir);
+        // Owner-only (POSIX 0700 / NTFS owner+admins): run logs, checkpoints and
+        // the dead-letter queue live under LogsDir and can carry item ids,
+        // principal ids and (in full payload mode) indexed content.
+        SecureDirectory.EnsureHardened(LogsDir);
         var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
         var runDir = Path.Combine(LogsDir, $"{prefix}_{timestamp}");
         Directory.CreateDirectory(runDir);

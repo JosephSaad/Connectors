@@ -50,6 +50,11 @@ public sealed class ExternalItem
 
     public List<AclEntry> Acl { get; init; } = new();
 
+    /// <summary>Optional index self-expiry (GRAPH_ITEM_TTL_DAYS). When set it is
+    /// emitted as <c>expirationDateTime</c> so the item ages out if crawling
+    /// stops. Null (the default) omits the field entirely.</summary>
+    public DateTime? ExpirationDateTime { get; set; }
+
     /// <summary>Serialize to the externalItem JSON payload.</summary>
     public JsonObject ToJson()
     {
@@ -77,7 +82,7 @@ public sealed class ExternalItem
         foreach (var entry in Acl)
             acl.Add(entry.ToJson());
 
-        return new JsonObject
+        var json = new JsonObject
         {
             ["id"] = Id,
             ["properties"] = properties,
@@ -88,5 +93,8 @@ public sealed class ExternalItem
             },
             ["acl"] = acl,
         };
+        if (ExpirationDateTime is { } expiry)
+            json["expirationDateTime"] = expiry.ToUniversalTime().ToString("o");
+        return json;
     }
 }

@@ -83,6 +83,14 @@ harmless:
 4. Keep the window short and rotate off-peak; if near-real-time matters, drop
    `--incremental-hours` temporarily instead of inventing dual-accept.
 
+**Anti-replay.** Beyond the HMAC, the receiver rejects replayed requests: the
+sender binds a signed timestamp into the HMAC (over `timestamp + "." + body`)
+and the receiver rejects requests outside a freshness window
+(`SEISMIC_WEBHOOK_REPLAY_WINDOW_SECONDS`, default 300s) plus any duplicate
+signature seen again within it. Requiring the timestamp is **on by default**
+(`SEISMIC_WEBHOOK_REQUIRE_TIMESTAMP=true`); set it false only to migrate a
+sender that cannot yet send one (legacy body-only HMAC, no replay protection).
+
 ### Others
 
 | Secret | Rotation |
@@ -95,23 +103,32 @@ harmless:
 ## Data at rest inventory
 
 What the connector persists, where, and its sensitivity — encrypt-at-rest and
-ACL these paths accordingly (BitLocker/TDE per org policy):
+ACL these paths accordingly (BitLocker/TDE per org policy). The connector also
+creates its `logs/` and `data/` directories **owner-only** at startup (POSIX
+`0700`; on Windows a best-effort owner+admins NTFS ACL — never fatal if it
+cannot be set), so this state is not world-readable on a shared host:
 
 | Data | Location | Sensitivity |
 | --- | --- | --- |
 | Secrets | `env/.env.local.user` (unless Key Vault) | **credential** — service-account-only ACL |
 | Identity map (Seismic principal ↔ Entra object id, emails as keys) | `data/{id}_identity.db` or SQL | personal data (directory-grade) |
 | Tracked items (ids, versions, expiry, ACL fingerprints — SHA-256, no principals recoverable) | same | metadata |
-| Dead-letter records | `logs/failed_records_*.jsonl` or `dbo.DeadLetter` | **may contain full item payloads + ACLs** in default `full` mode; set `DEADLETTER_PAYLOAD_MODE=redacted` to strip values (hash stubs remain) |
+| Dead-letter records | `logs/failed_records_*.jsonl` or `dbo.DeadLetter` | **default `redacted`** — indexed content/property values stripped to hash stubs (ids/version/error/ACL kept); set `DEADLETTER_PAYLOAD_MODE=full` (opt-in) to store verbatim payloads. An unrecognized mode fails startup |
 | Run logs | `logs/{run}/` | operational text; item ids/names appear; no secrets, tokens, signature values, or content bodies by policy |
 | Reconciliation reports | `logs/{run}/reconciliation_*.jsonl` | compliance evidence (item ids + rule + action) — retain per policy |
+| Decision ledger (`DECISION_LEDGER=true`) | `logs/{run}/decision_ledger_*.jsonl` | tamper-evident (SHA-256 hash-chained) exclusion/ACL-restriction audit — retain per policy |
 | Checkpoints / sync cursor | `logs/*.json` or SQL | timestamps + ids only |
 | Indexed content + ACLs | Microsoft Graph (tenant-side) | governed by M365, not by this repo |
 
 ## Hardening quick list
 
 Fail-closed webhook (no secret → no listener) · HMAC over raw bytes,
-constant-time, validate-before-parse · body/queue caps · never-widen ACL ·
-No-MNE fail-closed with auditable reconciliation · least-privilege Graph
-scopes (OwnedBy) · FIPS-clean crypto (docs/THREAT_MODEL.md) · signed releases
-when org keys are configured, SBOM always.
+constant-time, validate-before-parse · webhook anti-replay (signed-timestamp
+freshness window + duplicate-signature rejection, required by default) ·
+body/queue caps · never-widen ACL · No-MNE fail-closed (missing/empty/malformed
+`exclusions.json` refuses to start) with auditable reconciliation ·
+tamper-evident hash-chained decision ledger (opt-in) · dead-letter payloads
+**redacted by default** · owner-only (`0700`) state directories · optional
+stale-index TTL expiry · optional classification-enforced ACL (advisory tag →
+group lock) · least-privilege Graph scopes (OwnedBy) · FIPS-clean crypto
+(docs/THREAT_MODEL.md) · signed releases when org keys are configured, SBOM always.

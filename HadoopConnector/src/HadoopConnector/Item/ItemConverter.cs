@@ -27,10 +27,12 @@ public sealed class ItemConverter
     public const string SourceSystem = "BDH-Hadoop";
 
     private readonly string _appBaseUrl;
+    private readonly int _itemTtlDays;
 
     public ItemConverter(AppConfig config, string? appBaseUrl = null)
     {
         _appBaseUrl = (appBaseUrl ?? config.ItemUrlBase).TrimEnd('/');
+        _itemTtlDays = config.GraphItemTtlDays;
     }
 
     /// <summary>Deep link into the live Salesforce org for a record (same id space).</summary>
@@ -63,6 +65,12 @@ public sealed class ItemConverter
                 continue;
             item.Properties[property] = ToPropertyValue(record.Get(field));
         }
+
+        // Stale-index expiry (GRAPH_ITEM_TTL_DAYS): stamp expirationDateTime so
+        // the index self-expires this item if crawling stops — defense after an
+        // outage. Unset (0) leaves the item permanent, as before.
+        if (_itemTtlDays > 0)
+            item.ExpirationDateTime = DateTime.UtcNow.AddDays(_itemTtlDays);
 
         item.Content = BuildContent(record, objectConfig);
         return item;

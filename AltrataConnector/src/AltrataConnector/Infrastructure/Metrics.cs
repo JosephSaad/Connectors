@@ -42,8 +42,12 @@ public static class Metrics
         new("altrata_graph_throttle_429_total", "Graph 429 throttle responses observed (single calls and $batch items).", "counter"),
         new("altrata_entitlement_refusals_total", "Entitlement refusals: empty seat list or forbidden everyone-grant (fail-closed events).", "counter"),
         new("altrata_erasure_ledger_broken", "1 when the erasure ledger failed its last hash-chain verification (tamper or torn line), else 0.", "gauge"),
+        new("altrata_decision_ledger_broken", "1 when the decision ledger (exclusion/ACL-restriction) failed its last hash-chain verification, else 0.", "gauge"),
         new("altrata_match_review_depth", "Entity-match candidates waiting in the human review queue.", "gauge"),
         new("altrata_ha_leases_held", "HA leases currently held by this node.", "gauge"),
+        new("altrata_purpose_denied_total", "Enrichment lookups DENIED by the purpose allowlist (fail-closed veto).", "counter"),
+        new("altrata_items_acl_restricted_total", "Items whose ACL was tightened to the reviewer group by classification enforcement.", "counter"),
+        new("altrata_items_expiring_total", "Ingested items stamped with an expirationDateTime (GRAPH_ITEM_TTL_DAYS).", "counter"),
     };
 
     public static void Increment(string name, double delta = 1) =>

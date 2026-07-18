@@ -2,15 +2,16 @@
 // --------------------------------
 // Financial-field classification. Fields configured as financial in
 // config/schema.json (budget, cost, rates, actuals, revenue) get special
-// handling controlled by FINANCIAL_DATA_MODE:
+// handling controlled by FINANCIAL_DATA_MODE (default `filter` — protective):
 //
-//   tag    (default) — financial values are ingested normally; the item gets
+//   tag             — financial values are ingested normally; the item gets
 //            classification properties (ContainsFinancialData=true,
 //            DataClassification="financial") so search verticals / DLP can
-//            key off them.
-//   filter — financial property VALUES are stripped from the item before
-//            ingestion (classification properties still set), so no reader
-//            sees figures through Copilot regardless of ACL.
+//            key off them. NOTE: tag does NOT restrict the values — any reader
+//            with item access still sees the figures through Copilot.
+//   filter (default) — financial property VALUES are stripped from the item
+//            before ingestion (classification properties still set), so no
+//            reader sees figures through Copilot regardless of ACL.
 //   acl    — financial values are ingested but the item's grants are replaced
 //            with a single grant to FINANCIAL_DATA_GROUP_ID (denies are
 //            preserved), restricting the whole item to the finance group.
