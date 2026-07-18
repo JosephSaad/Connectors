@@ -14,6 +14,25 @@ The one-page architecture picture —
 shows all five connectors, their source systems, the Microsoft Graph API,
 Entra ID, the Copilot semantic index and the supporting services on one canvas.
 
+## Programme planning
+
+- [Connector_Program_Project_Plan.xlsx](Connector_Program_Project_Plan.xlsx) —
+  bank-realistic implementation plan (123 tasks, WBS, dependencies, computed
+  dates, roles). Colour-coded gates: purple = bank-resource queues (hiring
+  with notice periods, infra/PKI/identity/firewall/DBA/SIEM/source-admin lead
+  times), red = security gates (threat model, pen test, sign-offs,
+  DPIA/legal), amber = CAB/change cycles. Calendar models US federal bank
+  holidays plus a 15-Dec → 08-Jan year-end blackout. Scope: 4 connectors —
+  the Salesforce connector is deferred (Hadoop BDH carries the Salesforce
+  data); Seismic pilots, with a Phase-4 checkpoint to revisit Salesforce.
+- [Connector_Program_Project_Plan.msproj.xml](Connector_Program_Project_Plan.msproj.xml) —
+  the same plan as MS Project XML (open in Microsoft Project → "As a new
+  project"; the bank calendar and dependency network import and reschedule
+  natively).
+- [GENESIS_PROMPT.md](GENESIS_PROMPT.md) — the compiled prompt that would
+  reproduce this entire programme: connectors, hardening waves, documentation
+  set, diagrams and programme artefacts.
+
 | # | Full guide (Word) | Quick reference (PDF) | Covers |
 |---|---|---|---|
 | 00 | [Tenant & Common Concepts Guide](00_Tenant_and_Common_Concepts_Guide.docx) | [Start Here](00_START_HERE.pdf) | Shared theory: Copilot & the index, Microsoft Graph, identity/ACLs, the connector engine, security, tenant quotas, deployment, monitoring, DR, master glossary |
