@@ -37,6 +37,20 @@ public interface IStateStore
     void ReplaceDeadLetters(IEnumerable<DeadLetterRecord> records);
     void ClearDeadLetters();
 
+    /// <summary>
+    /// Atomically read-modify-write the dead-letter queue under the SAME
+    /// per-file / per-table lock that guards <see cref="AddDeadLetter"/>:
+    /// <paramref name="transform"/> receives the CURRENT records and returns the
+    /// records to persist. This closes the ReadDeadLetters()+ReplaceDeadLetters()
+    /// TOCTOU — a concurrent AddDeadLetter append landing between a stale read
+    /// and a whole-queue overwrite would otherwise be silently lost (e.g. a
+    /// crawl's compensating erasure DELETE dropped by a racing forget-subject
+    /// scrub, leaving a withdrawn subject live and untracked). Implementations
+    /// MUST run the read and the write without releasing the queue lock.
+    /// </summary>
+    void MutateDeadLetters(
+        Func<IReadOnlyList<DeadLetterRecord>, IEnumerable<DeadLetterRecord>> transform);
+
     // ---- delivery ledger ----------------------------------------------------------
     bool IsDeliveryProcessed(string deliveryId);
     void MarkDeliveryProcessed(string deliveryId, DateTime utc);

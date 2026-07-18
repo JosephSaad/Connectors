@@ -711,22 +711,57 @@ public static class CommandRegistry
         }
 
         var keep = remaining.Concat(unreplayable).ToList();
-        if (keep.Count == 0 && clearOnSuccess)
+        // Atomic finalize (round-3 TOCTOU fix): between the snapshot read at the
+        // top and this write, a producer's AddDeadLetter may have appended a new
+        // failure (a crawl running alongside retry-failed). A whole-queue
+        // overwrite would silently drop it. Instead, remove ONLY the snapshot
+        // records we actually processed (matched by a stable content key) and
+        // preserve anything that arrived concurrently, then re-queue our kept
+        // failures — all inside one lock acquisition.
+        var processedBudget = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var r in records)
         {
-            runtime.State.ClearDeadLetters();
-            Console.WriteLine($"[{label}] All {replayed} record(s) replayed; dead-letter queue cleared.");
+            var key = DeadLetterIdentityKey(r);
+            processedBudget[key] = processedBudget.GetValueOrDefault(key) + 1;
         }
-        else
+        runtime.State.MutateDeadLetters(current =>
         {
-            runtime.State.ReplaceDeadLetters(keep);
+            var budget = new Dictionary<string, int>(processedBudget, StringComparer.Ordinal);
+            var survivors = new List<DeadLetterRecord>(current.Count + keep.Count);
+            foreach (var rec in current)
+            {
+                var key = DeadLetterIdentityKey(rec);
+                if (budget.TryGetValue(key, out var n) && n > 0)
+                {
+                    budget[key] = n - 1;   // one of the snapshot we consumed — drop it
+                    continue;
+                }
+                survivors.Add(rec);        // arrived concurrently — never lose it
+            }
+            survivors.AddRange(keep);
+            return survivors;
+        });
+        if (keep.Count == 0 && clearOnSuccess)
+            Console.WriteLine($"[{label}] All {replayed} record(s) replayed; dead-letter queue cleared.");
+        else
             Console.WriteLine($"[{label}] {replayed} replayed, {remaining.Count} still failing" +
                               (retired > 0 ? $", {retired} retired" : "") +
                               (droppedErased > 0 ? $", {droppedErased} dropped (erased subject)" : "") +
                               (unreplayable.Count > 0 ? $", {unreplayable.Count} un-replayable kept" : "") + ".");
-        }
         return new RetryFailedResult(records.Count, replayed, remaining.Count, unreplayable.Count,
             retired, droppedErased);
     }
+
+    /// <summary>Stable content key for a dead-letter record: distinguishes a
+    /// record we read in our snapshot from one a producer appended concurrently,
+    /// so retry-failed's atomic finalize removes only what it processed.</summary>
+    private static string DeadLetterIdentityKey(DeadLetterRecord r) => string.Join('\u001f',
+        r.ItemId, r.Op, r.Dataset, r.DeliveryId, r.Error,
+        r.Attempts.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        r.FailedUtc.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        r.CorrelationId ?? "",
+        r.PayloadJson.Length.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        string.Join(",", r.SubjectHashes));
 
     /// <summary>
     /// Redacted-mode replay source: locate the record's delivery under
@@ -1101,23 +1136,30 @@ public static class CommandRegistry
             var scrubbed = 0;
             foreach (var (rt, label, _) in perTarget)
             {
-                var queue = rt.State.ReadDeadLetters();
-                var keep = new List<DeadLetterRecord>(queue.Count);
                 var scrubbedHere = 0;
-                foreach (var queued in queue)
+                // Atomic read-modify-write (round-3 TOCTOU fix): a crawl producing
+                // dead-letters concurrently — most dangerously a compensating
+                // erasure DELETE — must not be lost to a stale-snapshot overwrite.
+                // The transform runs under the queue lock over the CURRENT records.
+                rt.State.MutateDeadLetters(current =>
                 {
-                    var concernsSubject = queued.SubjectHashes.Any(erasedHashes.Contains)
-                                          || queued.SubjectIds.Any(subjectIds.Contains);
-                    if (concernsSubject && queued.Op != DeadLetterOps.Delete)
+                    var keep = new List<DeadLetterRecord>(current.Count);
+                    scrubbedHere = 0;
+                    foreach (var queued in current)
                     {
-                        scrubbedHere++;
-                        continue;
+                        var concernsSubject = queued.SubjectHashes.Any(erasedHashes.Contains)
+                                              || queued.SubjectIds.Any(subjectIds.Contains);
+                        if (concernsSubject && queued.Op != DeadLetterOps.Delete)
+                        {
+                            scrubbedHere++;
+                            continue;
+                        }
+                        keep.Add(queued);
                     }
-                    keep.Add(queued);
-                }
+                    return keep;
+                });
                 if (scrubbedHere > 0)
                 {
-                    rt.State.ReplaceDeadLetters(keep);
                     scrubbed += scrubbedHere;
                     Logger.Warning($"[{label}] Erasure scrubbed {scrubbedHere} queued dead-letter " +
                                    "record(s) concerning the erased subject(s) — queued payloads for an " +

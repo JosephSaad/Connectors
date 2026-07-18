@@ -263,6 +263,24 @@ public sealed class FileStateStore : IStateStore
         }
     }
 
+    /// <summary>Atomic read-modify-write: the read AND the write happen inside a
+    /// single acquisition of the per-file lock, so a concurrent AddDeadLetter
+    /// append cannot slip between a stale snapshot and a whole-queue overwrite
+    /// (Monitor is re-entrant, so the nested Read/Replace/Clear calls share this
+    /// lock). An empty result deletes the file (matching ClearDeadLetters).</summary>
+    public void MutateDeadLetters(
+        Func<IReadOnlyList<DeadLetterRecord>, IEnumerable<DeadLetterRecord>> transform)
+    {
+        lock (DeadLetterLock)
+        {
+            var updated = transform(ReadDeadLetters()).ToList();
+            if (updated.Count == 0)
+                ClearDeadLetters();
+            else
+                ReplaceDeadLetters(updated);
+        }
+    }
+
     // ---- delivery ledger ------------------------------------------------------------------
 
     public bool IsDeliveryProcessed(string deliveryId)

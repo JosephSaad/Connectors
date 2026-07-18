@@ -171,14 +171,16 @@ public static class Metrics
     public static void SetWebhookQueueDepth(long depth) =>
         Interlocked.Exchange(ref _webhookQueueDepth, depth);
 
-    /// <summary>Adjust the HA claims currently held by this node (never below zero).</summary>
+    /// <summary>Adjust the HA claims currently held by this node (never below zero on read).</summary>
     public static void AddHaClaimsHeld(long delta)
     {
-        var value = Interlocked.Add(ref _haClaimsHeld, delta);
-        // A steal elsewhere can complete a claim we no longer hold; clamp
-        // rather than report a negative node-local gauge.
-        if (value < 0)
-            Interlocked.CompareExchange(ref _haClaimsHeld, 0, value);
+        // Keep the backing field a faithful atomic running sum so balanced
+        // acquire/release traffic reconciles to the true count with no drift.
+        // Non-negativity is enforced at read time by the HaClaimsHeld getter
+        // (Math.Max). A previous best-effort field-level CAS-to-zero clamp
+        // swallowed decrements that transiently drove the field negative under
+        // contention, causing the gauge to over-report held claims over time.
+        Interlocked.Add(ref _haClaimsHeld, delta);
     }
 
     /// <summary>

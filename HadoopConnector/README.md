@@ -383,7 +383,7 @@ anchors and the actual `hadoop_connector_*` metric names.
 dotnet test
 ```
 
-650 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
+669 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
 shape and concurrency invariants, dead-letter payload redaction
 (`DEADLETTER_PAYLOAD_MODE`), retry/backoff math (numeric Retry-After,
 60 s clamp, jitter), Graph client throttling/hardening (mock HTTP), Graph

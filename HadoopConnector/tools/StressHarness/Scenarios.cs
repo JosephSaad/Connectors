@@ -10,6 +10,9 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json.Nodes;
 using HadoopConnector.AclEngine;
@@ -1149,6 +1152,321 @@ internal sealed class ScenarioRunner
         return res;
     }
 
+    // ── 13. Enterprise pack under concurrency (round 3) ──────────────────────
+    // The enterprise pack that landed after rounds 1/2 — certificate
+    // client_assertion signing, CA-bundle TLS validation, Windows Event Log
+    // mirroring, dead-letter payload redaction and the new metric counters —
+    // hammered concurrently at harness scale, plus a WebHDFS delegation-token
+    // log canary. Prime suspects: a shared RSA/SHA signer or a shared X509Chain
+    // corrupting under threads. Every produced artefact is individually verified.
+    public async Task<ScenarioResult> EnterpriseConcurrencyAsync()
+    {
+        var res = new ScenarioResult { Name = "enterprise-concurrency" };
+        var sw = Stopwatch.StartNew();
+
+        EnterpriseSigning(res);
+        EnterpriseCaValidation(res);
+        EnterpriseEventLogFlood(res);
+        EnterpriseDeadLetterRedaction(res);
+        EnterpriseMetrics(res);
+        await EnterpriseTokenCanaryAsync(res);
+
+        sw.Stop();
+        res.WallSecs = sw.Elapsed.TotalSeconds;
+        return res;
+    }
+
+    // A1 — client_assertion JWT signing: many builders share ONE certificate.
+    private void EnterpriseSigning(ScenarioResult res)
+    {
+        using var cert = Enterprise.MakeSigningCert();
+        using var pub = cert.GetRSAPublicKey()!;
+        var expectedX5t = ClientAssertion.Base64Url(SHA256.HashData(cert.RawData));
+        const string clientId = "22222222-2222-2222-2222-222222222222";
+        const string aud = "https://login.microsoftonline.com/tid/oauth2/v2.0/token";
+
+        var threads = 16;
+        var perThread = 500 * _scale;
+        var invalid = 0;
+        var jtis = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+        var sw = Stopwatch.StartNew();
+        Enterprise.RunConcurrent(threads, _ =>
+        {
+            for (var i = 0; i < perThread; i++)
+            {
+                string jwt;
+                try { jwt = ClientAssertion.Build(cert, clientId, aud); }
+                catch { Interlocked.Increment(ref invalid); continue; }
+                if (Enterprise.JwtValid(jwt, pub, expectedX5t, clientId, aud))
+                    jtis.TryAdd(Enterprise.JwtJti(jwt), 1);
+                else
+                    Interlocked.Increment(ref invalid);
+            }
+        });
+        sw.Stop();
+        var total = threads * perThread;
+        res.Metrics.Add($"cert signers           : {threads} threads × {perThread:N0} = {total:N0} JWTs");
+        res.Metrics.Add($"invalid assertions     : {invalid}");
+        res.Metrics.Add($"unique jti values      : {jtis.Count:N0}");
+        res.Metrics.Add($"sign+verify throughput : {total / Math.Max(0.001, sw.Elapsed.TotalSeconds):N0} JWT/s");
+        res.Check(invalid == 0, $"every client_assertion valid under {threads}-way concurrency (RS256/x5t#S256/aud)");
+        res.Check(jtis.Count == total, "every jti unique — no shared-state collision in the signer");
+    }
+
+    // A2 — CA-bundle TLS validation: concurrent accept (private-CA leaf) and
+    // reject (foreign-CA leaf) verdicts through the shared-bundle callback.
+    private void EnterpriseCaValidation(ScenarioResult res)
+    {
+        var (root, leaf) = Enterprise.MakeCaChain("CN=namenode1.hadoop.corp.local");
+        var (foreignRoot, foreignLeaf) = Enterprise.MakeCaChain("CN=foreign.attacker.example");
+        var bundle = new X509Certificate2Collection { root };   // captured exactly as CreateHandler does
+
+        var threads = 16;
+        var perThread = 200;
+        var wrong = 0;
+        var threw = 0;
+        var sw = Stopwatch.StartNew();
+        Enterprise.RunConcurrent(threads, t =>
+        {
+            for (var i = 0; i < perThread; i++)
+            {
+                var accept = ((t + i) & 1) == 0;
+                try
+                {
+                    var verdict = HttpTransport.ValidateWithBundle(
+                        accept ? leaf : foreignLeaf, null,
+                        SslPolicyErrors.RemoteCertificateChainErrors, bundle);
+                    if (verdict != accept) Interlocked.Increment(ref wrong);
+                    // A trusted leaf presented for the wrong host must still fail.
+                    if (HttpTransport.ValidateWithBundle(
+                            leaf, null,
+                            SslPolicyErrors.RemoteCertificateChainErrors | SslPolicyErrors.RemoteCertificateNameMismatch,
+                            bundle))
+                        Interlocked.Increment(ref wrong);
+                }
+                catch { Interlocked.Increment(ref threw); }
+            }
+        });
+        sw.Stop();
+        var total = (long)threads * perThread * 2;
+        res.Metrics.Add($"chain validations      : {total:N0} ({threads} threads, interleaved accept/reject/name-mismatch)");
+        res.Metrics.Add($"wrong verdicts         : {wrong}");
+        res.Metrics.Add($"exceptions             : {threw}");
+        res.Metrics.Add($"validate throughput    : {total / Math.Max(0.001, sw.Elapsed.TotalSeconds):N0} chains/s");
+        res.Check(wrong == 0, "every accept/reject/name-mismatch verdict correct under concurrency (no shared X509Chain race)");
+        res.Check(threw == 0, "no exception from the validation callback under load");
+        root.Dispose(); leaf.Dispose(); foreignRoot.Dispose(); foreignLeaf.Dispose();
+    }
+
+    // A3 — Event Log sink flood: concurrent Error/Warning/Info, exact mapping.
+    private void EnterpriseEventLogFlood(ScenarioResult res)
+    {
+        var prevEnabled = Environment.GetEnvironmentVariable("EVENTLOG_ENABLED");
+        var prevLevel = Environment.GetEnvironmentVariable("EVENTLOG_LEVEL");
+        Environment.SetEnvironmentVariable("EVENTLOG_ENABLED", "true");
+        Environment.SetEnvironmentVariable("EVENTLOG_LEVEL", null);
+        EventLogSink.ResetForTests();
+        var writer = new HarnessEventLogWriter();
+        EventLogSink.OverrideWriter = writer;
+        EventLogSink.Initialize();
+
+        var threads = 16;
+        var perThread = 500 * _scale;
+        var threw = 0;
+        var expectedError = 0;
+        var expectedWarning = 0;
+        for (var t = 0; t < threads; t++)
+            for (var i = 0; i < perThread; i++)
+                switch ((t + i) % 3) { case 0: expectedError++; break; case 1: expectedWarning++; break; }
+
+        var sw = Stopwatch.StartNew();
+        Enterprise.RunConcurrent(threads, t =>
+        {
+            for (var i = 0; i < perThread; i++)
+            {
+                var level = ((t + i) % 3) switch
+                {
+                    0 => LogLevel.Error,
+                    1 => LogLevel.Warning,
+                    _ => LogLevel.Info,   // suppressed by default (EVENTLOG_LEVEL unset)
+                };
+                try { EventLogSink.Mirror(level, "hadoop_connector.harness", $"t{t}-i{i}"); }
+                catch { Interlocked.Increment(ref threw); }
+            }
+        });
+        sw.Stop();
+
+        var errors = writer.Count(EventLogSink.EventIdError);
+        var warnings = writer.Count(EventLogSink.EventIdWarning);
+        var infos = writer.Count(EventLogSink.EventIdInfo) + writer.Count(EventLogSink.EventIdLifecycleStart);
+        res.Metrics.Add($"event-log flood        : {threads} threads × {perThread:N0} lines");
+        res.Metrics.Add($"errors mirrored        : {errors:N0} (expected {expectedError:N0})");
+        res.Metrics.Add($"warnings mirrored      : {warnings:N0} (expected {expectedWarning:N0})");
+        res.Metrics.Add($"info entries           : {infos:N0} (lifecycle-start only)");
+        res.Check(threw == 0, "event-log sink never threw under a concurrent flood");
+        res.Check(errors == expectedError && warnings == expectedWarning, "exact level→id mapping, no lost or doubled entry");
+        res.Check(writer.Count(EventLogSink.EventIdInfo) == 0, "Info suppressed by default (EVENTLOG_LEVEL unset)");
+
+        EventLogSink.ResetForTests();
+        Environment.SetEnvironmentVariable("EVENTLOG_ENABLED", prevEnabled);
+        Environment.SetEnvironmentVariable("EVENTLOG_LEVEL", prevLevel);
+    }
+
+    // A4 — dead-letter redaction: concurrent producers, no torn record, no PII.
+    private void EnterpriseDeadLetterRedaction(ScenarioResult res)
+    {
+        var prevMode = Environment.GetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar);
+        Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, "redacted");
+        DeadLetterRedaction.ResetForTests();
+        const string connector = "HarnessEnterpriseDeadLetter";
+        SyncState.ClearFailedRecords(connector);
+
+        var workers = 32;
+        var perWorker = 150 * _scale;
+        const string piiTag = "SECRET-PII";
+        var sw = Stopwatch.StartNew();
+        Enterprise.RunConcurrent(workers, w =>
+        {
+            for (var i = 0; i < perWorker; i++)
+            {
+                var id = $"C{w:D3}{i:D6}";
+                var pii = $"{piiTag}-{w:D3}-{i:D6}";
+                SyncState.AppendFailedRecords(
+                    connector, new List<(string, string)> { (id, $"HTTP 400 {pii}") }, "Contact",
+                    new Dictionary<string, JsonNode?>
+                    {
+                        [id] = new JsonObject
+                        {
+                            ["id"] = id,
+                            ["properties"] = new JsonObject { ["Name"] = pii, ["Email"] = $"{pii}@x.invalid" },
+                            ["content"] = new JsonObject { ["value"] = pii, ["type"] = "text" },
+                            ["acl"] = new JsonArray(new JsonObject { ["type"] = "user", ["value"] = $"aad-{pii}" }),
+                        },
+                    });
+            }
+        });
+        sw.Stop();
+
+        var expected = workers * perWorker;
+        var raw = File.ReadAllText(SyncState.FailedRecordsPath(connector));
+        var lines = raw.Split('\n').Where(l => l.Trim().Length > 0).ToList();
+        var corrupt = 0;
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var l in lines)
+        {
+            try
+            {
+                var obj = JsonNode.Parse(l)!.AsObject();
+                ids.Add(obj["item_id"]!.GetValue<string>());
+            }
+            catch { corrupt++; }
+        }
+        // The error string carried PII inline; redaction only strips request/response
+        // bodies, so the error message is expected to remain. Assert on the payload.
+        var payloadLeaked = lines.Any(l =>
+        {
+            var body = JsonNode.Parse(l)!.AsObject()["request_body"];
+            return body is not null && body.ToJsonString().Contains(piiTag, StringComparison.Ordinal);
+        });
+        res.Metrics.Add($"redaction producers    : {workers} threads × {perWorker:N0} = {expected:N0}");
+        res.Metrics.Add($"lines on disk          : {lines.Count:N0}");
+        res.Metrics.Add($"corrupt/torn lines     : {corrupt}");
+        res.Metrics.Add($"distinct ids           : {ids.Count:N0}");
+        res.Check(lines.Count == expected && ids.Count == expected, "no torn/lost/duplicated dead-letter record under concurrency");
+        res.Check(corrupt == 0, "every dead-letter line parses (no interleaved write)");
+        res.Check(!payloadLeaked, "no PII payload value survived in any redacted request_body");
+
+        SyncState.ClearFailedRecords(connector);
+        DeadLetterRedaction.ResetForTests();
+        Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, prevMode);
+    }
+
+    // A5 — new metric counters: concurrent increments reconcile exactly.
+    private void EnterpriseMetrics(ScenarioResult res)
+    {
+        Metrics.ResetForTests();
+        var threads = 16;
+        var perThread = 5000 * _scale;
+        Enterprise.RunConcurrent(threads, _ =>
+        {
+            for (var i = 0; i < perThread; i++)
+            {
+                Metrics.IncGuardRefusals();
+                Metrics.IncPartialObjects();
+                Metrics.IncSweepsSuppressed();
+                Metrics.IncItemsFailed(2);
+                Metrics.IncRecordsFiltered(i % 2 == 0 ? "partition" : "predicate");
+                Metrics.AddHaClaimsHeld(1);
+                Metrics.AddHaClaimsHeld(-1);
+            }
+        });
+        var n = (long)threads * perThread;
+        res.Metrics.Add($"counter increments     : {threads} threads × {perThread:N0} across 7 counters");
+        res.Metrics.Add($"guard_refusals_total   : {Metrics.GuardRefusals:N0} (expected {n:N0})");
+        res.Metrics.Add($"items_failed_total     : {Metrics.ItemsFailed:N0} (expected {2 * n:N0})");
+        res.Check(Metrics.GuardRefusals == n && Metrics.PartialObjects == n && Metrics.SweepsSuppressed == n,
+            "monotonic enterprise counters never tore");
+        res.Check(Metrics.ItemsFailed == 2 * n, "add-by-N counter reconciles");
+        res.Check(Metrics.RecordsFilteredFor("partition") + Metrics.RecordsFilteredFor("predicate") == n,
+            "labelled counter family reconciles across keys");
+        res.Check(Metrics.HaClaimsHeld == 0, "balanced +1/-1 gauge nets to zero, untorn");
+        Metrics.ResetForTests();
+    }
+
+    // CANARY — the WebHDFS delegation token never reaches ANY log line or event
+    // entry, even while every WebHDFS request fails and retries under load.
+    private async Task EnterpriseTokenCanaryAsync(ScenarioResult res)
+    {
+        const string secretToken = "DELEGATION-CANARY-HARNESS-Kerberos-ABC123-do-not-log";
+        var rendered = new ConcurrentQueue<string>();
+        var prevRendered = Logging.RenderedSink;
+        Logging.RenderedSink = line => rendered.Enqueue(line);
+
+        var prevEnabled = Environment.GetEnvironmentVariable("EVENTLOG_ENABLED");
+        var prevLevel = Environment.GetEnvironmentVariable("EVENTLOG_LEVEL");
+        Environment.SetEnvironmentVariable("EVENTLOG_ENABLED", "true");
+        Environment.SetEnvironmentVariable("EVENTLOG_LEVEL", "info");
+        EventLogSink.ResetForTests();
+        var writer = new HarnessEventLogWriter();
+        EventLogSink.OverrideWriter = writer;
+        EventLogSink.Initialize();
+
+        var client = new WebHdfsClient(
+            "http://namenode.example:9870/webhdfs/v1", "/data/bdh",
+            user: "svc-bdh", delegationToken: secretToken,
+            handler: new AlwaysFailWebHdfsHandler(secretToken))
+        { DelayAsync = (_, _) => Task.CompletedTask };
+
+        await Task.WhenAll(Enumerable.Range(0, 24).Select(op => Task.Run(async () =>
+        {
+            try
+            {
+                if (op % 3 == 0) await client.ListAsync($"Contact/dt=2026-07-1{op % 9}");
+                else if (op % 3 == 1) await client.OpenAsync($"Contact/dt=2026-07-1{op % 9}/part.jsonl");
+                else await client.ExistsAsync($"Contact/dt=2026-07-1{op % 9}/part.jsonl");
+            }
+            catch { /* asserting on the logs, not the outcome */ }
+        })));
+        Logging.GetLogger("hadoop_connector.webhdfs").Warning("canary flush");
+
+        var escaped = Uri.EscapeDataString(secretToken);
+        bool Clean(string s) =>
+            !s.Contains(secretToken, StringComparison.Ordinal)
+            && !s.Contains(escaped, StringComparison.Ordinal)
+            && !s.Contains("delegation=", StringComparison.Ordinal);
+        var renderedClean = rendered.All(Clean);
+        var eventClean = writer.Messages.All(Clean);
+        res.Metrics.Add($"canary log lines       : {rendered.Count:N0} rendered, {writer.Messages.Count:N0} event-log");
+        res.Check(!rendered.IsEmpty, "canary actually produced log lines (not vacuous)");
+        res.Check(renderedClean, "WebHDFS delegation token never appears in any rendered log line");
+        res.Check(eventClean, "WebHDFS delegation token never appears in any event-log entry");
+
+        EventLogSink.ResetForTests();
+        Logging.RenderedSink = prevRendered;
+        Environment.SetEnvironmentVariable("EVENTLOG_ENABLED", prevEnabled);
+        Environment.SetEnvironmentVariable("EVENTLOG_LEVEL", prevLevel);
+    }
+
     private static HttpResponseMessage WithRetryAfter(HttpResponseMessage resp, string value)
     {
         resp.Headers.TryAddWithoutValidation("Retry-After", value);
@@ -1191,4 +1509,141 @@ internal sealed class LambdaHandler : HttpMessageHandler
     public LambdaHandler(Func<HttpRequestMessage, HttpResponseMessage> fn) => _fn = fn;
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
         Task.FromResult(_fn(request));
+}
+
+/// <summary>Thread-safe in-memory event-log writer for the enterprise scenario.</summary>
+internal sealed class HarnessEventLogWriter : IEventLogWriter
+{
+    private readonly ConcurrentQueue<(string Message, int EventId)> _entries = new();
+    public IReadOnlyCollection<string> Messages => _entries.Select(e => e.Message).ToList();
+    public void WriteEntry(string message, EventLogEntryLevel level, int eventId) =>
+        _entries.Enqueue((message, eventId));
+    public int Count(int eventId) => _entries.Count(e => e.EventId == eventId);
+    public void Dispose() { }
+}
+
+/// <summary>WebHDFS handler that always fails (transport reset / HTTP 500) and
+/// asserts the delegation token IS on the wire (so the log canary is meaningful).</summary>
+internal sealed class AlwaysFailWebHdfsHandler : HttpMessageHandler
+{
+    private readonly string _token;
+    private int _calls;
+    public AlwaysFailWebHdfsHandler(string token) => _token = token;
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        if (!request.RequestUri!.Query.Contains(Uri.EscapeDataString(_token), StringComparison.Ordinal))
+            throw new InvalidOperationException("token missing from request — canary would be vacuous");
+        return Interlocked.Increment(ref _calls) % 2 == 0
+            ? throw new HttpRequestException("connection reset")
+            : Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            {
+                Content = new StringContent(
+                    """{"RemoteException":{"message":"boom"}}""", Encoding.UTF8, "application/json"),
+            });
+    }
+}
+
+/// <summary>Offline crypto + concurrency helpers for the enterprise scenario
+/// (harness-local twins of the round-3 xUnit helpers; no network, no key store).</summary>
+internal static class Enterprise
+{
+    /// <summary>Run <paramref name="body"/> on <paramref name="threads"/> dedicated
+    /// threads released simultaneously through a gate for genuine contention.</summary>
+    public static void RunConcurrent(int threads, Action<int> body)
+    {
+        var errors = new ConcurrentBag<Exception>();
+        using var ready = new CountdownEvent(threads);
+        using var go = new ManualResetEventSlim(false);
+        var workers = new Thread[threads];
+        for (var t = 0; t < threads; t++)
+        {
+            var id = t;
+            workers[t] = new Thread(() =>
+            {
+                ready.Signal();
+                go.Wait();
+                try { body(id); }
+                catch (Exception e) { errors.Add(e); }
+            }) { IsBackground = true, Name = $"enterprise-worker-{id}" };
+            workers[t].Start();
+        }
+        ready.Wait();
+        go.Set();
+        foreach (var w in workers)
+            w.Join();
+        if (!errors.IsEmpty)
+            throw new AggregateException(errors);
+    }
+
+    /// <summary>Self-signed in-memory RSA-2048 certificate (private key in memory).</summary>
+    public static X509Certificate2 MakeSigningCert(string cn = "CN=harness-graph-cert")
+    {
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest(cn, key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        return request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+    }
+
+    /// <summary>Ephemeral in-memory root CA + a leaf it issued.</summary>
+    public static (X509Certificate2 Root, X509Certificate2 Leaf) MakeCaChain(string leafCn)
+    {
+        using var rootKey = RSA.Create(2048);
+        var rootReq = new CertificateRequest(
+            "CN=Harness Enterprise Root CA", rootKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        rootReq.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        rootReq.CertificateExtensions.Add(new X509KeyUsageExtension(
+            X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
+        rootReq.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(rootReq.PublicKey, false));
+        var root = rootReq.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(5));
+
+        using var leafKey = RSA.Create(2048);
+        var leafReq = new CertificateRequest(
+            leafCn, leafKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        leafReq.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
+        var serial = new byte[8];
+        RandomNumberGenerator.Fill(serial);
+        var leaf = leafReq.Create(root, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1), serial);
+        return (root, leaf);
+    }
+
+    /// <summary>Fully validate one client-assertion JWT against the issuing key.</summary>
+    public static bool JwtValid(string jwt, RSA publicKey, string expectedX5t, string clientId, string aud)
+    {
+        var parts = jwt.Split('.');
+        if (parts.Length != 3)
+            return false;
+        JsonObject header, payload;
+        try
+        {
+            header = JsonNode.Parse(FromBase64Url(parts[0]))!.AsObject();
+            payload = JsonNode.Parse(FromBase64Url(parts[1]))!.AsObject();
+        }
+        catch { return false; }
+        if (header["alg"]?.GetValue<string>() != "RS256") return false;
+        if (header["x5t#S256"]?.GetValue<string>() != expectedX5t) return false;
+        if (header.ContainsKey("x5t")) return false;   // legacy SHA-1 thumbprint must never appear
+        if (payload["aud"]?.GetValue<string>() != aud) return false;
+        if (payload["iss"]?.GetValue<string>() != clientId || payload["sub"]?.GetValue<string>() != clientId)
+            return false;
+        long nbf = payload["nbf"]!.GetValue<long>(), exp = payload["exp"]!.GetValue<long>();
+        if (exp <= nbf) return false;
+        try
+        {
+            return publicKey.VerifyData(
+                Encoding.UTF8.GetBytes(parts[0] + "." + parts[1]),
+                FromBase64Url(parts[2]), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        }
+        catch { return false; }
+    }
+
+    public static string JwtJti(string jwt) =>
+        JsonNode.Parse(FromBase64Url(jwt.Split('.')[1]))!["jti"]!.GetValue<string>();
+
+    private static byte[] FromBase64Url(string value)
+    {
+        var padded = value.Replace('-', '+').Replace('_', '/');
+        return Convert.FromBase64String(padded.PadRight((padded.Length + 3) / 4 * 4, '='));
+    }
 }

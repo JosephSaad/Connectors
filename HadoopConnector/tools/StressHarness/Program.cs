@@ -11,7 +11,8 @@
 //
 //   --scenario  all | filter-scale | memory-bounds | fail-closed | dead-letter |
 //               circuit-breaker | checkpoint-resume | batch-429 | oversize-sweep |
-//               guard-matrix | open-retry | identity-churn | watermark-storm
+//               guard-matrix | open-retry | identity-churn | watermark-storm |
+//               enterprise-concurrency
 //               (default: all)
 //   --scale     integer volume multiplier (default 1 ≈ 1M-row filter scan,
 //               2M-row memory stream, 20k-item ingest). Use 3–5 for a heavier soak.
@@ -53,6 +54,9 @@ var all = new (string Name, Func<ScenarioRunner, Task<ScenarioResult>> Run)[]
     ("open-retry", r => r.OpenRetryAsync()),
     ("identity-churn", r => r.IdentityChurnAsync()),
     ("watermark-storm", r => r.WatermarkStormAsync()),
+    // Round 3 — enterprise pack (cert auth / CA transport / event log / redaction
+    // / metrics) under concurrency, plus a WebHDFS delegation-token log canary.
+    ("enterprise-concurrency", r => r.EnterpriseConcurrencyAsync()),
 };
 
 if (scenario != "all" && all.All(s => s.Name != scenario))

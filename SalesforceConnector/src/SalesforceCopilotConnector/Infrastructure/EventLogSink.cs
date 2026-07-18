@@ -102,10 +102,42 @@ public sealed class EventLogSink : LogHandler
     {
         if (!Enabled || !OperatingSystem.IsWindows())
             return;
+        // Construct the OS writer under the Windows guard (CA1416) and hand
+        // AttachCore a platform-neutral factory; AttachCore owns the atomic
+        // create-once so a concurrent attach storm still yields one sink.
+        var writer = new WindowsEventLogWriter();
+        var mirrorInfo = MirrorInfoFromEnv;
+        AttachCore(Logging.Root, () => new EventLogSink(writer, mirrorInfo));
+    }
+
+    /// <summary>
+    /// Create the singleton sink (atomically) and attach it to
+    /// <paramref name="target"/>. Split out of <see cref="AttachIfEnabled"/> —
+    /// with no OS guard — so the exactly-once-under-concurrency contract is
+    /// exercisable on any platform (the OS write itself still only happens
+    /// through <see cref="WindowsEventLogWriter"/>).
+    ///
+    /// The single-instance guarantee must survive a concurrent attach storm
+    /// (e.g. parallel shard/object workers each running SetupLogging, or the
+    /// Windows service host attaching alongside a worker command). A naive
+    /// <c>_attached ??= factory()</c> is a non-atomic check-then-assign: two
+    /// racing callers can each build a DIFFERENT sink and add BOTH to the logger,
+    /// so every WARNING/ERROR is then mirrored to the event log twice AND the
+    /// loser leaks (<see cref="DetachForTests"/>/detach only tracks the last
+    /// writer). <see cref="Interlocked.CompareExchange{T}(ref T, T, T)"/>
+    /// publishes exactly one winner; every caller then adds that same reference,
+    /// which <c>AddHandler</c> dedupes to a single handler.
+    /// </summary>
+    internal static void AttachCore(LoggerObject target, Func<EventLogSink> factory)
+    {
         try
         {
-            _attached ??= new EventLogSink(new WindowsEventLogWriter(), MirrorInfoFromEnv);
-            Logging.Root.AddHandler(_attached);  // AddHandler dedupes by reference
+            // Reuse the established sink if any; only build a candidate when none
+            // exists yet. CompareExchange installs the first candidate atomically
+            // and hands every racing caller back the one true winner.
+            var candidate = Volatile.Read(ref _attached) ?? factory();
+            var established = Interlocked.CompareExchange(ref _attached, candidate, null) ?? candidate;
+            target.AddHandler(established);  // AddHandler dedupes by reference
         }
         catch
         {
@@ -116,12 +148,13 @@ public sealed class EventLogSink : LogHandler
     /// <summary>Test seam: detach and forget the attached sink.</summary>
     internal static void DetachForTests()
     {
-        if (_attached != null)
-        {
-            Logging.Root.RemoveHandler(_attached);
-            _attached = null;
-        }
+        var current = Interlocked.Exchange(ref _attached, null);
+        if (current != null)
+            Logging.Root.RemoveHandler(current);
     }
+
+    /// <summary>Test seam: forget the attached sink without touching any logger.</summary>
+    internal static void ResetAttachedForTests() => Interlocked.Exchange(ref _attached, null);
 
     /// <summary>Map the project's Python-style numeric level to an entry severity.</summary>
     internal static EventLogEntrySeverity SeverityFor(int level) => level switch

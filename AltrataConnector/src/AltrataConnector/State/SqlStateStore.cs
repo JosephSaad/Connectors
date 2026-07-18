@@ -224,12 +224,18 @@ public sealed class SqlStateStore : IStateStore
 
     public void AddDeadLetter(DeadLetterRecord record) => Execute<object?>(conn =>
     {
+        InsertDeadLetter(conn, null, record);
+        return null;
+    });
+
+    private void InsertDeadLetter(SqlConnection conn, SqlTransaction? txn, DeadLetterRecord record)
+    {
         using var cmd = new SqlCommand("""
             INSERT INTO dbo.altrata_deadletter
                 (connector_id, item_id, dataset, delivery_id, error, op, payload_json, failed_utc, attempts,
                  redacted, subject_ids, subject_hashes)
             VALUES (@cid, @i, @ds, @d, @e, @o, @p, @f, @a, @r, @sids, @shashes);
-            """, conn);
+            """, conn, txn);
         cmd.Parameters.AddWithValue("@cid", _connectorId);
         cmd.Parameters.AddWithValue("@i", record.ItemId);
         cmd.Parameters.AddWithValue("@ds", record.Dataset);
@@ -243,8 +249,7 @@ public sealed class SqlStateStore : IStateStore
         cmd.Parameters.AddWithValue("@sids", JsonSerializer.Serialize(record.SubjectIds));
         cmd.Parameters.AddWithValue("@shashes", JsonSerializer.Serialize(record.SubjectHashes));
         cmd.ExecuteNonQuery();
-        return null;
-    });
+    }
 
     private static IReadOnlyList<string> ParseStringList(string json)
     {
@@ -260,13 +265,16 @@ public sealed class SqlStateStore : IStateStore
         }
     }
 
-    public IReadOnlyList<DeadLetterRecord> ReadDeadLetters() => Execute(conn =>
+    public IReadOnlyList<DeadLetterRecord> ReadDeadLetters() =>
+        Execute(conn => ReadDeadLettersCore(conn, null));
+
+    private IReadOnlyList<DeadLetterRecord> ReadDeadLettersCore(SqlConnection conn, SqlTransaction? txn)
     {
         var records = new List<DeadLetterRecord>();
         using var cmd = new SqlCommand(
             "SELECT item_id, dataset, delivery_id, error, op, payload_json, failed_utc, attempts, " +
             "redacted, subject_ids, subject_hashes " +
-            "FROM dbo.altrata_deadletter WHERE connector_id = @cid ORDER BY id", conn);
+            "FROM dbo.altrata_deadletter WHERE connector_id = @cid ORDER BY id", conn, txn);
         cmd.Parameters.AddWithValue("@cid", _connectorId);
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
@@ -286,8 +294,8 @@ public sealed class SqlStateStore : IStateStore
                 SubjectHashes = ParseStringList(reader.GetString(10)),
             });
         }
-        return (IReadOnlyList<DeadLetterRecord>)records;
-    });
+        return records;
+    }
 
     public void ReplaceDeadLetters(IEnumerable<DeadLetterRecord> records)
     {
@@ -298,12 +306,41 @@ public sealed class SqlStateStore : IStateStore
 
     public void ClearDeadLetters() => Execute<object?>(conn =>
     {
-        using var cmd = new SqlCommand(
-            "DELETE FROM dbo.altrata_deadletter WHERE connector_id = @cid", conn);
-        cmd.Parameters.AddWithValue("@cid", _connectorId);
-        cmd.ExecuteNonQuery();
+        DeleteAllDeadLetters(conn, null);
         return null;
     });
+
+    private void DeleteAllDeadLetters(SqlConnection conn, SqlTransaction? txn)
+    {
+        using var cmd = new SqlCommand(
+            "DELETE FROM dbo.altrata_deadletter WHERE connector_id = @cid", conn, txn);
+        cmd.Parameters.AddWithValue("@cid", _connectorId);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Atomic read-modify-write inside a single serializable transaction
+    /// so a concurrent AddDeadLetter cannot slip between the snapshot read and
+    /// the whole-queue rewrite (the file backend's TOCTOU fix, in SQL terms).</summary>
+    public void MutateDeadLetters(
+        Func<IReadOnlyList<DeadLetterRecord>, IEnumerable<DeadLetterRecord>> transform) =>
+        Execute<object?>(conn =>
+        {
+            using var txn = conn.BeginTransaction(System.Data.IsolationLevel.Serializable);
+            try
+            {
+                var updated = transform(ReadDeadLettersCore(conn, txn)).ToList();
+                DeleteAllDeadLetters(conn, txn);
+                foreach (var record in updated)
+                    InsertDeadLetter(conn, txn, record);
+                txn.Commit();
+            }
+            catch
+            {
+                txn.Rollback();
+                throw;
+            }
+            return null;
+        });
 
     public bool IsDeliveryProcessed(string deliveryId) => Execute(conn =>
     {
