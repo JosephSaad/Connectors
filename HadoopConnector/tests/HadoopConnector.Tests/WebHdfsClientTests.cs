@@ -259,6 +259,47 @@ public class WebHdfsClientTests
         Assert.Equal(5, calls);
     }
 
+    // ── Delegation-token leak canary ─────────────────────────────────────────
+    // The token lives in the query string (?delegation=...). It must NEVER appear
+    // in an exception message surfaced from ANY failure path — those messages are
+    // logged and shipped to SIEM. Logging uses uri.AbsolutePath (no query); this
+    // pins that no error path regresses to the full URI.
+    private const string SecretToken = "SUPERSECRETTOK==xyz";
+
+    [Fact]
+    public async Task ListAsync_HttpError_ExceptionMessageOmitsDelegationToken()
+    {
+        var handler = new MockHttpHandler((_, _) => MockHttpHandler.Json(
+            HttpStatusCode.Forbidden, """{"RemoteException":{"message":"denied"}}"""));
+        var exc = await Assert.ThrowsAsync<HdfsException>(
+            () => Make(handler, token: SecretToken).ListAsync("Contact"));
+        Assert.DoesNotContain(SecretToken, exc.ToString());
+        Assert.DoesNotContain("delegation=", exc.ToString());
+    }
+
+    [Fact]
+    public async Task OpenAsync_HttpError_ExceptionMessageOmitsDelegationToken()
+    {
+        var handler = new MockHttpHandler((_, _) => MockHttpHandler.Json(
+            HttpStatusCode.Forbidden, """{"RemoteException":{"message":"denied"}}"""));
+        var exc = await Assert.ThrowsAsync<HdfsException>(
+            () => Make(handler, token: SecretToken).OpenAsync("Contact/x.csv"));
+        Assert.DoesNotContain(SecretToken, exc.ToString());
+        Assert.DoesNotContain("delegation=", exc.ToString());
+    }
+
+    [Fact]
+    public async Task OpenAsync_TransportError_ExceptionMessageOmitsDelegationToken()
+    {
+        // A transport failure after retries exhausted is wrapped in an
+        // HdfsException by OpenAsync ("OPEN '<relativePath>' failed: <inner>").
+        var handler = new MockHttpHandler((_, _) => throw new HttpRequestException("connection reset"));
+        var exc = await Assert.ThrowsAsync<HdfsException>(
+            () => Make(handler, token: SecretToken).OpenAsync("Contact/x.csv"));
+        Assert.DoesNotContain(SecretToken, exc.ToString());
+        Assert.DoesNotContain("delegation=", exc.ToString());
+    }
+
     // ── Circuit breaker interplay ────────────────────────────────────────────
 
     [Fact]

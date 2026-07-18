@@ -171,6 +171,61 @@ public class DeadLetterRedactionTests : IDisposable
     }
 
     [Fact]
+    public void ConcurrentWriters_RedactedMode_NoRawValuesOnDisk_AllEntriesIntact()
+    {
+        // Part B: under concurrent dead-letter writers the redacted default must
+        // still keep every record VALUE off disk, produce no torn/interleaved
+        // JSONL lines, and lose no entry.
+        using var env = new EnvScope((DeadLetterRedaction.ModeEnvVar, null));  // unset → redacted default
+        using var scope = new SyncStateScope();
+        Assert.True(DeadLetterRedaction.RedactionEnabled);
+
+        const int writers = 12;
+        const int perWriter = 40;
+        Parallel.For(0, writers, w =>
+        {
+            for (var i = 0; i < perWriter; i++)
+            {
+                var id = $"C{w:D2}{i:D3}";
+                var request = new Dictionary<string, JsonNode?>
+                {
+                    [id] = new JsonObject
+                    {
+                        ["id"] = id,
+                        ["properties"] = new JsonObject
+                        {
+                            ["Name"] = $"Secret Person {w}-{i}",
+                            ["Email"] = $"user{w}.{i}@bank.example",
+                            ["AnnualRevenue"] = 9_000_000 + w * 1000 + i,
+                        },
+                        ["content"] = new JsonObject { ["value"] = $"net worth {w}-{i}", ["type"] = "text" },
+                        ["acl"] = new JsonArray(new JsonObject
+                        {
+                            ["type"] = "user", ["value"] = $"aad-{w}-{i}", ["accessType"] = "grant",
+                        }),
+                    },
+                };
+                SyncState.AppendFailedRecords(
+                    Connector, new List<(string, string)> { (id, "HTTP 500: transient") },
+                    "Contact", request);
+            }
+        });
+
+        // Every entry parsed back (no torn/interleaved lines) and none lost.
+        var entries = SyncState.ReadFailedRecords(Connector);
+        Assert.Equal(writers * perWriter, entries.Count);
+        Assert.All(entries, e => Assert.True(e["request_body"]!["redacted"]!.GetValue<bool>()));
+
+        // No record VALUE reached disk in any interleaving.
+        var raw = File.ReadAllText(SyncState.FailedRecordsPath(Connector));
+        Assert.DoesNotContain("Secret Person", raw);
+        Assert.DoesNotContain("@bank.example", raw);
+        Assert.DoesNotContain("net worth", raw);
+        Assert.DoesNotContain("aad-", raw);
+        Assert.DoesNotContain("9000000", raw);
+    }
+
+    [Fact]
     public void RedactRequestBody_NullAndNonObject_AreSafe()
     {
         Assert.Null(DeadLetterRedaction.RedactRequestBody(null));

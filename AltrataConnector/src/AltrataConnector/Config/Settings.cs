@@ -286,6 +286,11 @@ public sealed record AppConfig
             errors.Add("CLASSIFICATION_ENFORCE_ACL=true requires CLASSIFICATION_ENFORCE_GROUP_ID (the Entra group Restricted items are locked to)");
         if (config.ClassificationEnforceAcl && !config.Classification)
             errors.Add("CLASSIFICATION_ENFORCE_ACL=true requires CLASSIFICATION=true (the classification tag drives enforcement)");
+        // Dead-letter payload mode: validate at load so a typo (e.g. "redacetd")
+        // fails validate-config / startup, not mid-crawl. DeadLetterPolicy.Mode
+        // throws a ConfigurationError naming the setting for any unknown value.
+        try { _ = State.DeadLetterPolicy.Mode; }
+        catch (ConfigurationError exc) { errors.Add(exc.Message); }
 
         if (errors.Count > 0)
             throw new ConfigurationError("Invalid configuration: " + string.Join("; ", errors));

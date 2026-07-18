@@ -257,6 +257,14 @@ public static class SyncState
         {
             lock (DeadLetterLock)
             {
+                // A crash mid-append can leave a torn final line with no trailing
+                // newline. Opening in append mode and writing immediately would
+                // glue the first new record onto that fragment, producing one
+                // unparseable line that ReadFailedRecords silently skips — LOSING
+                // a failed item from the retry safety net. Seal the boundary first
+                // so the next record lands cleanly on its own line. (Mirrors
+                // DecisionLedger.EnsureTrailingNewline.)
+                EnsureCleanAppendBoundary(path);
                 using var writer = new StreamWriter(path, append: true, Utf8NoBom);
                 var correlationId = Infrastructure.CorrelationContext.Current;
                 foreach (var (itemId, error) in failures)
@@ -285,6 +293,38 @@ public static class SyncState
                 $"Failed to write {failures.Count} failed record(s) to dead-letter file {path}: {exc.Message}");
             foreach (var (itemId, error) in failures)
                 Logger.Error($"  UNRECORDED FAILURE — object={objectType} id={itemId} error={error}");
+        }
+    }
+
+    /// <summary>
+    /// If the dead-letter file exists, is non-empty, and its last byte is not a
+    /// newline, append a single '\n' so the next appended record starts on its
+    /// own line rather than being glued onto a torn final line left by a crash
+    /// mid-append. Cheap and idempotent: a normal newline-terminated file is a
+    /// no-op (one Seek + one byte read). Best-effort on a failure path — never
+    /// throws; a warning naming the path + exception type is logged and the
+    /// caller proceeds to append regardless. File/JSONL backend only; the SQL
+    /// backend never reaches here.
+    /// </summary>
+    private static void EnsureCleanAppendBoundary(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length == 0)
+                return;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+            stream.Seek(-1, SeekOrigin.End);
+            if (stream.ReadByte() == '\n')
+                return;
+            stream.Seek(0, SeekOrigin.End);
+            stream.WriteByte((byte)'\n');
+        }
+        catch (Exception exc)
+        {
+            Logger.Warning(
+                $"Could not seal the dead-letter append boundary for '{path}' "
+                + $"({exc.GetType().Name}: {exc.Message}); appending anyway.");
         }
     }
 

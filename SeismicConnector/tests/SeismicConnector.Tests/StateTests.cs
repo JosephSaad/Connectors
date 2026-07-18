@@ -135,6 +135,36 @@ public class DeadLetterTests
     }
 
     [Fact]
+    public void FailedRecords_AfterCrashTornFinalLine_SealsBoundaryAndPreservesNewRecord()
+    {
+        using var state = new TempStateDir();
+        var path = SyncState.FailedRecordsPath("Conn");
+
+        // Write a legitimate failure, then simulate a process killed mid-append: a
+        // partial, unterminated final line (a torn tail — no trailing newline) left
+        // directly on the dead-letter file. Without the boundary seal, the NEXT
+        // append is glued onto this fragment, producing one unparseable line that
+        // ReadFailedRecords silently skips — LOSING the new failure from the retry
+        // safety net.
+        SyncState.AppendFailedRecords(path, new List<string> { "Good_1" }, "ContentItem", "HTTP 400: earlier");
+        File.AppendAllText(path, "{\"item_id\": \"Torn_2\", \"object_type\": \"ContentItem\", \"error\": \"HTTP 5");
+
+        // The recovery append must seal the torn tail first, so the new record
+        // lands on its own parseable line.
+        SyncState.AppendFailedRecords(path, new List<string> { "New_3" }, "ContentItem", "HTTP 503: after crash");
+
+        var records = SyncState.ReadFailedRecords("Conn");
+        // The NEW record survived intact and parseable — the torn fragment did not
+        // corrupt it.
+        var newRecord = records.SingleOrDefault(r => r["item_id"]?.GetValue<string>() == "New_3");
+        Assert.NotNull(newRecord);
+        Assert.Equal("ContentItem", newRecord!["object_type"]?.GetValue<string>());
+        Assert.Equal("HTTP 503: after crash", newRecord["error"]?.GetValue<string>());
+        // The pre-crash good entry is still present too.
+        Assert.Contains(records, r => r["item_id"]?.GetValue<string>() == "Good_1");
+    }
+
+    [Fact]
     public void FailedRecords_ConcurrentAppends_DoNotInterleave()
     {
         using var state = new TempStateDir();

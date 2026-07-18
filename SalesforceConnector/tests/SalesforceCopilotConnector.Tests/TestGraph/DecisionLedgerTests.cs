@@ -97,6 +97,25 @@ public sealed class DecisionLedgerTests : IDisposable
     }
 
     [Fact]
+    public void VerifyDetectsReorderedEntries()
+    {
+        var ledger = NewLedger();
+        ledger.Append(DecisionKinds.AclRestriction, "001", "Account", "r1");
+        ledger.Append(DecisionKinds.Exclusion, "002", "Case", "r2");
+        ledger.Append(DecisionKinds.AclRestriction, "003", "Lead", "r3");
+
+        // Swap two interior entries: each line is individually well-formed and its
+        // own hash is intact, but the Seq/PrevHash linkage no longer matches the
+        // file order — the tamper-evident chain must catch the reorder.
+        var lines = File.ReadAllLines(ledger.Path).ToList();
+        (lines[1], lines[2]) = (lines[2], lines[1]);
+        File.WriteAllLines(ledger.Path, lines);
+
+        Assert.False(NewLedger().Verify(out var broken));
+        Assert.NotEqual(0, broken);   // the reorder is caught (Seq/link mismatch)
+    }
+
+    [Fact]
     public void VerifyDetectsStructuralCorruption()
     {
         var ledger = NewLedger();

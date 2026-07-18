@@ -84,6 +84,12 @@ public static class DecisionLedger
 
                 var path = LedgerPath(connectorId);
                 Directory.CreateDirectory(Config.SyncState.LogsDir);
+                // A crash mid-append can leave a torn final line with no trailing
+                // newline. Isolate it onto its own line before appending so the
+                // new record is never glued onto the fragment (which would lose
+                // it and corrupt the physical line). The tolerant reader below
+                // skips the fragment; the chain continues cleanly from here.
+                EnsureTrailingNewline(connectorId, path);
                 using var writer = new StreamWriter(path, append: true, Utf8NoBom);
                 writer.WriteLine(record.ToJsonString(Compact));
             }
@@ -96,7 +102,12 @@ public static class DecisionLedger
         }
     }
 
-    /// <summary>All ledger records for <paramref name="connectorId"/>, in order.</summary>
+    /// <summary>All ledger records for <paramref name="connectorId"/>, in order.
+    /// Tolerant reader: an unparseable line (a torn final write from a crash, or
+    /// interior corruption) is skipped rather than throwing, so one torn line can
+    /// never make the whole ledger unreadable or wedge every later append. A torn
+    /// tail then simply drops off; interior corruption leaves a seq/hash-chain
+    /// gap that <see cref="Verify"/> still reports as tamper.</summary>
     public static List<JsonObject> Read(string connectorId)
     {
         var entries = new List<JsonObject>();
@@ -107,7 +118,18 @@ public static class DecisionLedger
                 var line = rawLine.Trim();
                 if (line.Length == 0)
                     continue;
-                if (JsonNode.Parse(line) is JsonObject entry)
+                JsonObject? entry;
+                try
+                {
+                    entry = JsonNode.Parse(line) as JsonObject;
+                }
+                catch (JsonException)
+                {
+                    // Per-line isolation (same contract as SyncState's dead-letter
+                    // reader): skip the fragment and keep reading the good lines.
+                    continue;
+                }
+                if (entry is not null)
                     entries.Add(entry);
             }
         }
@@ -116,6 +138,29 @@ public static class DecisionLedger
             // no ledger yet
         }
         return entries;
+    }
+
+    /// <summary>
+    /// If the ledger file exists and does not already end in a newline, append
+    /// one so a torn final line (a crash mid-append) is isolated and the next
+    /// record lands cleanly on its own line. Logged once, at the moment of
+    /// repair, rather than on every read. Best-effort — the caller's try/catch
+    /// still guards the actual write.
+    /// </summary>
+    private static void EnsureTrailingNewline(string connectorId, string path)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists || info.Length == 0)
+            return;
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+        stream.Seek(-1, SeekOrigin.End);
+        if (stream.ReadByte() == '\n')
+            return;
+        stream.Seek(0, SeekOrigin.End);
+        stream.WriteByte((byte)'\n');
+        Logger.Warning(
+            $"Decision ledger for '{connectorId}' had a torn final line (a prior crash "
+            + "mid-append); isolated it so the chain continues from the last intact record.");
     }
 
     /// <summary>

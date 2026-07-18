@@ -67,7 +67,17 @@ public static class ItemExpiry
     {
         if (ttlDays is not > 0)
             return false;
-        var expiry = now.AddDays(ttlDays.Value).ToUniversalTime();
+        // Guard the date arithmetic: a fat-fingered GRAPH_ITEM_TTL_DAYS large
+        // enough to push <now + TTL> past DateTimeOffset.MaxValue would otherwise
+        // throw ArgumentOutOfRangeException from AddDays — and because ApplyExpiry
+        // runs inside the per-item transform try/catch, that turns EVERY item in
+        // the crawl into a dead-lettered "transform failure". Clamp instead: a TTL
+        // that far out is already "effectively never expires", so the item is
+        // stamped with the maximum representable expiry rather than crashing.
+        var maxDays = (DateTimeOffset.MaxValue - now).TotalDays;
+        var expiry = ttlDays.Value < maxDays
+            ? now.AddDays(ttlDays.Value).ToUniversalTime()
+            : DateTimeOffset.MaxValue;
         item[ExpirationProperty] = expiry.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
         Metrics.IncItemsExpiryStamped();
         return true;

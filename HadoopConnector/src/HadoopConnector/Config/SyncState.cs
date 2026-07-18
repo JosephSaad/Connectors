@@ -259,6 +259,15 @@ public static class SyncState
         {
             lock (DeadLetterLock)
             {
+                // Seal a torn/unterminated final line (a crash left a partial
+                // record with no trailing newline) before the first append of this
+                // call, so the new record lands on its own line instead of being
+                // glued onto the fragment — a glued line is unparseable JSON, and
+                // ReadFailedRecords would then silently skip it, LOSING a failure
+                // from the retry safety net. Mirrors DecisionLedger's
+                // EnsureCleanAppendBoundary. Best-effort and idempotent: a normal
+                // newline-terminated file is a no-op.
+                SealDeadLetterBoundary(path);
                 using var writer = new StreamWriter(path, append: true, Utf8NoBom);
                 var correlationId = Infrastructure.CorrelationContext.Current;
                 foreach (var (itemId, error) in failures)
@@ -344,6 +353,32 @@ public static class SyncState
         catch (Exception exc) when (exc is FileNotFoundException or DirectoryNotFoundException)
         {
             // already gone
+        }
+    }
+
+    /// <summary>Seal a dead-letter file whose final line does not end with a
+    /// newline (a crash left a torn/unterminated partial record), so the next
+    /// append starts on a clean line instead of being glued onto the fragment.
+    /// Best-effort — a sealing failure must not fail the append (the write below
+    /// falls back to append-as-is); idempotent — a newline-terminated (or
+    /// missing/empty) file is a no-op. Callers hold DeadLetterLock.</summary>
+    private static void SealDeadLetterBoundary(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length == 0)
+                return;
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite);
+            fs.Seek(-1, SeekOrigin.End);
+            if (fs.ReadByte() != '\n')
+                fs.WriteByte((byte)'\n');
+        }
+        catch (Exception exc)
+        {
+            Logger.Warning(
+                $"Dead-letter file '{path}' append-boundary check failed "
+                + $"({exc.GetType().Name}: {exc.Message}); appending as-is.");
         }
     }
 

@@ -310,6 +310,7 @@ public static class SyncState
             }
             lock (DeadLetterLock)
             {
+                EnsureCleanAppendBoundary(filePath);
                 using var fh = new StreamWriter(filePath, append: true, Utf8NoBom);
                 foreach (var (itemId, itemError) in failures)
                 {
@@ -343,6 +344,50 @@ public static class SyncState
                 Logger.Error(
                     $"  UNRECORDED FAILURE — object={objectType} id={itemId} error={itemError}");
             }
+        }
+    }
+
+    /// <summary>
+    /// Seal a torn dead-letter tail before the first append of a batch.
+    ///
+    /// A prior crash can leave the JSONL file with an unterminated final line —
+    /// the record bytes flushed but the process died before the trailing
+    /// <c>'\n'</c>. Appending straight away would glue the next record onto that
+    /// fragment, producing one line that no longer parses; <see cref="ReadFailedRecords"/>
+    /// then chokes on it and the freshly appended failure is lost from the retry
+    /// safety net. If the file exists, is non-empty, and its last byte is not
+    /// <c>'\n'</c>, write a single newline so the new record starts on its own
+    /// line. A normal newline-terminated file is a no-op, so the seal is cheap and
+    /// idempotent. Best-effort: any I/O problem is logged and swallowed so the
+    /// append (itself a failure path) still proceeds and never throws here. This
+    /// mirrors the append-boundary discipline the DecisionLedger uses to keep its
+    /// JSONL chain parseable. Callers hold <see cref="DeadLetterLock"/>.
+    /// </summary>
+    private static void EnsureCleanAppendBoundary(string filePath)
+    {
+        try
+        {
+            if (!File.Exists(filePath))
+            {
+                return;
+            }
+            using var stream = new FileStream(
+                filePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            if (stream.Length == 0)
+            {
+                return;
+            }
+            stream.Seek(-1, SeekOrigin.End);
+            if (stream.ReadByte() != '\n')
+            {
+                stream.WriteByte((byte)'\n');
+            }
+        }
+        catch (Exception exc) when (exc is IOException or UnauthorizedAccessException)
+        {
+            Logger.Warning(
+                $"Could not seal dead-letter append boundary for {filePath} " +
+                $"({exc.GetType().Name}); appending without it.");
         }
     }
 

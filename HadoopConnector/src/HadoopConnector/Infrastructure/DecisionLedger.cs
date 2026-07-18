@@ -50,6 +50,7 @@ public sealed class DecisionLedger
     private readonly object _lock = new();
     private string _lastHash;
     private long _seq;
+    private bool _appendBoundaryChecked;
 
     public DecisionLedger(string connectorId, string logsDir)
     {
@@ -79,6 +80,11 @@ public sealed class DecisionLedger
         {
             lock (_lock)
             {
+                // Seal a torn/unterminated final line (a crash mid-append) before
+                // the first write of this instance, so the new entry lands on its
+                // own line instead of being glued onto the partial and corrupting
+                // BOTH lines. One-time per instance, under the lock.
+                EnsureCleanAppendBoundary();
                 var seq = _seq + 1;
                 var timestamp = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture);
                 var hash = ComputeHash(seq, timestamp, itemId, objectType, decision, reason, _lastHash);
@@ -183,27 +189,97 @@ public sealed class DecisionLedger
         return VerifyResult.Valid(lines.Count);
     }
 
-    /// <summary>Read the last valid entry to continue the chain across restarts;
-    /// (0, GENESIS) for a missing/empty/corrupt file.</summary>
+    /// <summary>Read the last VALID entry to continue the chain across restarts.
+    /// A torn/unterminated final line (a crash mid-append) is tolerated: the head
+    /// is the last well-formed entry, NOT genesis — resetting to genesis would
+    /// restart the sequence at 1 and orphan the existing audit history. Only a
+    /// missing/empty file (or one with no parseable entry at all) is (0, GENESIS).
+    /// The tail-truncation caveat stands: the torn final entry itself is lost.</summary>
     private static (long Seq, string Hash) ReadChainHead(string path)
     {
+        long seq = 0;
+        string hash = Genesis;
+        var skippedTornLine = false;
         try
         {
-            string? last = null;
             foreach (var raw in File.ReadLines(path, Utf8NoBom))
             {
-                if (raw.Trim().Length > 0)
-                    last = raw;
+                if (raw.Trim().Length == 0)
+                    continue;
+                long? entrySeq;
+                string? entryHash;
+                try
+                {
+                    var obj = JsonNode.Parse(raw)!.AsObject();
+                    entrySeq = obj["seq"]?.GetValue<long>();
+                    entryHash = obj["hash"]?.GetValue<string>();
+                }
+                catch (Exception exc) when (exc is JsonException or InvalidOperationException or FormatException)
+                {
+                    // Torn/garbled line (e.g. a crash mid-append). Skip it and keep
+                    // the last valid entry as the head rather than discarding the
+                    // whole chain; usually only the final line is affected.
+                    skippedTornLine = true;
+                    continue;
+                }
+                if (entrySeq is null || entryHash is null)
+                {
+                    skippedTornLine = true;
+                    continue;
+                }
+                seq = entrySeq.Value;
+                hash = entryHash;
             }
-            if (last is null)
-                return (0, Genesis);
-            var obj = JsonNode.Parse(last)!.AsObject();
-            return (obj["seq"]!.GetValue<long>(), obj["hash"]!.GetValue<string>());
         }
-        catch
+        catch (Exception exc) when (exc is FileNotFoundException or DirectoryNotFoundException)
         {
-            // Missing/empty/corrupt tail — start (or continue) from genesis.
+            // No file yet — a first run starts from genesis.
             return (0, Genesis);
+        }
+        catch (Exception exc)
+        {
+            // Any other read failure (e.g. IO/permission): do not reset an existing
+            // chain to genesis silently — surface it and continue from genesis only
+            // because nothing could be read.
+            Logger.Warning(
+                $"Decision-ledger '{path}' could not be read to continue the chain "
+                + $"({exc.GetType().Name}: {exc.Message}); starting from genesis.");
+            return (0, Genesis);
+        }
+        if (skippedTornLine)
+        {
+            Logger.Warning(
+                $"Decision-ledger '{path}' has a torn/garbled line (a crash mid-append); "
+                + $"continuing the chain from the last intact entry (seq {seq}). Verify() will "
+                + "flag the torn line — inspect the file to confirm it is tail-truncation, not tamper.");
+        }
+        return (seq, hash);
+    }
+
+    /// <summary>Seal a final line that does not end with a newline (a crash left a
+    /// torn/unterminated partial), so the next append starts on a clean line.
+    /// One-time per instance; best-effort — a sealing failure must not fail the
+    /// append (the write below falls back to append-as-is).</summary>
+    private void EnsureCleanAppendBoundary()
+    {
+        if (_appendBoundaryChecked)
+            return;
+        _appendBoundaryChecked = true;
+        try
+        {
+            var info = new FileInfo(_path);
+            if (!info.Exists || info.Length == 0)
+                return;
+            using var fs = new FileStream(_path, FileMode.Open, FileAccess.ReadWrite);
+            fs.Seek(-1, SeekOrigin.End);
+            if (fs.ReadByte() != '\n')
+                fs.WriteByte((byte)'\n');
+        }
+        catch (Exception exc)
+        {
+            Logger.Warning(
+                $"Decision-ledger '{_path}' append-boundary check failed "
+                + $"({exc.GetType().Name}: {exc.Message}); appending as-is.");
         }
     }
 }

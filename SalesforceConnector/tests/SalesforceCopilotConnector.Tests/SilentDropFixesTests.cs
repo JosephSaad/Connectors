@@ -782,6 +782,56 @@ public class AppendFailedRecordsIOErrorTests
     }
 
     [Fact]
+    public void TornTailIsSealedSoAppendedRecordSurvivesRetry()
+    {
+        // A prior crash left an UNTERMINATED final line in the dead-letter file
+        // (the record bytes flushed but the process died before the trailing
+        // newline). Without sealing the append boundary, the next AppendFailedRecords
+        // glues the new record onto that fragment ("{…torn…}{…new…}") — one line
+        // that no longer parses — so the freshly failed item is lost from the retry
+        // safety net (ReadFailedRecords chokes on the glued line). The seal writes a
+        // single newline first, so the new record lands on its own parseable line.
+        var savedLogsDir = SyncState.LogsDir;
+        SyncState.LogsDir = _tmpPath;
+        try
+        {
+            const string connectorId = "TornTailConnector";
+            var path = SyncState.FailedRecordsPath(connectorId);
+
+            // Complete, valid record — but written WITHOUT its line terminator,
+            // exactly the torn tail a mid-write crash leaves behind.
+            File.WriteAllText(
+                path,
+                "{\"item_id\": \"torn-001\", \"object_type\": \"Account\", " +
+                "\"error\": \"crash before newline\", \"timestamp\": \"2026-01-01T00:00:00\"}",
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            Assert.NotEqual('\n', File.ReadAllText(path)[^1]);
+
+            SyncState.AppendFailedRecords(
+                path,
+                new List<(string, string)> { ("new-002", "HTTP 500 InternalServerError") },
+                "Account");
+
+            // ReadFailedRecords must not throw on a glued line, and the NEW record
+            // must be present and parseable with its error intact.
+            var entries = SyncState.ReadFailedRecords(connectorId);
+            var ids = entries.Select(e => e["item_id"]!.GetValue<string>()).ToList();
+            Assert.Contains("new-002", ids);
+
+            var appended = entries.Single(e => e["item_id"]!.GetValue<string>() == "new-002");
+            Assert.Equal("Account", appended["object_type"]!.GetValue<string>());
+            Assert.Equal("HTTP 500 InternalServerError", appended["error"]!.GetValue<string>());
+
+            // The torn fragment was not corrupted either — it survives as its own entry.
+            Assert.Contains("torn-001", ids);
+        }
+        finally
+        {
+            SyncState.LogsDir = savedLogsDir;
+        }
+    }
+
+    [Fact]
     public void RequestAndResponseBodiesIncluded()
     {
         // Request/response bodies are included in the JSONL entry. This asserts the

@@ -482,6 +482,39 @@ public static class Ingest
         };
     }
 
+    /// <summary>
+    /// Best-effort append to the #11 decision ledger from the ingest hot path.
+    ///
+    /// The access-affecting ACL decision this line RECORDS has already been applied
+    /// to the item's ACL by the time we get here, so the audit write must never be
+    /// able to take content ingestion down with it: a ledger fault (a corrupt /
+    /// tampered chain — <see cref="InvalidDataException"/> — or a disk/permission
+    /// IOException) previously propagated out of the transform loop, aborting the
+    /// whole chunk and silently dropping every record in it (never dead-lettered,
+    /// surfacing only as a mis-attributed "Graph upload failed" and a COUNT
+    /// MISMATCH). The item still ingests with its restricted ACL; the failure is
+    /// logged loudly with the subject id + full exception, and <c>Verify()</c>
+    /// still reports the chain as broken, so the break is NOT silently tolerated.
+    /// </summary>
+    private static void TryAppendDecision(
+        DecisionLedger? ledger, string decision, string itemId, string? objectType, string reason)
+    {
+        if (ledger == null)
+            return;
+        try
+        {
+            ledger.Append(decision, itemId, objectType, reason);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error(
+                $"[DecisionLedger] Failed to record '{decision}' decision for {objectType}/{itemId} " +
+                "— the ACL decision was still applied and the item is ingested; the audit line was NOT " +
+                $"written and the ledger may need repair (run Verify): {ex.GetType().Name}: {ex.Message}",
+                ex);
+        }
+    }
+
     // ###Dead code. Can be removed
     /// <summary>
     /// Yield <c>(object_type, chunk)</c> tuples where <i>chunk</i> is at most <paramref name="chunkSize"/>
@@ -600,7 +633,8 @@ public static class Ingest
                 Logger.Info(
                     $"[Classification] {objectType}/{itemId}: tag '{classification.Tag}' is top-tier — " +
                     $"ACL restricted to Entra group '{classificationPolicy.RestrictedGroup}' (CLASSIFICATION_ENFORCE_ACL).");
-                decisionLedger?.Append(
+                TryAppendDecision(
+                    decisionLedger,
                     DecisionKinds.AclRestriction, itemId, objectType,
                     $"classification tag '{classification.Tag}' restricted to Entra group {classificationPolicy.RestrictedGroup}");
             }
@@ -613,14 +647,16 @@ public static class Ingest
                 if (guard.Action == AclScaleGuardActions.Group)
                 {
                     acl = guard.Acl;
-                    decisionLedger?.Append(
+                    TryAppendDecision(
+                        decisionLedger,
                         DecisionKinds.AclRestriction, itemId, objectType,
                         $"ACL scale guard: {guard.AceCount} ACE(s) > {scaleGuardPolicy.Threshold} — collapsed to group {scaleGuardPolicy.Group}");
                 }
                 else if (guard.Action == AclScaleGuardActions.Fallback)
                 {
                     acl = guard.Acl;
-                    decisionLedger?.Append(
+                    TryAppendDecision(
+                        decisionLedger,
                         DecisionKinds.Exclusion, itemId, objectType,
                         $"ACL scale guard: {guard.AceCount} ACE(s) > {scaleGuardPolicy.Threshold} — deny-everyone fallback");
                 }

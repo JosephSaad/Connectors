@@ -60,4 +60,27 @@ public sealed class ItemExpiryTests : IDisposable
         var parsed = DateTimeOffset.Parse(iso, CultureInfo.InvariantCulture);
         Assert.Equal(now.AddDays(30).UtcDateTime, parsed.UtcDateTime);
     }
+
+    [Theory]
+    [InlineData(int.MaxValue)]
+    [InlineData(2_000_000_000)]
+    [InlineData(3_000_000)]   // ~9999-limit boundary from a 2026 "now"
+    public void HugeTtlClampsInsteadOfThrowing(int ttlDays)
+    {
+        // REGRESSION: a fat-fingered GRAPH_ITEM_TTL_DAYS large enough to push
+        // <now + TTL> past DateTimeOffset.MaxValue used to throw
+        // ArgumentOutOfRangeException from AddDays. ApplyExpiry runs inside the
+        // per-item transform try/catch, so that exception turned EVERY item in the
+        // crawl into a dead-lettered "transform failure". It must clamp instead.
+        var now = new DateTimeOffset(2026, 7, 18, 12, 0, 0, TimeSpan.Zero);
+        var item = new JsonObject { ["id"] = "001" };
+
+        var stamped = ItemExpiry.ApplyExpiry(item, now, ttlDays);   // must not throw
+
+        Assert.True(stamped);
+        var iso = item[ItemExpiry.ExpirationProperty]!.GetValue<string>();
+        // Parses to a valid far-future instant (clamped to the max representable).
+        var parsed = DateTimeOffset.Parse(iso, CultureInfo.InvariantCulture);
+        Assert.True(parsed.UtcDateTime > now.UtcDateTime.AddYears(1000));
+    }
 }

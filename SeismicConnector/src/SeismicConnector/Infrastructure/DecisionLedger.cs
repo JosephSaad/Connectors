@@ -60,6 +60,8 @@ public sealed class DecisionLedger : IDisposable
     /// <summary>Genesis link for the first entry (64 hex zeros).</summary>
     public const string GenesisHash = "0000000000000000000000000000000000000000000000000000000000000000";
 
+    private static readonly IAppLogger Logger = Logging.GetLogger("seismic_connector.ledger");
+
     private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -187,18 +189,51 @@ public sealed class DecisionLedger : IDisposable
             return Verify(_entries);
     }
 
-    /// <summary>Re-read a persisted ledger file into entries (for offline verification).</summary>
+    /// <summary>
+    /// Re-read a persisted ledger file into entries (for offline verification).
+    /// Tolerant of a TORN FINAL LINE — the normal crash-tail of an append-only
+    /// ledger flushed per line: a partial/unterminated last record is skipped
+    /// (with a warning) so an auditor can still read the intact prefix, and its
+    /// chain still verifies. An unparseable INTERIOR line is genuine corruption,
+    /// not a clean crash-tail, so it is surfaced (thrown) rather than silently
+    /// dropped — dropping it would also punch a hole Verify could not see.
+    /// </summary>
     public static List<DecisionLedgerEntry> ReadFile(string path)
     {
         var entries = new List<DecisionLedgerEntry>();
+        // A non-blank line that failed to parse, held pending the question
+        // "was it the last content line?" — only then is it a tolerable crash-tail.
+        JsonException? deferred = null;
         foreach (var line in File.ReadLines(path))
         {
             if (string.IsNullOrWhiteSpace(line))
                 continue;
-            var entry = JsonSerializer.Deserialize<DecisionLedgerEntry>(line, JsonOptions);
+            if (deferred is not null)
+            {
+                // A malformed line was followed by MORE content → it is interior
+                // corruption, not a crash-tail. Surface it.
+                throw new JsonException(
+                    $"Decision ledger {path}: malformed interior record (not the final line) — "
+                    + $"the ledger is corrupt, not merely crash-truncated ({deferred.Message}).",
+                    deferred);
+            }
+            DecisionLedgerEntry? entry;
+            try
+            {
+                entry = JsonSerializer.Deserialize<DecisionLedgerEntry>(line, JsonOptions);
+            }
+            catch (JsonException exc)
+            {
+                deferred = exc;   // tolerate only if nothing non-blank follows
+                continue;
+            }
             if (entry is not null)
                 entries.Add(entry);
         }
+        if (deferred is not null)
+            Logger.Warning(
+                $"Decision ledger {path}: torn/partial final line skipped (crash-tail: {deferred.Message}) — "
+                + "the intact prefix is returned and its chain still verifies.");
         return entries;
     }
 

@@ -76,4 +76,46 @@ public sealed class SecureDirectoryTests : IDisposable
 
         Assert.Equal(SecureDirectory.OwnerOnly, File.GetUnixFileMode(target));
     }
+
+    [Fact]
+    public void ConcurrentEnsureOwnerOnlyOnSamePathNeverThrowsAndTightens()
+    {
+        // Startup can hit the same state dir from many threads at once (parallel
+        // object/shard workers each opening inventory/identity stores, the
+        // dead-letter path, the decision ledger). EnsureOwnerOnly must be safe to
+        // call concurrently on one path: no throw, and the result is still owner-only.
+        var target = Path.Combine(_tmp, "concurrent");
+        var errors = new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+        Parallel.For(0, 64, new ParallelOptions { MaxDegreeOfParallelism = 64 }, _ =>
+        {
+            try
+            {
+                SecureDirectory.EnsureOwnerOnly(target);
+            }
+            catch (Exception ex)
+            {
+                errors.Enqueue($"{ex.GetType().Name}: {ex.Message}");
+            }
+        });
+
+        Assert.True(errors.IsEmpty, "EnsureOwnerOnly threw under concurrency: " + string.Join(" | ", errors.Take(3)));
+        Assert.True(Directory.Exists(target));
+        if (!OperatingSystem.IsWindows())
+            Assert.Equal(SecureDirectory.OwnerOnly, File.GetUnixFileMode(target));
+    }
+
+    [Fact]
+    public void EnsureOwnerOnlyOnAnExistingFilePathDoesNotCorruptState()
+    {
+        // "Never throws for a permission-set failure" is scoped: a genuine
+        // cannot-create-the-directory error still propagates from CreateDirectory
+        // (documented). Pointing it at an existing FILE is exactly that class of
+        // failure — it must surface as an IOException, not be silently swallowed
+        // (which would let a caller believe it created an owner-only dir).
+        var filePath = Path.Combine(_tmp, "not-a-dir.txt");
+        File.WriteAllText(filePath, "x");
+
+        Assert.ThrowsAny<IOException>(() => SecureDirectory.EnsureOwnerOnly(filePath));
+    }
 }

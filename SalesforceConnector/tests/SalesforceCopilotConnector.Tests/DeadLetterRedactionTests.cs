@@ -225,6 +225,53 @@ public sealed class DeadLetterRedactionTests : IDisposable
     }
 
     [Fact]
+    public void ConcurrentWritersRedactedMode_NoRawPiiOnDisk_NoTornLines()
+    {
+        // Up to GraphConcurrentBatches × object workers append to ONE dead-letter
+        // file at once. In redacted mode: (a) no raw property value / content ever
+        // reaches disk, and (b) the DeadLetterLock keeps lines whole — every line
+        // parses and no two records interleave.
+        Environment.SetEnvironmentVariable(DeadLetterRedaction.ModeEnvVar, "redacted");
+        var dlPath = Path.Combine(_tmpPath, "failed_records_concurrent.jsonl");
+
+        const int writers = 16;
+        const int perWriter = 30;
+        var errors = new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+        Parallel.For(0, writers, new ParallelOptions { MaxDegreeOfParallelism = writers }, w =>
+        {
+            try
+            {
+                for (var i = 0; i < perWriter; i++)
+                {
+                    SyncState.AppendFailedRecords(
+                        dlPath,
+                        new List<(string, string)> { ($"w{w}-{i}", "HTTP 500") },
+                        "Account",
+                        requestBodies: new Dictionary<string, JsonNode?> { [$"w{w}-{i}"] = SampleRequestBody() });
+                }
+            }
+            catch (Exception ex)
+            {
+                errors.Enqueue($"{ex.GetType().Name}: {ex.Message}");
+            }
+        });
+
+        Assert.True(errors.IsEmpty, "concurrent append threw: " + string.Join(" | ", errors.Take(3)));
+
+        var raw = File.ReadAllText(dlPath);
+        Assert.DoesNotContain("Acme Corp (confidential)", raw);
+        Assert.DoesNotContain("Customer PII body text", raw);
+
+        // Every line is a whole, well-formed record (no torn/interleaved writes),
+        // and the full count landed.
+        var records = ReadJsonl(dlPath);
+        Assert.Equal(writers * perWriter, records.Count);
+        foreach (var r in records)
+            Assert.Contains("payload redacted", r["request_body"]!["@redaction"]!.GetValue<string>());
+    }
+
+    [Fact]
     public void NonObjectAndNullBodiesAreHandled()
     {
         Assert.Null(DeadLetterRedaction.RedactPayload(null));
