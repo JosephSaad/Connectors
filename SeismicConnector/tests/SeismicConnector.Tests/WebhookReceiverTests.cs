@@ -10,6 +10,11 @@ using SeismicConnector.Seismic;
 
 namespace SeismicConnector.Tests;
 
+// Shares the "LoopbackWebhook" collection (defined in StressHarnessTests) with
+// the HMAC-flood stress test so the two loopback HttpListener-binding classes
+// never run in parallel — prevents ephemeral-port/listener contention that made
+// the full suite non-deterministic.
+[Collection("LoopbackWebhook")]
 public class WebhookReceiverTests
 {
     private const string Secret = "s3cr3t-shared-key";

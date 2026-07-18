@@ -153,6 +153,37 @@ public class WebHdfsClientTests
         Assert.Equal(403, exc.StatusCode);
     }
 
+    // Regression (LOW-6): OPEN honours the same pre-body 429/5xx + Retry-After
+    // ladder as SendAsync. Before the fix OpenAsync threw on the first 503.
+    [Fact]
+    public async Task OpenAsync_RetriesOn503_HonoursRetryAfter_ThenSucceeds()
+    {
+        var delays = new List<TimeSpan>();
+        var calls = 0;
+        var handler = new MockHttpHandler((_, _) =>
+        {
+            if (++calls == 1)
+            {
+                var response = MockHttpHandler.Json(HttpStatusCode.ServiceUnavailable, "maint");
+                response.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(9));
+                return response;
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("Id\n001\n") };
+        });
+        var client = Make(handler);
+        client.DelayAsync = (delay, _) =>
+        {
+            delays.Add(delay);
+            return Task.CompletedTask;
+        };
+
+        await using var stream = await client.OpenAsync("Contact/dt=2026-07-15/part-0000.csv");
+        using var reader = new StreamReader(stream);
+        Assert.Equal("Id\n001\n", await reader.ReadToEndAsync());
+        Assert.Equal(2, calls);                              // 503 then 200
+        Assert.Equal(TimeSpan.FromSeconds(9), delays[0]);    // Retry-After honoured
+    }
+
     // ── Retry ladder ─────────────────────────────────────────────────────────
 
     [Fact]

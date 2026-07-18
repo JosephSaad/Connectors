@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="HadoopConnector.Tests" />
+    <InternalsVisibleTo Include="StressHarness" />
   </ItemGroup>
 
   <ItemGroup>

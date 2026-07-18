@@ -65,6 +65,37 @@ public sealed class IdentitySync
         var result = await _fetcher.FetchAsync(
                 IdentityObjectConfig(), fullCrawl: true, sinceUtc: null, ct, bypassScanGuard: true)
             .ConfigureAwait(false);
+
+        // A PARTIAL user export (row cap hit, or an oversize User file skipped)
+        // yields a silently-incomplete directory: every user it omits then
+        // resolves to a coarse/fallback ACL for the WHOLE crawl. That is an
+        // integrity failure, not a warning — fail the sync loudly (and alert),
+        // matching how id-less exports are refused. Raise BDH_MAX_RECORDS_PER_OBJECT
+        // / BDH_MAX_FILE_BYTES for the identity object, or narrow it.
+        if (result.Incomplete)
+        {
+            var reason = result.Truncated
+                ? "row cap (BDH_MAX_RECORDS_PER_OBJECT)"
+                : "an oversize file skipped (BDH_MAX_FILE_BYTES)";
+            var message =
+                $"Identity directory load for '{_config.IdentityObject}' is INCOMPLETE ({reason}) — "
+                + $"only {result.Records.Count} user(s) read. Proceeding would apply coarse/fallback "
+                + "ACLs across the entire crawl. Refusing the sync; raise the identity object's "
+                + "row cap / file-size bound or narrow the export, then re-run.";
+            Logger.Error(message);
+            await Alerting.RaiseAsync(
+                "identity_directory_incomplete",
+                message,
+                new Dictionary<string, object?>
+                {
+                    ["identityObject"] = _config.IdentityObject,
+                    ["usersRead"] = result.Records.Count,
+                    ["truncated"] = result.Truncated,
+                    ["skippedOversize"] = result.SkippedOversize,
+                }).ConfigureAwait(false);
+            throw new InvalidDataException(message);
+        }
+
         foreach (var record in result.Records)
         {
             var user = ParseUser(record);

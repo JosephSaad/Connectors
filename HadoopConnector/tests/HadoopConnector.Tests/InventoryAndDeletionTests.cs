@@ -309,6 +309,40 @@ public class DeletionSweepTests : IDisposable
         Assert.DoesNotContain(_graph.Sent, s => s.Method == HttpMethod.Delete);
     }
 
+    // Oversize-file skip (BDH_MAX_FILE_BYTES): a LIVE file skipped for size means
+    // its records were never read, so the source id set is incomplete exactly
+    // like a row cap. The sweep must be suppressed and the object recorded as
+    // partial — otherwise the un-read live records are falsely deleted as stale.
+    [Fact]
+    public async Task OversizeFileSkip_PartialFetch_SkipsSweep_AndRecordsPartialObject()
+    {
+        // Seed the inventory with all three records via a normal crawl.
+        await Pipeline().RunAsync(fullCrawl: true);
+        Assert.Equal(new[] { Tid(1), Tid(2), Tid(3) }, InventoryIds());
+
+        // Now serve records 1+2 in a small file and record 3 in an OVERSIZE file.
+        var source = new FakeBdhSource();
+        source.Add("Task/dt=2026-07-15/small.jsonl", string.Join("\n", new[] { 1, 2 }.Select(n =>
+            $$"""{"Id":"{{Tid(n)}}","Name":"Task {{n}}","OwnerId":"005U0000001"}""")));
+        source.Add("Task/dt=2026-07-15/big.jsonl",
+            $$"""{"Id":"{{Tid(3)}}","Name":"{{new string('x', 4096)}}","OwnerId":"005U0000001"}""");
+        var cfg = TestConfig.Make(allowFullScan: true, maxFileBytes: 512);
+        var fetcher = new BdhFetcher(cfg, source, FilterSet.Empty);
+        var resolver = new AclResolver(
+            new PrincipalMapper(_store), adminGroupId: string.Empty, fallbackGroupId: string.Empty);
+        var pipeline = new IngestPipeline(
+            cfg, _schema, fetcher, _graph, resolver, new ItemConverter(cfg),
+            ha: null, inventoryFactory: InventoryFactory);
+
+        var summary = await pipeline.RunAsync(fullCrawl: true);
+
+        Assert.Equal(new[] { "Task" }, summary.PartialObjects);
+        Assert.Equal(new[] { "Task" }, summary.SweepSkipped);
+        Assert.Equal(0, summary.Deleted);
+        Assert.Contains(Tid(3), InventoryIds());  // un-read live record NOT swept
+        Assert.DoesNotContain(_graph.Sent, s => s.Method == HttpMethod.Delete);
+    }
+
     [Fact]
     public async Task SafetyGuard_SkipsImplausibleMassDeletion_AndAlerts()
     {

@@ -133,6 +133,30 @@ public class FilterConfigTests
         Assert.Throws<InvalidDataException>(() => FilterSet.Parse(
             """{"objects": {"Contact": {"allOf": [""" + predicate + "]}}}"));
 
+    // Regression (LOW-8): numeric operators (gte/lte/between) with a DATE operand
+    // compare numerically, always yield false and silently prune every row — the
+    // config must be rejected so date fields use after/before/withinLastDays.
+    [Theory]
+    [InlineData("""{"field": "CloseDate", "op": "gte", "value": "2026-01-01"}""")]
+    [InlineData("""{"field": "CloseDate", "op": "lte", "value": "2026-01-01"}""")]
+    [InlineData("""{"field": "CloseDate", "op": "between", "values": ["2026-01-01", "2026-12-31"]}""")]
+    public void Parse_NumericOpWithDateOperand_Throws(string predicate)
+    {
+        var exc = Assert.Throws<InvalidDataException>(() => FilterSet.Parse(
+            """{"objects": {"Contact": {"allOf": [""" + predicate + "]}}}"));
+        Assert.Contains("date-looking operand", exc.Message);
+    }
+
+    [Fact]
+    public void Parse_NumericOpWithNumericOperand_Allowed()
+    {
+        // The numeric case these operators are designed for stays valid.
+        var set = FilterSet.Parse("""
+            {"objects": {"Contact": {"allOf": [{"field": "AnnualRevenue", "op": "gte", "value": "100000"}]}}}
+            """);
+        Assert.Equal(FilterOp.Gte, set.For("Contact")!.AnyOf[0].AllOf[0].Op);
+    }
+
     [Fact]
     public void Parse_IsNullNeedsNoOperand()
     {

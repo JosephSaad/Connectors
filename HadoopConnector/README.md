@@ -368,7 +368,7 @@ timestamp. Details: `docs/HA.md`; schema contract: `docs/SQL_CONTRACT.md`.
 dotnet test
 ```
 
-500+ tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
+569 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
 shape and concurrency invariants, retry/backoff math (numeric Retry-After,
 60 s clamp, jitter), Graph client throttling/hardening (mock HTTP), adaptive
 concurrency, connection-sharding validation + end-to-end per-shard routing,

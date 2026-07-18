@@ -124,15 +124,19 @@ public sealed class Reconciler
             var fetch = await _fetcher.FetchAsync(objectConfig, fullCrawl: true, sinceUtc: null, ct)
                 .ConfigureAwait(false);
             var sourceIds = fetch.Records.Select(r => r.ItemId).ToList();
-            if (fetch.Truncated)
+            if (fetch.Incomplete)
             {
-                // A row-capped source set is incomplete: stale detection would
-                // report (and --fix would delete) live records. Report counts
-                // only and never fix from a truncated fetch.
+                // An incomplete source set (row cap hit, or an oversize file was
+                // skipped) means stale detection would report (and --fix would
+                // delete) live records. Report counts only and never fix from an
+                // incomplete fetch.
+                var reason = fetch.Truncated
+                    ? "truncated by the row cap"
+                    : "partial (an oversize file was skipped)";
                 Logger.Warning(
-                    $"{objectConfig.ObjectName}: source fetch truncated by the row cap — "
+                    $"{objectConfig.ObjectName}: source fetch {reason} — "
                     + "stale detection skipped for this object (tighten filters or raise "
-                    + "BDH_MAX_RECORDS_PER_OBJECT).");
+                    + "BDH_MAX_RECORDS_PER_OBJECT / BDH_MAX_FILE_BYTES).");
                 using var truncatedInventory = _inventoryFactory(connectionId);
                 report.Objects.Add(new ObjectDrift
                 {

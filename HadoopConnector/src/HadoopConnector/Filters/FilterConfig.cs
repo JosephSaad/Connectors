@@ -36,6 +36,7 @@
 // or missing/malformed operands is a CONFIG ERROR (InvalidDataException) —
 // never silently ignored, because a dropped filter at this scale is an outage.
 
+using System.Globalization;
 using System.Text.Json.Nodes;
 
 namespace HadoopConnector.Filters;
@@ -89,6 +90,23 @@ public sealed class ObjectFilter
 
     /// <summary>True when this object has at least one partition or record predicate.</summary>
     public bool HasAnyFilter => Partition.Count > 0 || AnyOf.Count > 0;
+
+    /// <summary>The Hive partition key that is guaranteed present by BDH
+    /// convention and actually prunes at scale (dt=YYYY-MM-DD, every layout).</summary>
+    internal const string WatermarkKey = "dt";
+
+    /// <summary>
+    /// True when this object is EFFECTIVELY filtered for the fail-closed scale
+    /// guard: it has a record predicate (streamed per row), OR a partition
+    /// predicate on the <see cref="WatermarkKey"/> (the only key guaranteed to
+    /// exist and therefore prune). A partition predicate on a NON-dt key that may
+    /// be ABSENT never prunes (MatchesPartition skips absent keys), so it does
+    /// NOT count — otherwise a filter that prunes nothing would silently pass the
+    /// guard and full-scan 150M+ rows.
+    /// </summary>
+    public bool IsEffectivelyFiltered =>
+        AnyOf.Count > 0
+        || Partition.Any(p => string.Equals(p.Field, WatermarkKey, StringComparison.OrdinalIgnoreCase));
 }
 
 public sealed class FilterSet
@@ -350,8 +368,34 @@ public sealed class FilterSet
                 break;
         }
 
+        // Numeric operators (gte/lte/between) compare via CompareNumeric, which
+        // returns null for non-numeric operands — so a DATE operand makes the
+        // predicate always-false and SILENTLY prunes every row. Reject it at
+        // parse time and steer date comparisons to after/before/withinLastDays.
+        if (op is FilterOp.Gte or FilterOp.Lte or FilterOp.Between)
+        {
+            var operands = op == FilterOp.Between ? values : new List<string> { value! };
+            foreach (var operand in operands)
+            {
+                if (LooksLikeDate(operand))
+                {
+                    throw new InvalidDataException(
+                        $"Filter config '{sourceName}': '{objectName}.{field}' uses the numeric "
+                        + $"operator '{opRaw}' with a date-looking operand '{operand}'. Numeric "
+                        + "operators compare numerically and would prune every row — use "
+                        + "after/before/withinLastDays for date fields.");
+                }
+            }
+        }
+
         return new FilterPredicate { Field = field, Op = op, Value = value, Values = values };
     }
+
+    /// <summary>True when an operand parses as a date but NOT as a number — the
+    /// signature of a date value mistakenly paired with a numeric operator.</summary>
+    private static bool LooksLikeDate(string operand) =>
+        !double.TryParse(operand, NumberStyles.Float, CultureInfo.InvariantCulture, out _)
+        && FilterEngine.TryParseDate(operand, out _);
 
     internal static bool TryParseOp(string raw, out FilterOp op)
     {

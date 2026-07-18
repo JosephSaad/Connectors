@@ -176,94 +176,142 @@ public class GraphClient
             };
         }
 
-        for (var attempt = 0; ; attempt++)
+        // Settle the acquired breaker slot EXACTLY once on every exit path —
+        // success, terminal error, transport failure, TOKEN failure, cancellation
+        // or any throw. Without this a HalfOpen probe that threw before the
+        // terminal classification (a token fetch that failed with a 4xx
+        // credential error or a transport blip, an unexpected exception) would
+        // leak its probe slot; after HalfOpenTrials such leaks the breaker admits
+        // no more probes and wedges Open forever. Mirrors WebHdfsClient's
+        // settle-once + try/finally hardening.
+        var settled = false;
+        void Settle(Action classify)
         {
-            using var request = new HttpRequestMessage(method, url);
-            // Token fetched per attempt so a long retry ladder never rides an
-            // expired token (refresh is cheap — cached until 5 min pre-expiry).
-            request.Headers.Authorization =
-                new AuthenticationHeaderValue("Bearer", await GetTokenAsync(ct).ConfigureAwait(false));
-            if (body is not null)
-            {
-                request.Content = new StringContent(
-                    body.ToJsonString(), Encoding.UTF8, "application/json");
-            }
+            if (settled)
+                return;
+            settled = true;
+            classify();
+        }
 
-            HttpResponseMessage response;
-            string raw;
-            try
+        try
+        {
+            for (var attempt = 0; ; attempt++)
             {
-                response = await _http.SendAsync(request, ct).ConfigureAwait(false);
-                raw = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            }
-            catch (HttpRequestException exc) when (attempt < _config.GraphMaxRetries)
-            {
-                var delaySeconds = RetryDelay.ForAttempt(_config.GraphRetryBackoffBase, attempt, null);
-                Logger.Warning(
-                    $"Graph request {method} {url} failed ({exc.Message}); "
-                    + $"retry {attempt + 1}/{_config.GraphMaxRetries} in {delaySeconds:0.##}s");
-                await DelayAsync(TimeSpan.FromSeconds(delaySeconds), ct).ConfigureAwait(false);
-                continue;
-            }
-            catch (Exception)
-            {
-                // Retries exhausted on a network/transport failure — a REAL
-                // outage signal for the breaker before the exception propagates.
-                _breaker.OnFailure();
-                throw;
-            }
-
-            using (response)
-            {
-                var status = (int)response.StatusCode;
-                if (status == 429)
-                    Metrics.IncThrottle429();
-
-                if (RetryableStatusCodes.Contains(status) && attempt < _config.GraphMaxRetries)
+                using var request = new HttpRequestMessage(method, url);
+                // Token fetched per attempt so a long retry ladder never rides an
+                // expired token (refresh is cheap — cached until 5 min pre-expiry).
+                try
                 {
-                    var retryAfter = ParseRetryAfter(response.Headers);
-                    var delaySeconds = RetryDelay.ForAttempt(
-                        _config.GraphRetryBackoffBase, attempt, retryAfter, out var clamped);
-                    if (clamped)
-                    {
-                        Logger.Warning(string.Format(
-                            CultureInfo.InvariantCulture,
-                            "Retry-After of {0:F0}s exceeds cap; clamping to {1:F0}s",
-                            retryAfter ?? 0, RetryDelay.MaxRetryWaitSeconds));
-                    }
+                    request.Headers.Authorization = new AuthenticationHeaderValue(
+                        "Bearer", await GetTokenAsync(ct).ConfigureAwait(false));
+                }
+                catch (OperationCanceledException)
+                {
+                    Settle(_breaker.OnIgnored);  // cancellation is flow control, not an outage
+                    throw;
+                }
+                catch (Exception)
+                {
+                    // Token fetch failed. A 5xx AAD/token outage was already
+                    // recorded by GetTokenAsync; settle-once makes this release a
+                    // no-op there. For a 4xx credential error or a transport blip
+                    // it simply RELEASES the probe slot so the breaker cannot wedge.
+                    Settle(_breaker.OnIgnored);
+                    throw;
+                }
+                if (body is not null)
+                {
+                    request.Content = new StringContent(
+                        body.ToJsonString(), Encoding.UTF8, "application/json");
+                }
+
+                HttpResponseMessage response;
+                string raw;
+                try
+                {
+                    response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+                    raw = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                }
+                catch (HttpRequestException exc) when (attempt < _config.GraphMaxRetries)
+                {
+                    var delaySeconds = RetryDelay.ForAttempt(_config.GraphRetryBackoffBase, attempt, null);
                     Logger.Warning(
-                        $"Graph API transient error {status} for {method} {url} — "
-                        + $"retrying in {delaySeconds:0.##}s (attempt {attempt + 1}/{_config.GraphMaxRetries})"
-                        + (retryAfter is not null && !clamped ? " (server Retry-After)" : string.Empty));
+                        $"Graph request {method} {url} failed ({exc.Message}); "
+                        + $"retry {attempt + 1}/{_config.GraphMaxRetries} in {delaySeconds:0.##}s");
                     await DelayAsync(TimeSpan.FromSeconds(delaySeconds), ct).ConfigureAwait(false);
                     continue;
                 }
-
-                // Terminal outcome — classify for the breaker. 5xx = real outage;
-                // 429 (flow control) and 4xx (client/validation) are ignored;
-                // 2xx/3xx clear the failure window.
-                RecordBreakerOutcome(status);
-
-                JsonNode? parsed = null;
-                if (!string.IsNullOrWhiteSpace(raw))
+                catch (OperationCanceledException)
                 {
-                    try
-                    {
-                        parsed = JsonNode.Parse(raw);
-                    }
-                    catch
-                    {
-                        // non-JSON body (e.g. 202 Accepted empty, HTML error page)
-                    }
+                    Settle(_breaker.OnIgnored);  // graceful stop, not an outage
+                    throw;
                 }
-                return new GraphResponse
+                catch (Exception)
                 {
-                    StatusCode = response.StatusCode,
-                    Body = parsed,
-                    RawBody = raw,
-                    Headers = response.Headers,
-                };
+                    // Retries exhausted on a network/transport failure — a REAL
+                    // outage signal for the breaker before the exception propagates.
+                    Settle(_breaker.OnFailure);
+                    throw;
+                }
+
+                using (response)
+                {
+                    var status = (int)response.StatusCode;
+                    if (status == 429)
+                        Metrics.IncThrottle429();
+
+                    if (RetryableStatusCodes.Contains(status) && attempt < _config.GraphMaxRetries)
+                    {
+                        var retryAfter = ParseRetryAfter(response.Headers);
+                        var delaySeconds = RetryDelay.ForAttempt(
+                            _config.GraphRetryBackoffBase, attempt, retryAfter, out var clamped);
+                        if (clamped)
+                        {
+                            Logger.Warning(string.Format(
+                                CultureInfo.InvariantCulture,
+                                "Retry-After of {0:F0}s exceeds cap; clamping to {1:F0}s",
+                                retryAfter ?? 0, RetryDelay.MaxRetryWaitSeconds));
+                        }
+                        Logger.Warning(
+                            $"Graph API transient error {status} for {method} {url} — "
+                            + $"retrying in {delaySeconds:0.##}s (attempt {attempt + 1}/{_config.GraphMaxRetries})"
+                            + (retryAfter is not null && !clamped ? " (server Retry-After)" : string.Empty));
+                        await DelayAsync(TimeSpan.FromSeconds(delaySeconds), ct).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    // Terminal outcome — classify for the breaker. 5xx = real outage;
+                    // 429 (flow control) and 4xx (client/validation) are ignored;
+                    // 2xx/3xx clear the failure window.
+                    Settle(() => RecordBreakerOutcome(status));
+
+                    JsonNode? parsed = null;
+                    if (!string.IsNullOrWhiteSpace(raw))
+                    {
+                        try
+                        {
+                            parsed = JsonNode.Parse(raw);
+                        }
+                        catch
+                        {
+                            // non-JSON body (e.g. 202 Accepted empty, HTML error page)
+                        }
+                    }
+                    return new GraphResponse
+                    {
+                        StatusCode = response.StatusCode,
+                        Body = parsed,
+                        RawBody = raw,
+                        Headers = response.Headers,
+                    };
+                }
             }
+        }
+        finally
+        {
+            // Any escape without a terminal classification releases the slot as
+            // ignored, so a wedged HalfOpen can never happen.
+            Settle(_breaker.OnIgnored);
         }
     }
 

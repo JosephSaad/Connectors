@@ -188,8 +188,11 @@ public class ItemTransformerTests
         // (see CodeReviewRound2Tests.SanitizedIdsNeverCollide).
         Assert.Equal("PersonProfile-P1", ItemTransformer.BuildItemId("PersonProfile", "P1"));
         var dirty = ItemTransformer.BuildItemId("PersonProfile", "a/b c");
-        Assert.StartsWith("PersonProfile-a-b-c-", dirty);
-        Assert.Matches("^PersonProfile-a-b-c-[0-9a-f]{12}$", dirty);
+        // Hash is joined with '_' (a char the sanitizer folds away), so the hashed
+        // form is provably disjoint from the legacy pass-through form — see
+        // ItemTransformer.BuildItemId and ItemIdCollisionTests.
+        Assert.StartsWith("PersonProfile-a-b-c_", dirty);
+        Assert.Matches("^PersonProfile-a-b-c_[0-9a-f]{12}$", dirty);
         Assert.Equal(dirty, ItemTransformer.BuildItemId("PersonProfile", "a/b c"));  // deterministic
     }
 

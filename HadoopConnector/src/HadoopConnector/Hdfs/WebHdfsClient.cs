@@ -180,39 +180,69 @@ public class WebHdfsClient : IBdhSource
         try
         {
             var uri = BuildUri(relativePath, "OPEN");
-            HttpResponseMessage response;
-            try
+            for (var attempt = 0; ; attempt++)
             {
-                Metrics.IncHdfsCalls();
-                response = await _http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, ct)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                Settle(_breaker.OnIgnored);  // cancellation is flow control, not an outage
-                throw;
-            }
-            catch (Exception exc)
-            {
-                Settle(_breaker.OnFailure);
-                throw new HdfsException($"OPEN '{relativePath}' failed: {exc.Message}", exc);
-            }
-
-            if (!response.IsSuccessStatusCode)
-            {
-                var status = (int)response.StatusCode;
-                var raw = await SafeReadAsync(response, ct).ConfigureAwait(false);
-                response.Dispose();
-                if (status >= 500)
+                HttpResponseMessage response;
+                try
+                {
+                    Metrics.IncHdfsCalls();
+                    response = await _http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, ct)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    Settle(_breaker.OnIgnored);  // cancellation is flow control, not an outage
+                    throw;
+                }
+                catch (HttpRequestException exc) when (attempt < MaxRetries)
+                {
+                    // Transport failure before any stream bytes — safe to retry.
+                    var delay = Math.Min(60, 2 * Math.Pow(2, attempt));
+                    Logger.Warning(
+                        $"WebHDFS OPEN failed ({exc.Message}); retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
+                    await DelayAsync(TimeSpan.FromSeconds(delay), ct).ConfigureAwait(false);
+                    continue;
+                }
+                catch (Exception exc)
+                {
                     Settle(_breaker.OnFailure);
-                else
-                    Settle(_breaker.OnIgnored);
-                throw new HdfsException($"OPEN '{relativePath}' failed (HTTP {status}): {raw}")
-                { StatusCode = status };
-            }
+                    throw new HdfsException($"OPEN '{relativePath}' failed: {exc.Message}", exc);
+                }
 
-            Settle(_breaker.OnSuccess);
-            return await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var status = (int)response.StatusCode;
+                    // Same 429/5xx + Retry-After ladder as SendAsync. This is safe
+                    // for OPEN because it runs BEFORE any stream bytes are consumed —
+                    // a retried request re-fetches the file from the start.
+                    if ((status == 429 || status >= 500) && attempt < MaxRetries)
+                    {
+                        var retryAfter = response.Headers.RetryAfter?.Delta?.TotalSeconds
+                            ?? (response.Headers.RetryAfter?.Date is { } date
+                                ? Math.Max(0, (date - DateTimeOffset.UtcNow).TotalSeconds)
+                                : (double?)null);
+                        // Retry-After honoured exactly; every wait clamped to 60 s.
+                        var delay = Math.Min(60, retryAfter ?? Math.Min(60, 2 * Math.Pow(2, attempt)));
+                        response.Dispose();
+                        Logger.Warning(
+                            $"WebHDFS OPEN returned HTTP {status}; retry {attempt + 1}/{MaxRetries} in {delay:0.##}s");
+                        await DelayAsync(TimeSpan.FromSeconds(delay), ct).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    var raw = await SafeReadAsync(response, ct).ConfigureAwait(false);
+                    response.Dispose();
+                    if (status >= 500)
+                        Settle(_breaker.OnFailure);
+                    else
+                        Settle(_breaker.OnIgnored);
+                    throw new HdfsException($"OPEN '{relativePath}' failed (HTTP {status}): {raw}")
+                    { StatusCode = status };
+                }
+
+                Settle(_breaker.OnSuccess);
+                return await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            }
         }
         finally
         {

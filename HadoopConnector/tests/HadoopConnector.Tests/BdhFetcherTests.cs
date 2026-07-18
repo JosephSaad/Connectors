@@ -97,6 +97,81 @@ public class BdhFetcherTests
         Assert.Equal(new[] { "Case" }, fetcher.UnfilteredObjects(objects));
     }
 
+    [Fact]
+    public void UnfilteredObjects_ReportsNonPruningPartitionOnly()
+    {
+        // Only filter is a partition predicate on a NON-dt key that
+        // MatchesPartition never prunes on when absent — it prunes nothing, so
+        // the object must still be reported as guard-tripping.
+        var filters = FilterSet.Parse("""
+            {"objects": {"Contact": {"partition": [{"key": "region", "op": "equals", "value": "EMEA"}]}}}
+            """);
+        var fetcher = new BdhFetcher(TestConfig.Make(), new FakeBdhSource(), filters);
+        Assert.Equal(new[] { "Contact" }, fetcher.UnfilteredObjects(new[] { Contact() }));
+    }
+
+    [Fact]
+    public async Task Fetch_NonPruningPartitionOnlyFilter_StillRefused()
+    {
+        // Regression (MEDIUM-3): a partition predicate on a non-dt key that may
+        // be absent prunes nothing, so it must NOT satisfy the fail-closed guard.
+        var filters = FilterSet.Parse("""
+            {"objects": {"Contact": {"partition": [{"key": "region", "op": "equals", "value": "EMEA"}]}}}
+            """);
+        var source = new FakeBdhSource().Add("Contact/dt=2026-07-15/p.jsonl", Row("C1"));
+        var fetcher = new BdhFetcher(TestConfig.Make(), source, filters);
+        await Assert.ThrowsAsync<FullScanRefusedException>(
+            () => fetcher.FetchAsync(Contact(), fullCrawl: true, sinceUtc: null));
+    }
+
+    [Fact]
+    public async Task Fetch_DtPartitionOnlyFilter_IsEffectivelyFiltered()
+    {
+        // A dt partition predicate IS a real prune (dt is always present) → the
+        // object is effectively filtered and the guard passes.
+        var filters = FilterSet.Parse("""
+            {"objects": {"Contact": {"partition": [{"key": "dt", "op": "withinLastDays", "value": "30"}]}}}
+            """);
+        var source = new FakeBdhSource().Add("Contact/dt=2026-07-15/p.jsonl", Row("C1"));
+        var fetcher = new BdhFetcher(
+            TestConfig.Make(), source, filters,
+            () => new DateTime(2026, 7, 20, 0, 0, 0, DateTimeKind.Utc));
+        var result = await fetcher.FetchAsync(Contact(), fullCrawl: true, sinceUtc: null);
+        Assert.Single(result.Records);
+    }
+
+    // ── FindByIdAsync fail-closed guard (HIGH-2) ─────────────────────────────
+
+    [Fact]
+    public async Task FindById_UnfilteredObject_RefusesToScan()
+    {
+        var source = new FakeBdhSource().Add("Contact/dt=2026-07-15/p.jsonl", Row("C1"));
+        var fetcher = new BdhFetcher(TestConfig.Make(), source, FilterSet.Empty);
+        var exc = await Assert.ThrowsAsync<FullScanRefusedException>(
+            () => fetcher.FindByIdAsync(Contact(), "C1"));
+        Assert.Equal("Contact", exc.ObjectName);
+        Assert.Equal(0, source.ListCalls);   // refused before any partition scan
+    }
+
+    [Fact]
+    public async Task FindById_AllowFullScanEnv_Proceeds()
+    {
+        var source = new FakeBdhSource().Add("Contact/dt=2026-07-15/p.jsonl", Row("C1"));
+        var record = await new BdhFetcher(TestConfig.Make(allowFullScan: true), source, FilterSet.Empty)
+            .FindByIdAsync(Contact(), "C1");
+        Assert.NotNull(record);
+    }
+
+    [Fact]
+    public async Task FindById_FullScanAllowedList_Proceeds()
+    {
+        var filters = FilterSet.Parse("""{"fullScanAllowed": ["Contact"]}""");
+        var source = new FakeBdhSource().Add("Contact/dt=2026-07-15/p.jsonl", Row("C1"));
+        var record = await new BdhFetcher(TestConfig.Make(), source, filters)
+            .FindByIdAsync(Contact(), "C1");
+        Assert.NotNull(record);
+    }
+
     // ── Watermark / lag math ─────────────────────────────────────────────────
 
     [Fact]
@@ -273,6 +348,26 @@ public class BdhFetcherTests
     }
 
     [Fact]
+    public async Task Fetch_OversizeFile_MarksResultIncomplete_ToSuppressSweep()
+    {
+        // A live file skipped for size means its records were NOT read → the
+        // source id set is incomplete and the deletion sweep MUST be suppressed
+        // (else the un-read records are treated as stale and deleted).
+        var big = Row("BIG1") + "\n" + Row("BIG2");
+        var source = new FakeBdhSource()
+            .Add("Contact/dt=2026-07-15/big.jsonl", big)
+            .Add("Contact/dt=2026-07-15/small.jsonl", Row("C1"));
+        var result = await new BdhFetcher(
+                TestConfig.Make(maxFileBytes: 20), source, ContactFilter())
+            .FetchAsync(Contact(), fullCrawl: true, sinceUtc: null);
+
+        Assert.Equal(new[] { "C1" }, result.Records.Select(r => r.ItemId).ToArray());
+        Assert.True(result.SkippedOversize);
+        Assert.True(result.Incomplete);   // sweep must be suppressed / object partial
+        Assert.False(result.Truncated);   // this is not a row-cap truncation
+    }
+
+    [Fact]
     public async Task Fetch_CsvFilesWork()
     {
         var source = new FakeBdhSource().Add(
@@ -356,5 +451,19 @@ public class BdhFetcherTests
         using var dir = new TempDir();
         var source = new LocalPathSource(dir.Path);
         Assert.Throws<HdfsException>(() => source.Resolve("../../etc/passwd"));
+    }
+
+    [Fact]
+    public void LocalPathSource_RefusesSiblingDirWithSharedPrefix()
+    {
+        // Regression (MEDIUM-4): a sibling directory that merely shares the
+        // string prefix of the root ('.../bdh' vs '.../bdh-evil') must NOT be
+        // accepted — the old StartsWith(_root) check let it through.
+        using var parent = new TempDir();
+        var root = Path.Combine(parent.Path, "bdh");
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(Path.Combine(parent.Path, "bdh-evil"));
+        var source = new LocalPathSource(root);
+        Assert.Throws<HdfsException>(() => source.Resolve("../bdh-evil/secret"));
     }
 }

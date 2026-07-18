@@ -444,7 +444,7 @@ public sealed class IngestPipeline
     {
         var fetch = await FetchRecordsAsync(objectConfig, fullCrawl, since, ct).ConfigureAwait(false);
         var records = fetch.Records;
-        if (fetch.Truncated)
+        if (fetch.Incomplete)
             summary.PartialObjects.Add(objectConfig.ObjectName);
         Logger.Info($"{objectConfig.ObjectName}: {records.Count} record(s) to process.");
 
@@ -489,19 +489,23 @@ public sealed class IngestPipeline
 
         // Deletion/tombstone sync: a FULL crawl saw the complete source id set
         // for this object type, so anything still in the inventory but absent
-        // from the source was deleted in BDH — withdraw it from Graph. A
-        // TRUNCATED (row-capped) fetch never sweeps: its id set is incomplete
-        // and the sweep would mass-delete live records.
-        if (fullCrawl && DeletionSyncEnabled && !fetch.Truncated)
+        // from the source was deleted in BDH — withdraw it from Graph. An
+        // INCOMPLETE fetch never sweeps: its id set is partial (row cap hit, or
+        // an oversize file was skipped) and the sweep would mass-delete live
+        // records.
+        if (fullCrawl && DeletionSyncEnabled && !fetch.Incomplete)
         {
             await SweepDeletionsAsync(cfg, objectConfig, records, inventory, summary, ct)
                 .ConfigureAwait(false);
         }
-        else if (fullCrawl && DeletionSyncEnabled && fetch.Truncated)
+        else if (fullCrawl && DeletionSyncEnabled && fetch.Incomplete)
         {
+            var reason = fetch.Truncated
+                ? "the fetch was truncated by the row cap"
+                : "an oversize file was skipped";
             Logger.Warning(
-                $"{objectConfig.ObjectName}: deletion sweep skipped — the fetch was truncated by "
-                + "the row cap, so the source id set is incomplete.");
+                $"{objectConfig.ObjectName}: deletion sweep skipped — {reason}, so the source "
+                + "id set is incomplete.");
             summary.SweepSkipped.Add(objectConfig.ObjectName);
         }
     }
@@ -543,7 +547,7 @@ public sealed class IngestPipeline
     /// absent from the source are DELETEd from the Graph connection and
     /// dropped from the inventory. Two mass-deletion safety guards skip the
     /// sweep — with a warning and a webhook alert — when an implausible amount
-    /// of the inventory would vanish at once (source outage / truncated TDW
+    /// of the inventory would vanish at once (source outage / truncated BDH
     /// export): an absolute per-sweep cap (DELETION_SYNC_MAX_ITEMS, default
     /// 1000, engaged at any inventory size) and a percentage guard
     /// (DELETION_SYNC_MAX_PERCENT, default 25, engaged once the inventory
@@ -600,7 +604,7 @@ public sealed class IngestPipeline
         // Percent guard. It engages when the inventory is large enough for a
         // percentage to be meaningful (>= MinInventoryForSafetyGuard) OR whenever
         // the source returned NO rows for this object on a FULL crawl — an empty
-        // source is the classic outage / truncated-TDW-export signature and would
+        // source is the classic outage / truncated-BDH-export signature and would
         // otherwise wipe a small (< MinInventoryForSafetyGuard) inventory 100%
         // completely unguarded, since the absolute cap only trips above
         // DELETION_SYNC_MAX_ITEMS. 0 and 100 stay the explicit "disable the

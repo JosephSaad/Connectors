@@ -321,4 +321,12 @@ public sealed class CircuitBreaker
             Trip(_clock());
         }
     }
+
+    /// <summary>Test seam: current count of in-flight half-open probe slots.
+    /// Used by the stress harness to prove a slot is released on every exit
+    /// path (no half-open permit leak under concurrent load).</summary>
+    internal int HalfOpenInFlight
+    {
+        get { lock (_gate) return _halfOpenInFlight; }
+    }
 }

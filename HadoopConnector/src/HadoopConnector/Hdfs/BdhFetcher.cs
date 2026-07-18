@@ -57,6 +57,17 @@ public sealed class FetchResult
     /// <summary>True when BDH_MAX_RECORDS_PER_OBJECT stopped the fetch early —
     /// the crawl is partial for this object and the deletion sweep must not run.</summary>
     public bool Truncated { get; set; }
+
+    /// <summary>True when at least one live file was skipped for exceeding
+    /// BDH_MAX_FILE_BYTES: its records were NOT read, so the source id set is
+    /// incomplete for this object exactly like a row cap — the deletion sweep
+    /// must not run or it would treat the un-read records as stale.</summary>
+    public bool SkippedOversize { get; set; }
+
+    /// <summary>The crawl is PARTIAL for this object (row cap hit OR an oversize
+    /// file skipped): the source id set is incomplete, so callers must suppress
+    /// the deletion sweep and flag the object partial.</summary>
+    public bool Incomplete => Truncated || SkippedOversize;
 }
 
 public sealed class BdhFetcher
@@ -106,7 +117,7 @@ public sealed class BdhFetcher
     public void GuardFullScan(ObjectConfig objectConfig)
     {
         var filter = _filters.For(objectConfig.ObjectName);
-        if (filter is { HasAnyFilter: true })
+        if (filter is { IsEffectivelyFiltered: true })
             return;
         if (_filters.IsFullScanAllowed(objectConfig.ObjectName))
             return;
@@ -122,7 +133,7 @@ public sealed class BdhFetcher
         foreach (var objectConfig in objects)
         {
             var filter = _filters.For(objectConfig.ObjectName);
-            if (filter is { HasAnyFilter: true })
+            if (filter is { IsEffectivelyFiltered: true })
                 continue;
             if (_filters.IsFullScanAllowed(objectConfig.ObjectName))
                 continue;
@@ -172,10 +183,16 @@ public sealed class BdhFetcher
                 if (file.Length > _config.BdhMaxFileBytes)
                 {
                     stats.FilesSkippedOversize++;
+                    // The file's records are NOT read, so this object's source id
+                    // set is now incomplete: mark the fetch partial so the deletion
+                    // sweep is suppressed (an un-read live file must never be treated
+                    // as stale) — exactly like the row-cap path.
+                    result.SkippedOversize = true;
                     Logger.Warning(
                         $"{objectConfig.ObjectName}: skipping oversize file "
                         + $"'{partition.RelativePath}/{file.PathSuffix}' ({file.Length} bytes > "
-                        + $"BDH_MAX_FILE_BYTES={_config.BdhMaxFileBytes}).");
+                        + $"BDH_MAX_FILE_BYTES={_config.BdhMaxFileBytes}); crawl marked PARTIAL "
+                        + "(deletion sweep suppressed).");
                     continue;
                 }
                 var filePath = PartitionScanner.Join(partition.RelativePath, file.PathSuffix);
@@ -271,6 +288,12 @@ public sealed class BdhFetcher
     public async Task<BdhRecord?> FindByIdAsync(
         ObjectConfig objectConfig, string id, CancellationToken ct = default)
     {
+        // Same fail-closed scale guard as FetchAsync: an unfiltered object has no
+        // pruning, so a targeted id lookup would scan every partition (a full
+        // 150M-row scan) unless the object is effectively filtered, listed in
+        // fullScanAllowed, or ALLOW_FULL_SCAN=true.
+        GuardFullScan(objectConfig);
+
         if (!BdhRecord.IsSafeItemId(id))
         {
             Logger.Warning($"FindByIdAsync: rejecting unsafe record id for {objectConfig.ObjectName}.");

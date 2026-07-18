@@ -62,8 +62,15 @@ public sealed class LocalPathSource : IBdhSource
     internal string Resolve(string relativePath)
     {
         var combined = Path.GetFullPath(Path.Combine(_root, relativePath.TrimStart('/', '\\')));
-        if (!combined.StartsWith(_root, StringComparison.Ordinal))
+        // The resolved path must be the root itself or sit strictly UNDER it.
+        // Comparing against the bare _root would accept a sibling that merely
+        // shares the string prefix ('/mnt/bdh' is a prefix of '/mnt/bdh-evil'),
+        // so require the directory separator after the root for anything deeper.
+        if (!string.Equals(combined, _root, StringComparison.Ordinal)
+            && !combined.StartsWith(_root + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        {
             throw new HdfsException($"Path '{relativePath}' escapes the BDH export root.");
+        }
         return combined;
     }
 

@@ -193,6 +193,57 @@ public class ValidateConfigTests : IDisposable
         Assert.Contains(strict.Errors, e => e.Contains("Contact") && e.Contains("NO filter"));
     }
 
+    // Regression (MEDIUM-3): an object whose ONLY filter is a partition predicate
+    // on a NON-dt key prunes nothing (MatchesPartition skips absent keys), so it
+    // must be treated as unfiltered — a warning, and an error under --strict.
+    [Fact]
+    public void NonPruningPartitionOnlyFilter_Warns_AndErrorsUnderStrict()
+    {
+        using var scope = GoodEnv();
+        var inert = Write("inert-filters.json", """
+            {"objects": {"Contact": {"partition": [{"key": "region", "op": "equals", "value": "EMEA"}]}},
+             "fullScanAllowed": []}
+            """);
+
+        var lax = ValidateConfig.ValidateCore(SchemaPath, GraphSchemaPath, inert);
+        Assert.Empty(lax.Errors);
+        Assert.Contains(lax.Warnings, w => w.Contains("Contact") && w.Contains("non-pruning"));
+
+        var strict = ValidateConfig.ValidateCore(SchemaPath, GraphSchemaPath, inert, strict: true);
+        Assert.Contains(strict.Errors, e => e.Contains("Contact") && e.Contains("non-pruning"));
+    }
+
+    // Regression (LOW-8): a numeric operator with a date operand is a config
+    // error — validate-config (and --strict) must reject it, not let a filter
+    // that silently prunes everything ship.
+    [Fact]
+    public void NumericOpWithDateOperand_FailsValidation()
+    {
+        using var scope = GoodEnv();
+        var badFilters = Write("bad-numeric-date-filters.json", """
+            {"objects": {"Contact": {"allOf": [{"field": "CloseDate", "op": "gte", "value": "2026-01-01"}]}},
+             "fullScanAllowed": []}
+            """);
+        var result = ValidateConfig.ValidateCore(SchemaPath, GraphSchemaPath, badFilters, strict: true);
+        Assert.Contains(result.Errors, e => e.Contains("filters.json invalid") && e.Contains("date-looking"));
+        Assert.False(result.Ok(strict: true));
+    }
+
+    // A dt partition predicate DOES prune (dt is always present) → effectively
+    // filtered, so it passes even under --strict.
+    [Fact]
+    public void DtPartitionOnlyFilter_PassesStrict()
+    {
+        using var scope = GoodEnv();
+        var dtOnly = Write("dt-filters.json", """
+            {"objects": {"Contact": {"partition": [{"key": "dt", "op": "withinLastDays", "value": "30"}]}},
+             "fullScanAllowed": []}
+            """);
+        var result = ValidateConfig.ValidateCore(SchemaPath, GraphSchemaPath, dtOnly, strict: true);
+        Assert.DoesNotContain(result.Warnings, w => w.Contains("Contact"));
+        Assert.DoesNotContain(result.Errors, e => e.Contains("Contact"));
+    }
+
     [Fact]
     public void UnfilteredObject_ExemptViaFullScanAllowed()
     {

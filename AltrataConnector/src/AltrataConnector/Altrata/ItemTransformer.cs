@@ -79,6 +79,12 @@ public sealed class ItemTransformer
         }
     }
 
+    /// <summary>Domain separator between the sanitized body and the hash of a
+    /// sanitized item id. MUST be a character the sanitizer folds away (i.e. NOT
+    /// in the Graph-safe set letters/digits/'-'), so it can appear in NO other
+    /// position of any produced id — see <see cref="BuildItemId"/>.</summary>
+    internal const char HashSeparator = '_';
+
     /// <summary>
     /// Graph-safe, collision-free item id. Record ids that are already
     /// Graph-safe (alphanumeric plus '-') keep the legacy `{dataset}-{id}`
@@ -89,6 +95,17 @@ public sealed class ItemTransformer
     /// collision would let one subject's PUT overwrite another's item or a
     /// DSAR tombstone mis-target). Deterministic: erasure recomputes the same
     /// id from the same raw id.
+    ///
+    /// Injectivity proof sketch: the sanitized (hashed) form and the legacy
+    /// pass-through form share the same [A-Za-z0-9-] alphabet, so a hash
+    /// appended with '-' could be forged by a graph-safe raw id crafted to equal
+    /// '{sanitizedBody}-{hash}' — a distinct raw id folding onto the same item
+    /// id (a real, zero-work collision). The hash is therefore joined with
+    /// <see cref="HashSeparator"/> ('_'), which the sanitizer folds to '-' on
+    /// input: a graph-safe (pass-through) id can never contain '_', the sanitized
+    /// body never contains '_', and the hex hash never contains '_'. Hence a
+    /// hashed id contains EXACTLY ONE '_' and a pass-through id contains NONE —
+    /// the two output spaces are provably disjoint.
     /// </summary>
     public static string BuildItemId(string dataset, string recordId)
     {
@@ -111,7 +128,7 @@ public sealed class ItemTransformer
             return sb.ToString();
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(recordId)))
             .ToLowerInvariant()[..12];
-        return $"{sb}-{hash}";
+        return $"{sb}{HashSeparator}{hash}";
     }
 
     public ExternalItem Transform(FeedRecord record, IReadOnlyList<AclEntry> acl)

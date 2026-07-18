@@ -188,12 +188,20 @@ public static class ValidateConfig
             foreach (var obj in schema.ObjectList)
             {
                 var filter = filters.For(obj.ObjectName);
-                if (filter is { HasAnyFilter: true } || filters.IsFullScanAllowed(obj.ObjectName))
+                if (filter is { IsEffectivelyFiltered: true } || filters.IsFullScanAllowed(obj.ObjectName))
                     continue;
-                var message =
-                    $"Object '{obj.ObjectName}' has NO filter in filters.json and is not in "
-                    + "fullScanAllowed — the crawl will refuse it (fail-closed scale guard). "
-                    + "Add partition/record filters or an explicit exemption.";
+                // Distinguish "no filter at all" from "a filter that prunes
+                // nothing" (only a non-dt partition predicate on a key that
+                // MatchesPartition never prunes on) — both trip the guard.
+                var hasInertFilter = filter is { HasAnyFilter: true };
+                var message = hasInertFilter
+                    ? $"Object '{obj.ObjectName}' is only 'filtered' by a non-pruning partition "
+                      + "predicate (no record predicate and no 'dt' partition predicate) — it does "
+                      + "NOT prune and the crawl will refuse it (fail-closed scale guard). Add a "
+                      + "record predicate or a 'dt' partition predicate, or an explicit exemption."
+                    : $"Object '{obj.ObjectName}' has NO filter in filters.json and is not in "
+                      + "fullScanAllowed — the crawl will refuse it (fail-closed scale guard). "
+                      + "Add partition/record filters or an explicit exemption.";
                 (strict ? result.Errors : result.Warnings).Add(message);
             }
         }

@@ -45,6 +45,18 @@ namespace SalesforceCopilotConnector.Graph;
 public class AclResolver
 {
     private const string UserIdPrefix = "005";
+
+    // Hard ceiling on group-membership nesting depth.  ResolveGroupAsync recurses one
+    // frame per nesting level; on a default 1 MB thread-pool stack the walk exhausts
+    // the stack somewhere past ~600 levels, and a StackOverflowException is uncatchable
+    // and takes the whole (HA, long-running) process down.  Real Salesforce public-group
+    // / queue nesting is only a handful of levels deep, so this ceiling never triggers in
+    // practice; if it ever does we stop expanding that branch (fail-closed — deeper members
+    // are simply not granted) rather than crash.  Mirrors DefaultMaxParentDepth for
+    // ControlledByParent chains and the newer AclEngine QueueHandler's bounded traversal.
+    private const int MaxGroupNestingDepth = 400;
+    private static bool _warnedGroupNestingDepth;
+
     private static readonly IAppLogger Logger = Logging.GetLogger("salesforce_connector");
 
     private readonly AppConfig _config;
@@ -531,7 +543,13 @@ public class AclResolver
     /// </summary>
     internal async Task<(HashSet<string> UserIds, bool IncludesEveryone)> ResolveGroupAsync(string groupId)
     {
-        var (userIds, includesEveryone, _) = await ResolveGroupAsync(groupId, new HashSet<string>());
+        // The per-resolution memo (see the 3-arg overload) is scoped to this single
+        // top-level resolve so it never leaks a path-dependent partial expansion into
+        // the long-lived _groupCache.
+        var (userIds, includesEveryone, _) = await ResolveGroupAsync(
+            groupId,
+            new HashSet<string>(),
+            new Dictionary<string, (HashSet<string>, bool, HashSet<string>)>());
         return (userIds, includesEveryone);
     }
 
@@ -551,7 +569,8 @@ public class AclResolver
     /// </summary>
     private async Task<(HashSet<string> UserIds, bool IncludesEveryone, HashSet<string> OpenCycleTargets)> ResolveGroupAsync(
         string groupId,
-        HashSet<string> visited)
+        HashSet<string> visited,
+        Dictionary<string, (HashSet<string> UserIds, bool IncludesEveryone, HashSet<string> OpenCycleTargets)> memo)
     {
         lock (_cacheLock)
         {
@@ -573,33 +592,79 @@ public class AclResolver
 
         try
         {
+            // ── Depth guard ───────────────────────────────────────────────────
+            // visited.Count is the current DFS depth (this group was just added).
+            // Stop before the recursion can exhaust the stack.  Returned as a cut
+            // (this group as an open target) so the truncation is treated exactly
+            // like a cycle: nothing on the path is cached as complete, and the
+            // result is *not* memoised, so a later shallower reference still gets a
+            // full expansion.
+            if (visited.Count > MaxGroupNestingDepth)
+            {
+                if (!_warnedGroupNestingDepth)
+                {
+                    _warnedGroupNestingDepth = true;
+                    Logger.Warning(
+                        $"[LegacyACL] Group nesting exceeded {MaxGroupNestingDepth} levels at {groupId}; " +
+                        "stopping expansion of this branch to avoid stack exhaustion " +
+                        "(deeper nested members are not granted — this warning fires once).");
+                }
+                return (new HashSet<string>(), false, new HashSet<string> { groupId });
+            }
+
+            // ── Per-resolution memo ───────────────────────────────────────────
+            // A group's reachable-user closure is path-INDEPENDENT: whichever path
+            // in this DFS first reaches a group, that group is expanded exactly once
+            // and the (possibly cycle-cut) result is reused on every later encounter
+            // within the same top-level resolve.  Without this, a group reachable by
+            // many paths inside a strongly-connected component was re-expanded once
+            // per path, so a dense cyclic public-group/queue graph drove
+            // ResolveGroupAsync to O(2^n) — an effective hang (a ~40-node SCC already
+            // takes seconds).  The memo is discarded when this resolve returns; a
+            // partial (cut) expansion is therefore never promoted to the long-lived
+            // _groupCache, and the top-level result stays complete because every cut
+            // edge points at a still-on-stack ancestor whose own full closure is
+            // unioned into the result.  See LegacyAclResolverCycleStressTests.
+            if (memo.TryGetValue(groupId, out var memoized))
+                return (memoized.UserIds, memoized.IncludesEveryone, new HashSet<string>(memoized.OpenCycleTargets));
+
+            // Record a freshly computed result so the same group is never expanded
+            // twice within this resolve.  Kept synchronous (no extra async frame) so
+            // deep group nesting does not consume additional stack per level.
+            (HashSet<string> UserIds, bool IncludesEveryone, HashSet<string> OpenCycleTargets) Memo(
+                (HashSet<string> UserIds, bool IncludesEveryone, HashSet<string> OpenCycleTargets) r)
+            {
+                memo[groupId] = (r.UserIds, r.IncludesEveryone, new HashSet<string>(r.OpenCycleTargets));
+                return r;
+            }
+
             // ── Fast path: use pre-warmed data ────────────────────────────────
             if (_allGroupsById != null)
             {
                 var group = _allGroupsById.GetValueOrDefault(groupId);
                 if (group == null)
-                    return CacheGroup(groupId, (new HashSet<string>(), false));
+                    return Memo(CacheGroup(groupId, (new HashSet<string>(), false)));
 
                 var groupType = (group.Type ?? "").Trim();
 
                 if (groupType == nameof(UserOrGroupType.Organization))
-                    return CacheGroup(groupId, (new HashSet<string>(), true));
+                    return Memo(CacheGroup(groupId, (new HashSet<string>(), true)));
 
                 if (groupType == nameof(UserOrGroupType.Role) && !string.IsNullOrEmpty(group.RelatedId))
-                    return CacheGroup(groupId, (GetRoleUsersFromCache(group.RelatedId!, includeDescendants: false), false));
+                    return Memo(CacheGroup(groupId, (GetRoleUsersFromCache(group.RelatedId!, includeDescendants: false), false)));
 
                 if (groupType is nameof(UserOrGroupType.RoleAndSubordinates)
                         or nameof(UserOrGroupType.RoleAndSubordinatesInternal)
                     && !string.IsNullOrEmpty(group.RelatedId))
                 {
-                    return CacheGroup(groupId, (GetRoleUsersFromCache(group.RelatedId!, includeDescendants: true), false));
+                    return Memo(CacheGroup(groupId, (GetRoleUsersFromCache(group.RelatedId!, includeDescendants: true), false)));
                 }
 
                 if (groupType == nameof(UserOrGroupType.Manager) && !string.IsNullOrEmpty(group.RelatedId))
-                    return CacheGroup(groupId, (await ResolveManagerUsersAsync(group.RelatedId!, includeDescendants: false), false));
+                    return Memo(CacheGroup(groupId, (await ResolveManagerUsersAsync(group.RelatedId!, includeDescendants: false), false)));
 
                 if (groupType == nameof(UserOrGroupType.ManagerAndSubordinatesInternal) && !string.IsNullOrEmpty(group.RelatedId))
-                    return CacheGroup(groupId, (await ResolveManagerUsersAsync(group.RelatedId!, includeDescendants: true), false));
+                    return Memo(CacheGroup(groupId, (await ResolveManagerUsersAsync(group.RelatedId!, includeDescendants: true), false)));
 
                 // Regular group: expand members from pre-warmed data
                 var memberIds = _allGroupMembersByGroup?.GetValueOrDefault(groupId) ?? new List<string>();
@@ -615,41 +680,41 @@ public class AclResolver
                         userIds.Add(memberId);
                         continue;
                     }
-                    var (nestedUsers, nestedEveryone, nestedOpen) = await ResolveGroupAsync(memberId, visited);
+                    var (nestedUsers, nestedEveryone, nestedOpen) = await ResolveGroupAsync(memberId, visited, memo);
                     userIds.UnionWith(nestedUsers);
                     includesEveryone = includesEveryone || nestedEveryone;
                     openCycleTargets.UnionWith(nestedOpen);
                 }
 
-                return CacheGroup(groupId, (userIds, includesEveryone), openCycleTargets);
+                return Memo(CacheGroup(groupId, (userIds, includesEveryone), openCycleTargets));
             }
 
             // ── Fallback: per-group SOQL queries ──────────────────────────────
             var groups = await _helper.GetGroupTypeAndRelatedIdAsync(BuildInFilter("Id", new List<string> { groupId }));
             if (groups.Count == 0)
-                return CacheGroup(groupId, (new HashSet<string>(), false));
+                return Memo(CacheGroup(groupId, (new HashSet<string>(), false)));
 
             var fallbackGroup = groups[0];
             var fallbackGroupType = (fallbackGroup.Type ?? "").Trim();
 
             if (fallbackGroupType == nameof(UserOrGroupType.Organization))
-                return CacheGroup(groupId, (new HashSet<string>(), true));
+                return Memo(CacheGroup(groupId, (new HashSet<string>(), true)));
 
             if (fallbackGroupType == nameof(UserOrGroupType.Role) && !string.IsNullOrEmpty(fallbackGroup.RelatedId))
-                return CacheGroup(groupId, (await ResolveRoleUsersAsync(fallbackGroup.RelatedId!, includeDescendants: false), false));
+                return Memo(CacheGroup(groupId, (await ResolveRoleUsersAsync(fallbackGroup.RelatedId!, includeDescendants: false), false)));
 
             if (fallbackGroupType is nameof(UserOrGroupType.RoleAndSubordinates)
                     or nameof(UserOrGroupType.RoleAndSubordinatesInternal)
                 && !string.IsNullOrEmpty(fallbackGroup.RelatedId))
             {
-                return CacheGroup(groupId, (await ResolveRoleUsersAsync(fallbackGroup.RelatedId!, includeDescendants: true), false));
+                return Memo(CacheGroup(groupId, (await ResolveRoleUsersAsync(fallbackGroup.RelatedId!, includeDescendants: true), false)));
             }
 
             if (fallbackGroupType == nameof(UserOrGroupType.Manager) && !string.IsNullOrEmpty(fallbackGroup.RelatedId))
-                return CacheGroup(groupId, (await ResolveManagerUsersAsync(fallbackGroup.RelatedId!, includeDescendants: false), false));
+                return Memo(CacheGroup(groupId, (await ResolveManagerUsersAsync(fallbackGroup.RelatedId!, includeDescendants: false), false)));
 
             if (fallbackGroupType == nameof(UserOrGroupType.ManagerAndSubordinatesInternal) && !string.IsNullOrEmpty(fallbackGroup.RelatedId))
-                return CacheGroup(groupId, (await ResolveManagerUsersAsync(fallbackGroup.RelatedId!, includeDescendants: true), false));
+                return Memo(CacheGroup(groupId, (await ResolveManagerUsersAsync(fallbackGroup.RelatedId!, includeDescendants: true), false)));
 
             var members = await _helper.GetGroupMembersAsync(BuildInFilter("GroupId", new List<string> { groupId }));
             var fallbackUserIds = new HashSet<string>();
@@ -666,13 +731,13 @@ public class AclResolver
                     fallbackUserIds.Add(memberId);
                     continue;
                 }
-                var (nestedUsers, nestedEveryone, nestedOpen) = await ResolveGroupAsync(memberId, visited);
+                var (nestedUsers, nestedEveryone, nestedOpen) = await ResolveGroupAsync(memberId, visited, memo);
                 fallbackUserIds.UnionWith(nestedUsers);
                 fallbackIncludesEveryone = fallbackIncludesEveryone || nestedEveryone;
                 fallbackOpenCycleTargets.UnionWith(nestedOpen);
             }
 
-            return CacheGroup(groupId, (fallbackUserIds, fallbackIncludesEveryone), fallbackOpenCycleTargets);
+            return Memo(CacheGroup(groupId, (fallbackUserIds, fallbackIncludesEveryone), fallbackOpenCycleTargets));
         }
         finally
         {

@@ -136,7 +136,7 @@ public static class Tracing
     {
         var span = Source.StartActivity("source.fetch", ActivityKind.Client);
         span?.SetTag("bdh.object_type", objectType);
-        span?.SetTag("bdh.source", source);  // "rest" | "tdw"
+        span?.SetTag("bdh.source", source);  // "bdh" (webhdfs | localpath)
         Stamp(span);
         return span;
     }

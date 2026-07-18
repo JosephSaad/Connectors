@@ -239,7 +239,7 @@ hashes/enums (allowlist-enforced) — never names, emails or wealth figures. See
 ## Tests
 
 ```bash
-dotnet test        # 375 tests: CLI parsing, checkpoint resume, dead-letter
+dotnet test        # 387 tests: CLI parsing, checkpoint resume, dead-letter
                    # (incl. 16-writer concurrency corruption stress),
                    # retry/backoff math (Retry-After honoured exactly + 60s clamp,
                    # ±20% jitter), $batch pipeline (429 ladder, adaptive
