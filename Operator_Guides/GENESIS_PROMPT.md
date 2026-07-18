@@ -231,7 +231,7 @@ Note/Important/Tip/**Information to request**, glossary layout).
 ---
 
 *Compiled 18-Jul-2026 from the session that produced: 5 connectors,
-3,329 green tests, 3 stress rounds (incl. a CRITICAL DSAR resurrection
+3,389 green tests, 3 stress rounds + a try/catch review & crash-safety round (incl. a CRITICAL DSAR resurrection
 window), a 74-fix diagnosability audit, the enterprise pack, a bank-grade
 hardening round (12 prioritized fixes: safe-default flips — dead-letter
 redacted, entitlement re-sync on incrementals, Clarizen financial=filter,
