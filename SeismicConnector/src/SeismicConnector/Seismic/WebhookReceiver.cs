@@ -111,6 +111,7 @@ public sealed class WebhookReceiver : IDisposable
             if (!string.IsNullOrEmpty(evt.ContentId))
                 byId[evt.ContentId] = evt;
         }
+        Metrics.SetWebhookQueueDepth(_events.Count);
         return byId.Values.ToList();
     }
 
@@ -227,6 +228,7 @@ public sealed class WebhookReceiver : IDisposable
             // Name the peer so repeated bad-signature sources (misconfigured
             // sender vs. probing) are attributable from the log alone. The
             // signature VALUE is never logged.
+            Metrics.IncWebhookRejected();
             Logger.Warning(
                 "Webhook receiver: rejected request with invalid/missing signature "
                 + $"(remote {request.RemoteEndPoint?.ToString() ?? "unknown"}, "
@@ -241,9 +243,14 @@ public sealed class WebhookReceiver : IDisposable
         foreach (var evt in events)
             dropped += Enqueue(evt);
         if (dropped > 0)
+        {
+            Metrics.IncWebhookDropped(dropped);
             Logger.Warning(
                 $"Webhook receiver: queue at capacity ({MaxQueuedEvents}); dropped {dropped} oldest "
                 + "event(s) under load — the next crawl reconciles them.");
+        }
+        Metrics.IncWebhookAccepted();
+        Metrics.SetWebhookQueueDepth(_events.Count);
         Logger.Info($"Webhook receiver: queued {events.Count} event(s)");
         Respond(context, 202, "Accepted");
     }

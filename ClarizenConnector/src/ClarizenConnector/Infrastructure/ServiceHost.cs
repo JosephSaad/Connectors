@@ -74,15 +74,25 @@ public static class ServiceHost
             {
                 Logger.Warning(
                     "Service stop requested — finishing the current chunk and saving the checkpoint...");
+                EventLogSink.ServiceLifecycle(
+                    "Service stop requested — finishing the current chunk and saving the checkpoint",
+                    starting: false);
                 ServiceStop.Request();
             });
 
-            Logger.Info($"Running as a Windows service: {string.Join(" ", _args)} " +
-                        $"(working directory: {Directory.GetCurrentDirectory()})");
+            var startMessage = $"Running as a Windows service: {string.Join(" ", _args)} " +
+                               $"(working directory: {Directory.GetCurrentDirectory()})";
+            Logger.Info(startMessage);
+            // Service lifecycle transitions are mirrored to the Windows Event
+            // Log (when EVENTLOG_ENABLED) regardless of EVENTLOG_LEVEL, so a
+            // SIEM always sees start/stop even at the default mirror level.
+            EventLogSink.ServiceLifecycle(startMessage, starting: true);
             try
             {
                 Environment.ExitCode = await _executeCommand(_args);
                 Logger.Info($"Command finished with exit code {Environment.ExitCode}");
+                EventLogSink.ServiceLifecycle(
+                    $"Service command finished with exit code {Environment.ExitCode}", starting: false);
             }
             catch (Exception ex)
             {

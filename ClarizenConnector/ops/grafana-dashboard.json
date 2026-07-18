@@ -1,0 +1,185 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus datasource scraping the connector /metrics endpoint (HEALTH_PORT)",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "title": "Clarizen Copilot Connector",
+  "uid": "clarizen-connector",
+  "description": "Operational dashboard over the connector's /metrics exposition (docs/OBSERVABILITY.md). Panel names reference runbooks in docs/RUNBOOKS.md; alert rules ship in ops/prometheus-alerts.yml.",
+  "tags": ["clarizen", "copilot-connector"],
+  "schemaVersion": 39,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "Instance / node",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": "label_values(clarizen_connector_uptime_seconds, instance)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Ingest throughput (items/s)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 12 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (instance) (rate(clarizen_connector_items_ingested_total{instance=~\"$instance\"}[5m]))", "legendFormat": "ingested {{instance}}" },
+        { "refId": "B", "expr": "sum by (instance) (rate(clarizen_connector_items_deleted_total{instance=~\"$instance\"}[5m]))", "legendFormat": "deleted {{instance}}" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Ingested vs failed (rate)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "fillOpacity": 12 } },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "/failed.*/" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+        ]
+      },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(clarizen_connector_items_ingested_total{instance=~\"$instance\"}[5m]))", "legendFormat": "ingested" },
+        { "refId": "B", "expr": "sum(rate(clarizen_connector_items_failed_total{instance=~\"$instance\"}[5m]))", "legendFormat": "failed (runbook: dead-letter growth)" },
+        { "refId": "C", "expr": "sum(rate(clarizen_connector_items_skipped_total{instance=~\"$instance\"}[5m]))", "legendFormat": "skipped" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Dead-letter depth (runbook: dead-letter growth)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 20 }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 50 }, { "color": "red", "value": 200 } ] } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "max by (instance) (clarizen_connector_dead_letter_depth{instance=~\"$instance\"})", "legendFormat": "{{instance}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Graph 429 throttling (runbook: 429 storm)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 12 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (instance) (rate(clarizen_connector_throttled_429_total{instance=~\"$instance\"}[5m]))", "legendFormat": "429/s {{instance}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "state-timeline",
+      "title": "Circuit breakers (runbooks: clarizen/graph breaker open)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 70 },
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "closed", "color": "green" }, "1": { "text": "half-open", "color": "orange" }, "2": { "text": "OPEN", "color": "red" } } }
+          ],
+          "max": 2,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "expr": "max by (dependency) (clarizen_connector_circuit_breaker_state{instance=~\"$instance\"})", "legendFormat": "{{dependency}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Webhook accepted vs rejected (runbook: webhook flood / 401 spike)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "fillOpacity": 12 } },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "/rejected.*/" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+        ]
+      },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(clarizen_connector_webhook_events_accepted_total{instance=~\"$instance\"}[5m]))", "legendFormat": "accepted" },
+        { "refId": "B", "expr": "sum(rate(clarizen_connector_webhook_events_rejected_total{instance=~\"$instance\"}[5m]))", "legendFormat": "rejected" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "HA leases held per node (runbooks: HA failover, lease stuck)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "clarizen_connector_ha_claims_held{instance=~\"$instance\"}", "legendFormat": "{{instance}}" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Crawl / receiver health",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "last crawl age (h)" }, "properties": [ { "id": "unit", "value": "h" }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 26 }, { "color": "red", "value": 36 } ] } } ] },
+          { "matcher": { "id": "byName", "options": "webhook receiver up" }, "properties": [ { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } } ] },
+          { "matcher": { "id": "byName", "options": "API budget remaining" }, "properties": [ { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "orange", "value": 500 }, { "color": "green", "value": 2000 } ] } } ] }
+        ]
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "refId": "A", "expr": "(time() - max(clarizen_connector_last_crawl_completed_timestamp_seconds{instance=~\"$instance\"})) / 3600", "legendFormat": "last crawl age (h)" },
+        { "refId": "B", "expr": "min(clarizen_connector_webhook_receiver_up{instance=~\"$instance\"})", "legendFormat": "webhook receiver up" },
+        { "refId": "C", "expr": "min(clarizen_connector_api_budget_remaining{instance=~\"$instance\"})", "legendFormat": "API budget remaining" },
+        { "refId": "D", "expr": "sum(increase(clarizen_connector_crawls_completed_total{instance=~\"$instance\"}[24h]))", "legendFormat": "crawls completed (24h)" }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Breaker trips / recoveries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 12 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (dependency) (increase(clarizen_connector_circuit_breaker_trips_total{instance=~\"$instance\"}[1h]))", "legendFormat": "trips {{dependency}} (1h)" },
+        { "refId": "B", "expr": "sum by (dependency) (increase(clarizen_connector_circuit_breaker_resets_total{instance=~\"$instance\"}[1h]))", "legendFormat": "recoveries {{dependency}} (1h)" }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Clarizen API calls & attachments",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 12 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(clarizen_connector_clarizen_api_calls_total{instance=~\"$instance\"}[5m]))", "legendFormat": "clarizen API calls/s" },
+        { "refId": "B", "expr": "sum(rate(clarizen_connector_attachments_extracted_total{instance=~\"$instance\"}[5m]))", "legendFormat": "attachments extracted/s" },
+        { "refId": "C", "expr": "sum(rate(clarizen_connector_attachments_skipped_total{instance=~\"$instance\"}[5m]))", "legendFormat": "attachments skipped/s" }
+      ]
+    }
+  ]
+}

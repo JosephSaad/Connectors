@@ -1,0 +1,335 @@
+{
+  "__comment": "BDH Hadoop Copilot Connector — Grafana dashboard. Import via Dashboards > Import; pick your Prometheus datasource. Every query uses the connector's actual metric names (prefix hadoop_connector_, docs/OBSERVABILITY.md); alert rules live in ops/prometheus-alerts.yml, runbooks in docs/RUNBOOKS.md.",
+  "title": "BDH Hadoop Copilot Connector",
+  "uid": "hadoop-connector-ops",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "1m",
+  "tags": ["hadoop-connector", "copilot", "graph-connector"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      },
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": "label_values(hadoop_connector_uptime_seconds, instance)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Health at a glance",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Watermark age (h) — alert at 26 h",
+      "description": "time() - hadoop_connector_last_crawl_completed_timestamp_seconds. BDH loads nightly; beyond 26 h the index is stale. Runbook: dt-watermark gaps.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "((time() - max(hadoop_connector_last_crawl_completed_timestamp_seconds{instance=~\"$instance\"})) / 3600) and (max(hadoop_connector_last_crawl_completed_timestamp_seconds{instance=~\"$instance\"}) > 0)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "h",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 24 },
+              { "color": "red", "value": 26 }
+            ]
+          },
+          "noValue": "no crawl yet"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Dead-letter depth",
+      "description": "hadoop_connector_dead_letter_depth (sum across shards). Runbook: Dead-letter growth.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "max(hadoop_connector_dead_letter_depth{instance=~\"$instance\"})" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Guard refusals (24 h)",
+      "description": "increase(hadoop_connector_guard_refusals_total[24h]) — any refusal usually means a filters.json regression. Runbook: Guard refusal (unfiltered object).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(hadoop_connector_guard_refusals_total{instance=~\"$instance\"}[24h]))" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Partial objects / sweeps suppressed (24 h)",
+      "description": "increase(hadoop_connector_partial_objects_total[24h]) and increase(hadoop_connector_sweeps_suppressed_total[24h]). Partial = row cap or oversize skip; suppressed sweeps leave stale items. Runbooks: Row-cap hit; Oversize-skip partial crawl.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(hadoop_connector_partial_objects_total{instance=~\"$instance\"}[24h]))", "legendFormat": "partial objects" },
+        { "refId": "B", "expr": "sum(increase(hadoop_connector_sweeps_suppressed_total{instance=~\"$instance\"}[24h]))", "legendFormat": "sweeps suppressed" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Breaker state (hdfs / graph)",
+      "description": "hadoop_connector_circuit_breaker_state: 0 closed, 1 half-open, 2 open. Open = degraded mode. Runbook: WebHDFS flapping / breaker open.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "max by (dependency) (hadoop_connector_circuit_breaker_state{instance=~\"$instance\"})", "legendFormat": "{{dependency}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 2 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "HA leases held (per node)",
+      "description": "hadoop_connector_ha_claims_held — object-claim leases each node holds; 0 outside HA mode. A node stuck >0 with zero throughput = lease stuck. Runbook: Lease stuck.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "hadoop_connector_ha_claims_held{instance=~\"$instance\"}", "legendFormat": "{{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 0 }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Source scan — the filter layer at work (docs/FILTERS.md)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Scan throughput (rows/s)",
+      "description": "rate(hadoop_connector_records_scanned_total[5m]) vs rate(hadoop_connector_records_matched_total[5m]) — matched should sit well below scanned (selective filters).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 7 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(hadoop_connector_records_scanned_total{instance=~\"$instance\"}[5m]))", "legendFormat": "scanned/s" },
+        { "refId": "B", "expr": "sum(rate(hadoop_connector_records_matched_total{instance=~\"$instance\"}[5m]))", "legendFormat": "matched/s" },
+        { "refId": "C", "expr": "sum by (stage) (rate(hadoop_connector_records_filtered_total{instance=~\"$instance\"}[5m]))", "legendFormat": "filtered/s ({{stage}})" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "rowsps", "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Selectivity & prune ratios",
+      "description": "matched/scanned (records) and pruned/(pruned+scanned) (partitions) over the crawl window — a healthy filter prunes cheaply and matches sparsely. A ratio jump after a config rollout = filter regression.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 7 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(hadoop_connector_records_matched_total{instance=~\"$instance\"}[1h])) / clamp_min(sum(increase(hadoop_connector_records_scanned_total{instance=~\"$instance\"}[1h])), 1)",
+          "legendFormat": "records matched/scanned (1h)"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(hadoop_connector_partitions_pruned_total{instance=~\"$instance\"}[1h])) / clamp_min(sum(increase(hadoop_connector_partitions_pruned_total{instance=~\"$instance\"}[1h])) + sum(increase(hadoop_connector_partitions_scanned_total{instance=~\"$instance\"}[1h])), 1)",
+          "legendFormat": "partitions pruned ratio (1h)"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0, "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "WebHDFS calls & partitions",
+      "description": "rate(hadoop_connector_hdfs_calls_total[5m]) plus partition scan/prune rates — source-side load shape.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 7 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(hadoop_connector_hdfs_calls_total{instance=~\"$instance\"}[5m]))", "legendFormat": "hdfs calls/s" },
+        { "refId": "B", "expr": "sum(rate(hadoop_connector_partitions_scanned_total{instance=~\"$instance\"}[5m]))", "legendFormat": "partitions scanned/s" },
+        { "refId": "C", "expr": "sum(rate(hadoop_connector_partitions_pruned_total{instance=~\"$instance\"}[5m]))", "legendFormat": "partitions pruned/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Graph ingestion",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Items ingested / failed / deleted (per s)",
+      "description": "rate(hadoop_connector_items_ingested_total|items_failed_total|items_deleted_total[5m]). Failed feeds the dead-letter queue.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(hadoop_connector_items_ingested_total{instance=~\"$instance\"}[5m]))", "legendFormat": "ingested/s" },
+        { "refId": "B", "expr": "sum(rate(hadoop_connector_items_failed_total{instance=~\"$instance\"}[5m]))", "legendFormat": "failed/s" },
+        { "refId": "C", "expr": "sum(rate(hadoop_connector_items_deleted_total{instance=~\"$instance\"}[5m]))", "legendFormat": "deleted/s (sweep)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Graph 429 throttling",
+      "description": "rate(hadoop_connector_throttled_429_total[5m]) — sustained storms dial the adaptive concurrency to 1. Runbook: 429 storm.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(hadoop_connector_throttled_429_total{instance=~\"$instance\"}[5m]))", "legendFormat": "429/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Dead-letter depth & breaker trips",
+      "description": "hadoop_connector_dead_letter_depth (gauge) with breaker trip/reset counters per dependency.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "targets": [
+        { "refId": "A", "expr": "max(hadoop_connector_dead_letter_depth{instance=~\"$instance\"})", "legendFormat": "dead-letter depth" },
+        { "refId": "B", "expr": "sum by (dependency) (increase(hadoop_connector_circuit_breaker_trips_total{instance=~\"$instance\"}[1h]))", "legendFormat": "trips 1h ({{dependency}})" },
+        { "refId": "C", "expr": "sum by (dependency) (increase(hadoop_connector_circuit_breaker_resets_total{instance=~\"$instance\"}[1h]))", "legendFormat": "resets 1h ({{dependency}})" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Crawl lifecycle & fleet",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "panels": []
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Crawls started vs completed (6 h windows)",
+      "description": "increase(hadoop_connector_crawls_started_total[6h]) vs completed — a widening gap means crawls stall (degraded pauses, guard refusals, worker crashes).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 25 },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(hadoop_connector_crawls_started_total{instance=~\"$instance\"}[6h]))", "legendFormat": "started (6h)" },
+        { "refId": "B", "expr": "sum(increase(hadoop_connector_crawls_completed_total{instance=~\"$instance\"}[6h]))", "legendFormat": "completed (6h)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "HA leases held by node",
+      "description": "hadoop_connector_ha_claims_held per instance — active-active work distribution; a flatlined nonzero node with no scan progress is the lease-stuck signature.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 25 },
+      "targets": [
+        { "refId": "A", "expr": "hadoop_connector_ha_claims_held{instance=~\"$instance\"}", "legendFormat": "{{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 0, "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Guard refusals / partial objects / sweeps suppressed (1 h windows)",
+      "description": "The three fail-closed counters over time — each nonzero step is an operator action item. Runbooks: Guard refusal; Row-cap hit; Oversize-skip partial crawl.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 25 },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(hadoop_connector_guard_refusals_total{instance=~\"$instance\"}[1h]))", "legendFormat": "guard refusals (1h)" },
+        { "refId": "B", "expr": "sum(increase(hadoop_connector_partial_objects_total{instance=~\"$instance\"}[1h]))", "legendFormat": "partial objects (1h)" },
+        { "refId": "C", "expr": "sum(increase(hadoop_connector_sweeps_suppressed_total{instance=~\"$instance\"}[1h]))", "legendFormat": "sweeps suppressed (1h)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 0, "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    }
+  ]
+}

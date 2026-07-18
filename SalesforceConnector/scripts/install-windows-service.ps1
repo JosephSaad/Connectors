@@ -86,6 +86,19 @@ Set-ItemProperty -Path $envKey -Name "Environment" `
 # Restart on crash: 30s, 60s, then every 5 min; reset the failure count daily.
 sc.exe failure $ServiceName reset= 86400 actions= restart/30000/restart/60000/restart/300000 | Out-Null
 
+# Windows Event Log source for EVENTLOG_ENABLED=true (Infrastructure/EventLogSink.cs).
+# Idempotent, needs admin (we are elevated here); without it the connector's event-log
+# writes are silently dropped. Left in place on -Uninstall (harmless, and other
+# installs of the connector may share it).
+$eventSource = "SalesforceConnector"
+if ([System.Diagnostics.EventLog]::SourceExists($eventSource)) {
+    Write-Host "Event Log source '$eventSource' already exists."
+}
+else {
+    [System.Diagnostics.EventLog]::CreateEventSource($eventSource, "Application")
+    Write-Host "Created Event Log source '$eventSource' (Application log)."
+}
+
 Write-Host @"
 Service installed.
 

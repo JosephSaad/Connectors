@@ -1,0 +1,101 @@
+// ops/azure-monitor-alerts.kql
+// ----------------------------
+// Azure Monitor / Sentinel scheduled-query alert rules over the connector's
+// structured JSON logs (LOG_FORMAT=json ingested into ClarizenConnector_CL
+// with the JSON line in RawData — adjust table/column to your pipeline;
+// parsing pattern per docs/SIEM.md). These cover the LOG-signalled failure
+// modes; metric-signalled ones ship as Prometheus rules in
+// ops/prometheus-alerts.yml. Each rule names its docs/RUNBOOKS.md anchor.
+//
+// Shared parse — prepend to every query below (Sentinel functions work well):
+// let Connector =
+//     ClarizenConnector_CL
+//     | extend d = parse_json(RawData)
+//     | project TimeGenerated,
+//               Level = tostring(d.level),
+//               Logger = tostring(d.logger),
+//               Message = tostring(d.message),
+//               CorrelationId = tostring(d.correlation_id);
+
+// ── Breaker trips / degraded mode ───────────────────────────────────────────
+// Runbooks: #clarizen-breaker-open / #graph-breaker-open / #degraded-mode
+// Schedule: every 5m over 15m; alert when Count > 0. Severity: Sev2.
+Connector
+| where Message has "TRIPPED (open)"
+| parse Message with "Circuit '" Dependency "': " *
+| summarize Count = count(), Last = max(TimeGenerated) by Dependency
+// Dependency == "clarizen" → RUNBOOKS.md#clarizen-breaker-open
+// Dependency == "graph"    → RUNBOOKS.md#graph-breaker-open
+
+// ── Dead-letter growth (alert-webhook path mirrored to logs) ────────────────
+// Runbook: #dead-letter-growth. Every 15m over 1h; Count > 0 → Sev3.
+Connector
+| where Message has "UNRECORDED FAILURE" or Message has "Dead-letter depth"
+| summarize Count = count(), Sample = any(Message) by bin(TimeGenerated, 15m)
+
+// ── Deletion-sweep guard trip ───────────────────────────────────────────────
+// Runbook: #deletion-sweep-guard-trip. Every 15m over 24h; Count > 0 → Sev2
+// (a real mass drop and a truncated export look identical until diagnosed).
+Connector
+| where Message has "deletion sweep SKIPPED"
+| parse Message with ObjectType ": deletion sweep SKIPPED" *
+| summarize Count = count(), Sample = any(Message) by ObjectType
+
+// ── Webhook forgery / flood spike ───────────────────────────────────────────
+// Runbook: #webhook-flood--401-spike. Every 5m over 10m; Rejected > 20 → Sev3.
+Connector
+| where Logger == "clarizen_connector.webhook"
+| where Message has "rejected a post with an invalid or missing"
+    or Message has "rejected an oversize body"
+| summarize Rejected = count() by bin(TimeGenerated, 5m)
+
+// ── TDW export malformed ────────────────────────────────────────────────────
+// Runbook: #tdw-export-malformed. Every 1h over 24h; Count > 0 → Sev3
+// (REST fallback kept the crawl correct — this is cost/latency, not loss).
+Connector
+| where Message has "TDW export" and Message has "failed to parse"
+| summarize Count = count(), Sample = any(Message) by bin(TimeGenerated, 1h)
+
+// ── Financial-governance configuration failure ──────────────────────────────
+// Runbook: #financial-governance-classification-failure. Every 15m over 1h;
+// Count > 0 → Sev2 (fail-fast startup errors — the service is not crawling).
+Connector
+| where Message has "FINANCIAL_DATA_MODE"
+| where Level == "ERROR" or Message has "Invalid configuration"
+| summarize Count = count(), Sample = any(Message) by bin(TimeGenerated, 15m)
+
+// ── Token / auth failures (Graph, Entra, Clarizen, Key Vault, certificate) ──
+// Runbook: #token--auth-failure. Every 15m over 30m; Count > 2 → Sev2.
+// 4xx here is credentials/config; 5xx feeds the breaker rules instead.
+Connector
+| where Message has "Failed to acquire Graph token (HTTP 4"
+    or Message has "Clarizen login failed (HTTP 401"
+    or Message has "Failed to fetch secret"
+    or Message has "GRAPH_CLIENT_CERT"
+| where Level in ("ERROR", "WARNING")
+| summarize Count = count(), Sample = any(Message) by bin(TimeGenerated, 15m)
+
+// ── State corruption ────────────────────────────────────────────────────────
+// Runbook: #state-corruption. Every 1h over 24h; Count > 0 → Sev3 (contained
+// by design — degrade paths are safe — but investigate the disk/crash cause).
+Connector
+| where Message has "exists but could not be parsed"
+    or (Message has "Dead-letter file" and Message has "is not valid JSON")
+| summarize Count = count(), Sample = any(Message) by bin(TimeGenerated, 1h)
+
+// ── 429 storm (log view; the metric rule is authoritative) ──────────────────
+// Runbook: #429-storm. Every 15m over 15m; Count > 50 → Sev3.
+Connector
+| where Message has "Graph API transient error 429"
+| summarize Count = count() by bin(TimeGenerated, 15m)
+
+// ── Service crash-restart loop (Windows Event Log channel) ──────────────────
+// Runbooks: #ha-failover / SIEM.md. Uses the Event table (EVENTLOG_ENABLED
+// mirror, source "ClarizenConnector": 1001 start / 1002 stop, 3000 error).
+// Every 15m over 1h; Starts > 3 with Stops < Starts → Sev2.
+Event
+| where Source == "ClarizenConnector"
+| summarize Starts = countif(EventID == 1001),
+            Stops = countif(EventID == 1002),
+            Errors = countif(EventID == 3000)
+    by bin(TimeGenerated, 1h), Computer

@@ -166,6 +166,107 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
+  # Code-coverage gate. Line coverage measured 52.9% (8671/16384 lines) when
+  # this gate was introduced (hermetic suite — SQL/HA integration tests
+  # self-skip here, same as the build-test job); the threshold is set 5 points
+  # below that at 47.9% so ordinary churn never blocks a PR but a coverage
+  # collapse does. Raise the threshold when coverage moves up; never lower it
+  # to make a PR pass.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: Coverage Gate (line >= 47.9%)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Test with coverage collector
+        run: >-
+          dotnet test -c Release
+          --collect:"XPlat Code Coverage"
+          --results-directory ./TestResults
+
+      - name: Enforce line-coverage threshold
+        run: |
+          FILE=$(find ./TestResults -name 'coverage.cobertura.xml' | head -1)
+          if [[ -z "$FILE" ]]; then
+            echo "::error::No coverage.cobertura.xml produced."
+            exit 1
+          fi
+          python3 - "$FILE" <<'EOF'
+          import sys, xml.etree.ElementTree as ET
+          threshold = 47.9   # measured 52.9% line coverage at gate introduction
+          root = ET.parse(sys.argv[1]).getroot()
+          rate = float(root.get("line-rate")) * 100
+          covered, valid = root.get("lines-covered"), root.get("lines-valid")
+          print(f"Line coverage: {rate:.2f}% ({covered}/{valid} lines); gate: >= {threshold}%")
+          if rate < threshold:
+              print(f"::error::Line coverage {rate:.2f}% is below the {threshold}% gate.")
+              sys.exit(1)
+          EOF
+
+      - name: Upload coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-gate-report
+          path: "**/TestResults/**/coverage.cobertura.xml"
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Perf smoke: one 20k-item throughput run of the stress harness with GENEROUS
+  # floors (real hardware does >20k items/s; CI runners are slow and shared, so
+  # the gate is >=3,000 items/s and <500 MB peak RSS). This catches order-of-
+  # magnitude regressions (accidental serialization, per-item allocations)
+  # without flaking on runner noise. Invariants are still enforced by the
+  # harness itself (non-zero exit).
+  # ---------------------------------------------------------------------------
+  perf-smoke:
+    name: Perf Smoke (>=3k items/s, <500MB RSS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Run throughput scenario (20k items)
+        run: >-
+          dotnet run --project tools/StressHarness -c Release --
+          --scenario throughput --items 20000
+          --summary-json perf-summary.json
+
+      - name: Enforce perf floors
+        run: |
+          jq . perf-summary.json
+          ITEMS_PER_SEC=$(jq -r '.[] | select(.name=="throughput") | .itemsPerSec' perf-summary.json)
+          PEAK_RSS_MB=$(jq -r '.[] | select(.name=="throughput") | .peakRssMb' perf-summary.json)
+          echo "throughput: ${ITEMS_PER_SEC} items/s (floor 3000); peak RSS: ${PEAK_RSS_MB} MB (ceiling 500)"
+          FAIL=0
+          awk -v v="$ITEMS_PER_SEC" 'BEGIN { exit !(v >= 3000) }' \
+            || { echo "::error::Throughput ${ITEMS_PER_SEC} items/s is below the 3,000 items/s floor."; FAIL=1; }
+          awk -v v="$PEAK_RSS_MB" 'BEGIN { exit !(v < 500) }' \
+            || { echo "::error::Peak RSS ${PEAK_RSS_MB} MB exceeds the 500 MB ceiling."; FAIL=1; }
+          exit $FAIL
+
+      - name: Upload perf summary
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-smoke-summary
+          path: perf-summary.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
   # Stress harness: 4 concurrency scenarios (throughput / throttle / failures /
   # stop-resume) against the file+SQLite backend with fake APIs, gated on its
   # 44 correctness invariants — NOT on throughput numbers, which vary by

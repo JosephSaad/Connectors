@@ -44,6 +44,12 @@ public static class CommandRegistry
         root.AddHandler(fileHandler);
         root.AddHandler(consoleHandler);
 
+        // Windows Event Log mirror (EVENTLOG_ENABLED=true; docs/SIEM.md):
+        // WARNING+ (INFO with EVENTLOG_LEVEL=info) mirrored to the Application
+        // log, plus a lifecycle mark per command run. No-op off Windows.
+        EventLogSink.InstallOnRoot();
+        EventLogSink.Lifecycle($"seismic-connector {prefix} starting (pid {Environment.ProcessId})");
+
         var progress = Logging.GetLoggerObject("progress");
         progress.Propagate = false;
         foreach (var handler in progress.Handlers)

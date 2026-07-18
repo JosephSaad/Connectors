@@ -1,0 +1,137 @@
+# Prometheus alert rules for the Seismic Copilot Connector.
+#
+# Metric names are the EXACT seismic_connector_* series served on /metrics
+# (HEALTH_PORT). Every rule's runbook_url points at the matching anchor in
+# docs/RUNBOOKS.md — the alert is the symptom line of that runbook.
+# Thresholds are starting points; tune to your crawl cadence.
+
+groups:
+  - name: seismic-connector.availability
+    rules:
+      - alert: SeismicConnectorBreakerOpen
+        expr: seismic_connector_circuit_breaker_state > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker {{ $labels.dependency }} not closed on {{ $labels.instance }}"
+          description: "Dependency {{ $labels.dependency }} breaker is open/half-open; the connector is in (or entering) degraded pause. /ready reports 503 while a critical breaker is open."
+          runbook_url: "docs/RUNBOOKS.md#breaker-open"
+
+      - alert: SeismicConnectorDegradedPause
+        expr: increase(seismic_connector_degraded_pauses_total[30m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Crawl paused into degraded mode on {{ $labels.instance }}"
+          description: "A crawl paused at a checkpoint because a critical dependency breaker was open. Resume is automatic; investigate the dependency."
+          runbook_url: "docs/RUNBOOKS.md#breaker-open"
+
+      - alert: SeismicConnectorCrawlStale
+        # No completed crawl for > 2x the default incremental interval (4h).
+        expr: >
+          (time() - seismic_connector_last_crawl_completed_timestamp_seconds > 28800)
+          and (seismic_connector_last_crawl_completed_timestamp_seconds > 0)
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No completed crawl for >8h on {{ $labels.instance }}"
+          description: "Index freshness SLO at risk. Check breaker state, OAuth health, and the service itself."
+          runbook_url: "docs/RUNBOOKS.md#breaker-open"
+
+      - alert: SeismicConnectorDown
+        expr: up{job="seismic-connector"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Connector metrics endpoint unreachable on {{ $labels.instance }}"
+          description: "Scrape failing — process down or HEALTH_PORT listener broken. Liveness (/health) stays 200 even degraded, so an unreachable endpoint means the process itself."
+          runbook_url: "docs/RUNBOOKS.md#oauth-failure"
+
+  - name: seismic-connector.ingestion
+    rules:
+      - alert: SeismicConnectorDeadLetterGrowth
+        expr: seismic_connector_dead_letter_depth > 100
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dead-letter depth {{ $value }} on {{ $labels.instance }}"
+          description: "Failed items are accumulating faster than retry-failed drains them."
+          runbook_url: "docs/RUNBOOKS.md#dead-letter-growth"
+
+      - alert: SeismicConnectorThrottle429Storm
+        expr: rate(seismic_connector_throttled_429_total[15m]) * 60 > 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Graph 429 storm: >10 throttles/min on {{ $labels.instance }}"
+          description: "Sustained Graph throttling. Back-off is automatic; check competing workloads / concurrency knobs before touching retries."
+          runbook_url: "docs/RUNBOOKS.md#graph-429-storm"
+
+      - alert: SeismicConnectorReconciliationDrift
+        expr: seismic_connector_last_drift_findings > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unrepaired drift: {{ $value }} findings on {{ $labels.instance }}"
+          description: "The last reconcile sweep found index divergence (possibly No-MNE relevant) that has not been repaired."
+          runbook_url: "docs/RUNBOOKS.md#no-mne-reconciliation-drift"
+
+      - alert: SeismicConnectorReAclStorm
+        expr: increase(seismic_connector_items_reacled_total[1h]) > 500
+        labels:
+          severity: info
+        annotations:
+          summary: "Re-ACL storm: {{ $value }} items re-ACLed in 1h on {{ $labels.instance }}"
+          description: "Large permission-drift wave. Expected after a real permission change; suspicious without one."
+          runbook_url: "docs/RUNBOOKS.md#re-acl-storm"
+
+  - name: seismic-connector.webhook
+    rules:
+      - alert: SeismicConnectorWebhook401Spike
+        expr: increase(seismic_connector_webhook_rejected_total[15m]) > 20
+        labels:
+          severity: warning
+        annotations:
+          summary: "Webhook 401 spike: {{ $value }} rejections/15m on {{ $labels.instance }}"
+          description: "Sustained invalid-signature rejections. Distinguish secret-rotation mismatch (known sender, starts at rotation time) from forgery/probing (unknown remotes) — the runbook shows how; escalate forgery to security."
+          runbook_url: "docs/RUNBOOKS.md#webhook-401-spike"
+
+      - alert: SeismicConnectorWebhookQueueDrops
+        expr: increase(seismic_connector_webhook_dropped_total[1h]) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: "Webhook queue shed {{ $value }} events in 1h on {{ $labels.instance }}"
+          description: "Drop-oldest cap engaged. Safe (next crawl reconciles) but indicates sender bursts or a stalled drain."
+          runbook_url: "docs/RUNBOOKS.md#webhook-queue-drops"
+
+      - alert: SeismicConnectorWebhookQueueSaturated
+        expr: seismic_connector_webhook_queue_depth > 9000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Webhook queue near cap ({{ $value }}/10000) on {{ $labels.instance }}"
+          description: "Queue is not draining — crawl loop wedged or events flooding."
+          runbook_url: "docs/RUNBOOKS.md#webhook-queue-drops"
+
+  - name: seismic-connector.ha
+    rules:
+      - alert: SeismicConnectorHaLeaseStuck
+        # Claims held but no crawl completed for 2h: session likely wedged open.
+        expr: >
+          (seismic_connector_ha_claims_held > 0)
+          and (increase(seismic_connector_crawls_completed_total[2h]) == 0)
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HA claims held with no crawl progress on {{ $labels.instance }}"
+          description: "A crawl session may be wedged open by a stale claim; survivors normally steal stale claims automatically."
+          runbook_url: "docs/RUNBOOKS.md#ha-lease-stuck"

@@ -169,6 +169,10 @@ public static class Logging
 
         TestSink?.Invoke(level, loggerName, message);
 
+        // Optional Windows Event Log mirror (EVENTLOG_ENABLED) — a no-op by
+        // default and everywhere off Windows; never throws (docs/SIEM.md).
+        EventLogSink.Mirror(level, loggerName, message);
+
         // Stamp the ambient correlation id (per crawl cycle / webhook event) so
         // a single run is followable end-to-end. Null when outside a scope.
         var correlationId = CorrelationContext.Current;

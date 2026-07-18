@@ -27,8 +27,36 @@ public static class Alerting
         WriteIndented = false,
     };
 
-    /// <summary>HTTP client for webhook POSTs; tests inject a fake handler by assigning this.</summary>
-    internal static HttpClient HttpClient { get; set; } = new() { Timeout = TimeSpan.FromSeconds(5) };
+    private static HttpClient? _httpClient;
+
+    /// <summary>HTTP client for webhook POSTs; tests inject a fake handler by
+    /// assigning this. Created lazily so PROXY_URL / CA_BUNDLE_PATH apply; a
+    /// factory failure falls back to a direct client (alerting never throws —
+    /// AppConfig.Load has already failed fast on genuinely bad values).</summary>
+    internal static HttpClient HttpClient
+    {
+        get => _httpClient ??= CreateDefaultClient();
+        set => _httpClient = value;
+    }
+
+    private static HttpClient CreateDefaultClient()
+    {
+        try
+        {
+            return new HttpClient(HttpClientFactory.CreateHandler())
+            {
+                Timeout = TimeSpan.FromSeconds(5),
+            };
+        }
+        catch (Exception exc)
+        {
+            Logger.Warning(
+                $"Alerting: could not apply {HttpClientFactory.ProxyUrlEnvVar}/"
+                + $"{HttpClientFactory.CaBundleEnvVar} to the alert client ({exc.Message}); "
+                + "alert POSTs go direct.");
+            return new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        }
+    }
 
     /// <summary>Optional connector id stamped into the alert envelope as <c>connector</c>.</summary>
     internal static string? ConnectorId { get; set; }

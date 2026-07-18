@@ -14,6 +14,7 @@ using System.Security.Cryptography;
 using System.Text;
 using AltrataConnector.Graph;
 using AltrataConnector.Identity;
+using AltrataConnector.Infrastructure;
 
 namespace AltrataConnector.Entitlement;
 
@@ -35,9 +36,12 @@ public static class SeatAclBuilder
     public static IReadOnlyList<AclEntry> BuildAcl(IReadOnlyCollection<SeatPrincipal> seats)
     {
         if (seats.Count == 0)
+        {
+            Metrics.Increment("altrata_entitlement_refusals_total");
             throw new EntitlementViolationException(
                 "Seat list is empty — refusing to build an ACL. Altrata items are only " +
                 "visible to licensed seats; ingestion cannot proceed without at least one seat.");
+        }
 
         var entries = new List<AclEntry>(seats.Count);
         foreach (var seat in seats.OrderBy(s => s.Kind).ThenBy(s => s.Value, StringComparer.OrdinalIgnoreCase))
@@ -59,9 +63,12 @@ public static class SeatAclBuilder
         foreach (var entry in acl)
         {
             if (ForbiddenAclTypes.Contains(entry.Type, StringComparer.OrdinalIgnoreCase))
+            {
+                Metrics.Increment("altrata_entitlement_refusals_total");
                 throw new EntitlementViolationException(
                     $"ACL entry of type '{entry.Type}' is forbidden: Altrata items must " +
                     "only be visible to licensed seat principals, never to everyone.");
+            }
         }
     }
 

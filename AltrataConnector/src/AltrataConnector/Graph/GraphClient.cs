@@ -28,6 +28,7 @@ using System.Net;
 using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -184,13 +185,61 @@ public sealed class GraphClient : IGraphClient
         Func<double, CancellationToken, Task>? delay = null, CircuitBreaker? breaker = null)
     {
         _config = config;
-        _http = handler == null ? new HttpClient() : new HttpClient(handler);
+        // Injected handler = tests; otherwise the enterprise connectivity
+        // handler (PROXY_URL / PROXY_BYPASS / CA_BUNDLE_PATH — fails fast
+        // naming the setting on bad input).
+        _http = handler == null
+            ? new HttpClient(HttpConnectivity.CreateHandler())
+            : new HttpClient(handler);
         _http.Timeout = TimeSpan.FromSeconds(120);
         _delay = delay ?? ((seconds, ct) => Task.Delay(TimeSpan.FromSeconds(seconds), ct));
         _breaker = breaker ?? new CircuitBreaker("graph", CircuitBreakerOptions.FromEnv(critical: true));
     }
 
     // ---- token -------------------------------------------------------------
+
+    private X509Certificate2? _clientCertificate;
+    private bool _authModeLogged;
+
+    /// <summary>Token-request form: certificate client_assertion when
+    /// GRAPH_CLIENT_CERT_PATH / GRAPH_CLIENT_CERT_THUMBPRINT is configured
+    /// (certificate WINS over the client secret), else the secret. Only the
+    /// MODE is ever logged — never key material or the assertion.</summary>
+    internal Dictionary<string, string> BuildTokenRequestForm(string tokenUrl)
+    {
+        if (CertificateCredential.Configured)
+        {
+            _clientCertificate ??= CertificateCredential.Load();
+            if (!_authModeLogged)
+            {
+                Logger.Info($"Graph auth mode: {CertificateCredential.ModeDescription} " +
+                            $"(certificate thumbprint {_clientCertificate.Thumbprint})");
+                _authModeLogged = true;
+            }
+            return new Dictionary<string, string>
+            {
+                ["client_id"] = _config.AadClientId,
+                ["client_assertion_type"] = CertificateCredential.ClientAssertionType,
+                ["client_assertion"] = CertificateCredential.BuildClientAssertion(
+                    _clientCertificate, _config.AadClientId, tokenUrl),
+                ["scope"] = GraphScope,
+                ["grant_type"] = "client_credentials",
+            };
+        }
+
+        if (!_authModeLogged)
+        {
+            Logger.Info("Graph auth mode: client secret");
+            _authModeLogged = true;
+        }
+        return new Dictionary<string, string>
+        {
+            ["client_id"] = _config.AadClientId,
+            ["client_secret"] = _config.AadClientSecret,
+            ["scope"] = GraphScope,
+            ["grant_type"] = "client_credentials",
+        };
+    }
 
     internal async Task<string> GetTokenAsync(CancellationToken ct)
     {
@@ -201,13 +250,7 @@ public sealed class GraphClient : IGraphClient
                 return _token;
 
             var url = $"https://login.microsoftonline.com/{_config.AadTenantId}/oauth2/v2.0/token";
-            using var content = new FormUrlEncodedContent(new Dictionary<string, string>
-            {
-                ["client_id"] = _config.AadClientId,
-                ["client_secret"] = _config.AadClientSecret,
-                ["scope"] = GraphScope,
-                ["grant_type"] = "client_credentials",
-            });
+            using var content = new FormUrlEncodedContent(BuildTokenRequestForm(url));
             using var response = await _http.PostAsync(url, content, ct);
             var body = await response.Content.ReadAsStringAsync(ct);
             if (!response.IsSuccessStatusCode)

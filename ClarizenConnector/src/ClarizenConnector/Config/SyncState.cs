@@ -233,6 +233,17 @@ public static class SyncState
     {
         if (failures.Count == 0)
             return;
+        // DEADLETTER_PAYLOAD_MODE=redacted: strip payloads at this choke point
+        // so the file AND SQL backends — and every dead-letter path, including
+        // the financial-classification ones — are covered identically. The
+        // response body is dropped entirely (Graph validation errors can echo
+        // request values); retry-failed re-fetches from source, so redaction
+        // never reduces retryability.
+        if (Infrastructure.DeadLetterRedactor.RedactionEnabled)
+        {
+            requestBodies = Infrastructure.DeadLetterRedactor.RedactRequestBodies(requestBodies);
+            responseBodies = null;
+        }
         if (UseSqlServer)
         {
             SqlStateStore.AppendDeadLetter(connectorId, failures, objectType, requestBodies, responseBodies);

@@ -1,0 +1,458 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus datasource scraping the connector /metrics endpoints (HEALTH_PORT)",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Salesforce Copilot Connector — crawl throughput, failures, throttling, adaptive concurrency, HA claims, dead-letter depth and per-object progress. Metric names are the /metrics exposition names (Infrastructure/Metrics.cs). Runbooks: docs/RUNBOOKS.md.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "Alert runbooks",
+      "type": "link",
+      "url": "https://github.com/JosephSaad/SalesforceCopilotConnector/blob/main/docs/RUNBOOKS.md"
+    }
+  ],
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Crawl throughput (items/s, 5m)",
+      "description": "rate of successfully ingested items across selected instances",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 0 },
+      "id": 1,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "text", "value": null }]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(salesforce_connector_items_ingested_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "items/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Dead-letter depth",
+      "description": "Unretried failure backlog. Alert: DeadLetterGrowth → docs/RUNBOOKS.md#dead-letter-growth",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 0 },
+      "id": 2,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "expr": "max(salesforce_connector_dead_letter_depth{instance=~\"$instance\"})",
+          "legendFormat": "depth",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "429 rate (15m)",
+      "description": "Graph throttling responses/s. Alert: Throttle429Storm → docs/RUNBOOKS.md#429-storm",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 0 },
+      "id": 3,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.05 },
+              { "color": "red", "value": 0.5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(salesforce_connector_throttled_429_total{instance=~\"$instance\"}[15m]))",
+          "legendFormat": "429/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Adaptive concurrency",
+      "description": "Current Graph batch concurrency (min across instances; healthy = GRAPH_BATCH_WORKERS). Pinned at 1 → docs/RUNBOOKS.md#adaptive-concurrency-degradation",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 0 },
+      "id": 4,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 2 },
+              { "color": "green", "value": 4 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "expr": "min(salesforce_connector_adaptive_concurrency_level{instance=~\"$instance\"})",
+          "legendFormat": "level",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "HA claims held",
+      "description": "Object claims currently heartbeating across selected nodes (0 outside HA). Runbook: docs/RUNBOOKS.md#ha-failover",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 0 },
+      "id": 5,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "text", "value": null }]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(salesforce_connector_ha_claims_held{instance=~\"$instance\"})",
+          "legendFormat": "claims",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Last crawl completed",
+      "description": "Age of the newest completed crawl. Alert: CrawlStalled → docs/RUNBOOKS.md#crawl-stalled",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 0 },
+      "id": 6,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 21600 },
+              { "color": "red", "value": 108000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "expr": "time() - max(salesforce_connector_last_crawl_completed_timestamp_seconds{instance=~\"$instance\"} > 0)",
+          "legendFormat": "age",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Items ingested / failed / deleted / skipped (rate, 5m)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "id": 7,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "failed" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byName", "options": "ingested" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        { "expr": "sum(rate(salesforce_connector_items_ingested_total{instance=~\"$instance\"}[5m]))", "legendFormat": "ingested", "refId": "A" },
+        { "expr": "sum(rate(salesforce_connector_items_failed_total{instance=~\"$instance\"}[5m]))", "legendFormat": "failed", "refId": "B" },
+        { "expr": "sum(rate(salesforce_connector_items_deleted_total{instance=~\"$instance\"}[5m]))", "legendFormat": "deleted", "refId": "C" },
+        { "expr": "sum(rate(salesforce_connector_items_skipped_total{instance=~\"$instance\"}[5m]))", "legendFormat": "skipped", "refId": "D" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "429s and adaptive concurrency",
+      "description": "Throttling pressure vs the concurrency the pipeline settled on (per instance).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "id": 8,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "/429\\/s.*/" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } },
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "unit", "value": "ops" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        { "expr": "salesforce_connector_adaptive_concurrency_level{instance=~\"$instance\"}", "legendFormat": "concurrency {{instance}}", "refId": "A" },
+        { "expr": "sum by (instance) (rate(salesforce_connector_throttled_429_total{instance=~\"$instance\"}[5m]))", "legendFormat": "429/s {{instance}}", "refId": "B" }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Per-object progress (records fetched vs Salesforce count)",
+      "description": "object_records_fetched / object_records_total per object type. Totals exist only for dashboard-mode crawls; sharded/HA nodes each report their slice. Flat while a crawl is open → docs/RUNBOOKS.md#lease-stuck",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 13 },
+      "id": 9,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "green", "value": 0.999 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (object_type) (salesforce_connector_object_records_fetched{instance=~\"$instance\"}) / sum by (object_type) (salesforce_connector_object_records_total{instance=~\"$instance\"})",
+          "legendFormat": "{{object_type}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Per-object records fetched (current crawl)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 13 },
+      "id": 10,
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Fetched" }]
+      },
+      "targets": [
+        {
+          "expr": "sum by (object_type) (salesforce_connector_object_records_fetched{instance=~\"$instance\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (object_type) (salesforce_connector_object_records_total{instance=~\"$instance\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "B"
+        }
+      ],
+      "transformations": [
+        { "id": "joinByField", "options": { "byField": "object_type", "mode": "outer" } },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "Time 1": true, "Time 2": true },
+            "renameByName": { "Value #A": "Fetched", "Value #B": "Salesforce total", "object_type": "Object type" }
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Crawls started vs completed / dead-letter depth",
+      "description": "started > completed for long = a crawl is running (or stalled). Depth on the right axis.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "id": 11,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 5, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "dead-letter depth" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        { "expr": "sum(salesforce_connector_crawls_started_total{instance=~\"$instance\"})", "legendFormat": "started", "refId": "A" },
+        { "expr": "sum(salesforce_connector_crawls_completed_total{instance=~\"$instance\"})", "legendFormat": "completed", "refId": "B" },
+        { "expr": "max(salesforce_connector_dead_letter_depth{instance=~\"$instance\"})", "legendFormat": "dead-letter depth", "refId": "C" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Node uptime (restart detection)",
+      "description": "Sawtooth = crash-restart loop → docs/RUNBOOKS.md#crawl-stalled",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "id": 12,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 5, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        { "expr": "salesforce_connector_uptime_seconds{instance=~\"$instance\"}", "legendFormat": "{{instance}}", "refId": "A" }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["salesforce", "copilot-connector", "graph"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(salesforce_connector_uptime_seconds, instance)",
+        "includeAll": true,
+        "label": "Instance",
+        "multi": true,
+        "name": "instance",
+        "query": { "query": "label_values(salesforce_connector_uptime_seconds, instance)", "refId": "var-instance" },
+        "refresh": 2,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Salesforce Copilot Connector",
+  "uid": "sfc-connector-ops",
+  "version": 1,
+  "weekStart": ""
+}

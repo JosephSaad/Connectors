@@ -1,0 +1,181 @@
+# Prometheus alert rules — Altrata Copilot Connector
+#
+# Scrape target: HEALTH_PORT /metrics (job label assumed "altrata-connector";
+# adjust `job` matchers to your scrape config). Every rule's runbook_url
+# anchors into docs/RUNBOOKS.md — renaming a heading there breaks a pager
+# link, so headings and anchors are a contract.
+#
+# Log-only signals (auth failures, erasure-race withdrawal lines, ledger
+# tamper triage detail) are alerted on the SIEM side —
+# ops/azure-monitor-alerts.kql / docs/SIEM.md. Metric and log paths
+# deliberately overlap on the ledger: they cross-check each other.
+
+groups:
+  - name: altrata-connector.security
+    rules:
+      # THE security rule. Any 1 is an incident: the erasure ledger is the
+      # DSAR compliance record; a failed hash-chain verification means tamper
+      # or a torn write — triage decides which, escalation differs (tamper =
+      # security incident with forensics; torn = ops restore).
+      - alert: AltrataErasureLedgerBroken
+        expr: altrata_erasure_ledger_broken == 1
+        for: 0m
+        labels:
+          severity: critical
+          class: security
+          service: altrata-connector
+        annotations:
+          summary: "Erasure ledger FAILED hash-chain verification (tamper or torn line)"
+          description: >-
+            ErasureLedger.Verify() reported a broken chain on {{ $labels.instance }}.
+            Do NOT edit or append to the ledger. Distinguish tamper vs torn
+            line per the runbook — tamper is a SECURITY INCIDENT (forensics,
+            DPO); a torn tail is an ops restore.
+          runbook_url: "docs/RUNBOOKS.md#ledger-verify-failure"
+
+      - alert: AltrataEntitlementRefusals
+        expr: increase(altrata_entitlement_refusals_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: high
+          class: security
+          service: altrata-connector
+        annotations:
+          summary: "Entitlement refused (fail-closed): empty seat list or forbidden everyone-grant"
+          description: >-
+            {{ $value }} refusal(s) in 15m on {{ $labels.instance }}. Ingestion
+            is stopped by design. Fix the seat source — never widen it to
+            unblock. A burst may be someone probing the seat boundary.
+          runbook_url: "docs/RUNBOOKS.md#seat-file-parse-failure"
+
+  - name: altrata-connector.availability
+    rules:
+      - alert: AltrataBreakerOpen
+        expr: altrata_breaker_open == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: altrata-connector
+        annotations:
+          summary: "Critical dependency breaker OPEN — crawl paused at checkpoint (degraded)"
+          description: >-
+            Graph breaker open >5m on {{ $labels.instance }}. Auto-recovers via
+            half-open probes; investigate sustained 5xx/timeouts (egress/proxy/
+            Microsoft health) if it flaps.
+          runbook_url: "docs/RUNBOOKS.md#breaker-open--degraded-mode"
+
+      - alert: AltrataMetricsDown
+        expr: up{job="altrata-connector"} == 0
+        for: 10m
+        labels:
+          severity: warning
+          service: altrata-connector
+        annotations:
+          summary: "Connector metrics endpoint gone (host/service down?)"
+          description: >-
+            No scrape from {{ $labels.instance }} for 10m. In HA, surviving
+            nodes take over on lease expiry; single-node deployments are not
+            crawling right now.
+          runbook_url: "docs/RUNBOOKS.md#ha-failover"
+
+      - alert: AltrataCrawlStale
+        expr: >-
+          altrata_last_full_crawl_timestamp_seconds > 0
+          and (time() - altrata_last_full_crawl_timestamp_seconds) > 172800
+        for: 30m
+        labels:
+          severity: warning
+          service: altrata-connector
+        annotations:
+          summary: "No completed full crawl in 48h"
+          description: >-
+            Last full crawl on {{ $labels.instance }} closed more than 48h ago
+            (default schedule is 24h). Check breaker state, service status and
+            HA leases.
+          runbook_url: "docs/RUNBOOKS.md#ha-failover"
+
+      - alert: AltrataHaLeaseStuckSuspected
+        expr: altrata_ha_leases_held > 0 and altrata_crawl_in_progress == 0
+        for: 30m
+        labels:
+          severity: warning
+          service: altrata-connector
+        annotations:
+          summary: "Node holds HA lease(s) with no crawl running for 30m"
+          description: >-
+            {{ $value }} lease(s) held on {{ $labels.instance }} while idle —
+            hung worker or clock skew. Inspect dbo.altrata_leases before
+            touching anything.
+          runbook_url: "docs/RUNBOOKS.md#lease-stuck"
+
+  - name: altrata-connector.ingestion
+    rules:
+      - alert: AltrataDeliveryRejected
+        expr: increase(altrata_deliveries_rejected_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: high
+          service: altrata-connector
+        annotations:
+          summary: "Feed delivery REJECTED (manifest SHA-256 mismatch / missing file)"
+          description: >-
+            {{ $value }} delivery(ies) rejected in 1h on {{ $labels.instance }}.
+            Nothing from a rejected delivery was ingested. Truncated transfer
+            is the benign cause; unexplained mismatch = possible tampering →
+            security escalation per the runbook.
+          runbook_url: "docs/RUNBOOKS.md#feed-manifest-mismatch"
+
+      - alert: AltrataDeadLetterGrowing
+        expr: altrata_deadletter_depth > 100
+        for: 30m
+        labels:
+          severity: warning
+          service: altrata-connector
+        annotations:
+          summary: "Replayable dead-letter depth above 100 for 30m"
+          description: >-
+            Depth {{ $value }} on {{ $labels.instance }}. Group queue errors,
+            then retry-failed. Redacted mode (default): drain BEFORE retention
+            archives/deletes the feed deliveries replay re-fetches from.
+          runbook_url: "docs/RUNBOOKS.md#dead-letter-growth"
+
+      - alert: AltrataDeadLetterStuck
+        expr: altrata_deadletter_depth > 0
+        for: 24h
+        labels:
+          severity: warning
+          service: altrata-connector
+        annotations:
+          summary: "Dead-letter queue non-empty for 24h (erasure-completion DELETEs may be waiting)"
+          description: >-
+            Records have sat un-replayed for a day on {{ $labels.instance }}.
+            If any are erasure DELETEs (DeliveryId=erasure), a DSAR completion
+            clock is running.
+          runbook_url: "docs/RUNBOOKS.md#forget-subject-failure-mid-flight"
+
+      - alert: Altrata429Storm
+        expr: rate(altrata_graph_throttle_429_total[15m]) > 1
+        for: 15m
+        labels:
+          severity: warning
+          service: altrata-connector
+        annotations:
+          summary: "Sustained Graph 429 throttling (>1/s over 15m)"
+          description: >-
+            Tenant Graph quota contention on {{ $labels.instance }}. Adaptive
+            concurrency is already at work; lower workers/batch size, add
+            jitter in HA, reschedule crawls, or shard connections.
+          runbook_url: "docs/RUNBOOKS.md#429-storm"
+
+      - alert: AltrataReviewQueueGrowth
+        expr: altrata_match_review_depth > 500
+        for: 6h
+        labels:
+          severity: info
+          service: altrata-connector
+        annotations:
+          summary: "Entity-match review queue above 500 for 6h"
+          description: >-
+            Adjudication backlog on {{ $labels.instance }}. Staff the review
+            pass or tune ENTITY_REVIEW_FLOOR / ENTITY_MATCH_THRESHOLD.
+          runbook_url: "docs/RUNBOOKS.md#review-queue-growth"

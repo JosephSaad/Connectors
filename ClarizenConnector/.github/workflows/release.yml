@@ -112,6 +112,115 @@ jobs:
           path: bundle/*.zip*
           if-no-files-found: error
 
+  # ---------------------------------------------------------------------------
+  # Software bill of materials (CycloneDX) for the whole solution — attached to
+  # the GitHub release so consumers can audit the dependency tree per version.
+  # ---------------------------------------------------------------------------
+  sbom:
+    name: SBOM (CycloneDX)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          dotnet tool install --global CycloneDX
+          dotnet-CycloneDX ClarizenConnector.sln -o sbom --json --filename ClarizenConnector.sbom.cdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: sbom/ClarizenConnector.sbom.cdx.json
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # EXPERIMENTAL: WiX v5 MSI (packaging/msi/) on a windows runner — WiX cannot
+  # run on the linux/macOS runners, and the zip bundle remains the canonical
+  # install path. Authenticode signing is gated on repository secrets
+  # (WINDOWS_CODESIGN_PFX base64 + WINDOWS_CODESIGN_PASSWORD) and skips
+  # gracefully when they are absent.
+  # ---------------------------------------------------------------------------
+  msi:
+    name: MSI package (windows, experimental)
+    needs: test
+    runs-on: windows-latest
+    continue-on-error: true
+    env:
+      HAVE_AUTHENTICODE: ${{ secrets.WINDOWS_CODESIGN_PFX != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Validate WiX XML well-formedness
+        shell: bash
+        run: python3 -c "import xml.dom.minidom; xml.dom.minidom.parse('packaging/msi/ClarizenConnector.wxs'); print('well-formed')"
+
+      - name: Publish (self-contained single file, win-x64)
+        shell: bash
+        run: >-
+          dotnet publish src/ClarizenConnector -c Release
+          -r win-x64 --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -o publish/win-x64
+
+      - name: Authenticode-sign the executable
+        if: ${{ env.HAVE_AUTHENTICODE == 'true' }}
+        shell: pwsh
+        run: |
+          $pfx = "$env:RUNNER_TEMP\codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CODESIGN_PFX }}"))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          & $signtool.FullName sign /f $pfx /p "${{ secrets.WINDOWS_CODESIGN_PASSWORD }}" `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 publish/win-x64/ClarizenConnector.exe
+          Remove-Item $pfx
+
+      - name: Authenticode signing skipped (no secrets)
+        if: ${{ env.HAVE_AUTHENTICODE != 'true' }}
+        shell: bash
+        run: echo "WINDOWS_CODESIGN_PFX not configured — shipping the MSI unsigned (expected on forks/dry runs)."
+
+      - name: Build MSI (WiX v5)
+        shell: bash
+        run: |
+          dotnet tool install --global wix
+          wix build packaging/msi/ClarizenConnector.wxs \
+            -d PublishDir=publish/win-x64 -d ProjectRoot=. \
+            -arch x64 -o out/ClarizenConnector.msi
+
+      - name: Authenticode-sign the MSI
+        if: ${{ env.HAVE_AUTHENTICODE == 'true' }}
+        shell: pwsh
+        run: |
+          $pfx = "$env:RUNNER_TEMP\codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CODESIGN_PFX }}"))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          & $signtool.FullName sign /f $pfx /p "${{ secrets.WINDOWS_CODESIGN_PASSWORD }}" `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 out/ClarizenConnector.msi
+          Remove-Item $pfx
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v7
+        with:
+          name: msi-experimental
+          path: out/*.msi
+          if-no-files-found: error
+
   # Container distribution: the same image the docker CI job validates, pushed
   # to GHCR on tag builds. Dispatch dry runs build it end to end but never push.
   container:
@@ -159,9 +268,11 @@ jobs:
 
   release:
     name: Create GitHub release
-    needs: package
+    needs: [package, sbom]
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
+    env:
+      HAVE_COSIGN: ${{ secrets.COSIGN_PRIVATE_KEY != '' }}
     steps:
       - name: Download bundles
         uses: actions/download-artifact@v8
@@ -169,6 +280,45 @@ jobs:
           pattern: bundle-*
           merge-multiple: true
           path: dist
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v8
+        with:
+          name: sbom
+          path: dist
+
+      # The MSI job is experimental (continue-on-error) — a missing artifact
+      # must not block the release.
+      - name: Download MSI (experimental, optional)
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: msi-experimental
+          path: dist
+
+      # cosign keyless would need OIDC id-token permissions; key-based signing
+      # is gated on COSIGN_PRIVATE_KEY/COSIGN_PASSWORD secrets and skips
+      # gracefully when they are absent.
+      - name: Install cosign
+        if: ${{ env.HAVE_COSIGN == 'true' }}
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign release artifacts (cosign)
+        if: ${{ env.HAVE_COSIGN == 'true' }}
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          for f in dist/*.zip dist/*.msi dist/*.json; do
+            [ -e "$f" ] || continue
+            cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY \
+              --output-signature "$f.sig" "$f"
+            echo "signed: $f"
+          done
+
+      - name: Cosign signing skipped (no secrets)
+        if: ${{ env.HAVE_COSIGN != 'true' }}
+        run: echo "COSIGN_PRIVATE_KEY not configured — release ships without cosign signatures (expected on forks)."
 
       - name: Create release
         env:

@@ -154,6 +154,34 @@ public class WebhookReceiverTests
         Assert.Equal(HttpStatusCode.NotFound, get.StatusCode);
     }
 
+    // ── Observability: accepted/rejected counters + queue-depth gauge ─────────
+
+    [Fact]
+    public async Task Metrics_AcceptedAndRejectedCounters_And_QueueDepthGauge()
+    {
+        SeismicConnector.Infrastructure.Metrics.ResetForTests();
+        try
+        {
+            var port = FreePort();
+            using var receiver = WebhookReceiver.StartIfConfigured(port, Secret);
+            var body = """{"type":"contentPublished","contentId":"c1"}""";
+
+            Assert.Equal(HttpStatusCode.Accepted, await PostAsync(port, body, Sign(body)));
+            Assert.Equal(HttpStatusCode.Unauthorized, await PostAsync(port, body, "sha256=deadbeef"));
+
+            Assert.Equal(1, SeismicConnector.Infrastructure.Metrics.WebhookAccepted);
+            Assert.Equal(1, SeismicConnector.Infrastructure.Metrics.WebhookRejected);
+            Assert.Equal(1, SeismicConnector.Infrastructure.Metrics.WebhookQueueDepth);
+
+            receiver!.DrainEvents();
+            Assert.Equal(0, SeismicConnector.Infrastructure.Metrics.WebhookQueueDepth);
+        }
+        finally
+        {
+            SeismicConnector.Infrastructure.Metrics.ResetForTests();
+        }
+    }
+
     // ── helpers ────────────────────────────────────────────────────────────────
 
     private static string Sign(string body) =>

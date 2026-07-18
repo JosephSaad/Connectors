@@ -74,6 +74,42 @@ jobs:
           -p:Version=${{ steps.ver.outputs.version }}
           -o publish/${{ matrix.rid }}
 
+      # SBOM: one CycloneDX bill of materials per bundle, generated from the
+      # solution's resolved package graph. Ships inside the bundle AND as a
+      # standalone release asset so scanners can pull it without unzipping.
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          dotnet tool install --global CycloneDX
+          dotnet-CycloneDX SeismicConnector.sln -o sbom -j \
+            -sv "${{ steps.ver.outputs.version }}"
+          mv sbom/bom.json "sbom/SeismicConnector-${{ steps.ver.outputs.version }}-sbom.cyclonedx.json"
+
+      # Authenticode: sign the Windows executable when signing secrets are
+      # configured; otherwise skip GRACEFULLY (unsigned exe ships, with a
+      # visible notice). Secrets: AUTHENTICODE_PFX_BASE64 (base64 PFX) and
+      # AUTHENTICODE_PFX_PASSWORD.
+      - name: Authenticode sign win-x64 exe (gated on secrets)
+        if: ${{ matrix.rid == 'win-x64' }}
+        env:
+          AUTHENTICODE_PFX_BASE64: ${{ secrets.AUTHENTICODE_PFX_BASE64 }}
+          AUTHENTICODE_PFX_PASSWORD: ${{ secrets.AUTHENTICODE_PFX_PASSWORD }}
+        run: |
+          if [ -z "$AUTHENTICODE_PFX_BASE64" ]; then
+            echo "::notice::AUTHENTICODE_PFX_BASE64 not configured — skipping Authenticode signing."
+            exit 0
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq osslsigncode
+          echo "$AUTHENTICODE_PFX_BASE64" | base64 -d > signing.pfx
+          EXE="publish/win-x64/SeismicConnector.exe"
+          osslsigncode sign -pkcs12 signing.pfx -pass "$AUTHENTICODE_PFX_PASSWORD" \
+            -n "Seismic Copilot Connector" -i "https://github.com/${GITHUB_REPOSITORY}" \
+            -t http://timestamp.digicert.com \
+            -in "$EXE" -out "$EXE.signed"
+          mv "$EXE.signed" "$EXE"
+          rm -f signing.pfx
+          echo "Authenticode signature applied."
+
       # Bundle layout mirrors a checkout: the app resolves config/ (and env/)
       # relative to its working directory, so the zip extracts to a directory
       # you run it from.
@@ -90,12 +126,44 @@ jobs:
           cp env/README.md "$ROOT/env/"
           cp -r docs "$ROOT/docs"
           cp -r scripts/sql "$ROOT/scripts/sql"
-          cp README.md LICENSE NOTICE "$ROOT/"
+          cp README.md LICENSE NOTICE SECURITY.md CHANGELOG.md "$ROOT/"
+          cp sbom/SeismicConnector-*-sbom.cyclonedx.json "$ROOT/"
           if [[ "${{ matrix.rid }}" == "win-x64" ]]; then
             cp scripts/install-windows-service.ps1 "$ROOT/scripts/"
           fi
           (cd bundle && zip -qr "$NAME.zip" "$NAME" && sha256sum "$NAME.zip" > "$NAME.zip.sha256")
+          cp sbom/SeismicConnector-*-sbom.cyclonedx.json bundle/
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      # cosign: detached signature over the bundle zip when a cosign key pair
+      # is configured; otherwise skip GRACEFULLY. Secrets: COSIGN_PRIVATE_KEY
+      # (cosign.key contents) and COSIGN_PASSWORD.
+      - name: Check cosign secrets
+        id: cosign-check
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+        run: |
+          if [ -n "$COSIGN_PRIVATE_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::COSIGN_PRIVATE_KEY not configured — skipping cosign signatures."
+          fi
+
+      - name: Install cosign
+        if: ${{ steps.cosign-check.outputs.enabled == 'true' }}
+        uses: sigstore/cosign-installer@v3
+
+      - name: Cosign sign bundle (gated on secrets)
+        if: ${{ steps.cosign-check.outputs.enabled == 'true' }}
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          for f in bundle/*.zip; do
+            cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY \
+              --output-signature "$f.sig" "$f"
+          done
 
       # Prove the artifact is actually runnable — a single-file self-contained
       # publish can build fine and still fail to bootstrap (missing native
@@ -111,7 +179,68 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: bundle-${{ matrix.rid }}
-          path: bundle/*.zip*
+          path: |
+            bundle/*.zip*
+            bundle/*.cyclonedx.json
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # MSI package (EXPERIMENTAL): WiX v5 build of packaging/msi/ on a Windows
+  # runner. Installs the exe + config templates under Program Files and
+  # registers the Windows service (not started — configuration comes first).
+  # Uploaded as a run artifact only; the zip bundles remain the supported
+  # distribution until the MSI graduates. continue-on-error keeps an MSI
+  # toolchain hiccup from blocking a release.
+  # ---------------------------------------------------------------------------
+  msi:
+    name: MSI package (win-x64, experimental)
+    needs: test
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish (win-x64 single file)
+        run: >-
+          dotnet publish src/SeismicConnector -c Release
+          -r win-x64 --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.ver.outputs.version }}
+          -o publish/win-x64
+
+      - name: Build MSI (WiX v5)
+        shell: bash
+        run: |
+          dotnet tool install --global wix --version "5.*"
+          wix build packaging/msi/SeismicConnector.wxs \
+            -arch x64 \
+            -d PublishDir=publish/win-x64 \
+            -d RepoRoot=. \
+            -d ProductVersion=${{ steps.ver.outputs.version }} \
+            -o "SeismicConnector-${{ steps.ver.outputs.version }}-win-x64.msi"
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: msi-win-x64-experimental
+          path: SeismicConnector-*.msi
           if-no-files-found: error
 
   # Container distribution: the same image the docker CI job validates, pushed

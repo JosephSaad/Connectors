@@ -6,6 +6,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>AltrataConnector</RootNamespace>
+    <!-- Release version; CI overrides with -p:Version on tag builds and the
+         MSI (packaging/msi/Package.wxs) must match — guarded by a test. -->
+    <Version>1.0.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,6 +23,8 @@
     <!-- Pin above Microsoft.Data.Sqlite 10.0.9's transitive 2.1.11 (NU1903, GHSA-2m69-gcr7-jv3q). -->
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.9" />
+    <!-- Windows Event Log mirroring (EVENTLOG_ENABLED; no-op off Windows). -->
+    <PackageReference Include="System.Diagnostics.EventLog" Version="10.0.9" />
     <PackageReference Include="OpenTelemetry" Version="1.16.0" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.16.0" />
     <PackageReference Include="Spectre.Console" Version="0.57.2" />

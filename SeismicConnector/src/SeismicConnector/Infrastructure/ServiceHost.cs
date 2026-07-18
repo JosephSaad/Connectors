@@ -85,11 +85,15 @@ public static class ServiceHost
             {
                 Logger.Warning(
                     "Service stop requested — finishing the current chunk and saving the checkpoint...");
+                EventLogSink.Lifecycle("Service stop requested — finishing the current chunk.");
                 ServiceStop.Request();
             });
 
             Logger.Info($"Running as a Windows service: {string.Join(" ", _args)} " +
                         $"(working directory: {Directory.GetCurrentDirectory()})");
+            EventLogSink.Lifecycle(
+                $"Service started: {string.Join(" ", _args)} "
+                + $"(working directory: {Directory.GetCurrentDirectory()})");
             try
             {
                 Environment.ExitCode = await _executeCommand(_args);
@@ -102,6 +106,7 @@ public static class ServiceHost
             }
             finally
             {
+                EventLogSink.Lifecycle($"Service stopped (exit code {Environment.ExitCode}).");
                 _lifetime.StopApplication();
             }
         }

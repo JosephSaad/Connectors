@@ -123,6 +123,9 @@ public sealed class BdhFetcher
             return;
         if (_config.AllowFullScan)
             return;
+        // Counted for /metrics + SIEM before the throw: a refusal SPIKE usually
+        // means a filters.json regression reached production (docs/SIEM.md).
+        Metrics.IncGuardRefusals();
         throw new FullScanRefusedException(objectConfig.ObjectName);
     }
 

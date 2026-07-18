@@ -1,0 +1,126 @@
+# ops/prometheus-alerts.yml
+# -------------------------
+# Prometheus alert rules over the connector's /metrics exposition (HEALTH_PORT).
+# Every rule's runbook_url points at the matching anchor in docs/RUNBOOKS.md —
+# replace <REPO> with your hosted docs root. Log-only failure modes (deletion
+# sweep, TDW parse, token failures, state corruption, financial governance)
+# are covered by the SIEM rules instead: ops/azure-monitor-alerts.kql and
+# docs/SIEM.md.
+
+groups:
+  - name: clarizen-connector
+    rules:
+      # ── Circuit breakers / degraded mode ────────────────────────────────────
+      - alert: ClarizenBreakerOpen
+        expr: clarizen_connector_circuit_breaker_state{dependency="clarizen"} == 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Clarizen source breaker OPEN on {{ $labels.instance }}"
+          description: "Sustained Clarizen-side failures; crawl paused at a safe checkpoint, cursor not advanced. Auto-recovers on half-open probe."
+          runbook_url: "<REPO>/docs/RUNBOOKS.md#clarizen-breaker-open"
+
+      - alert: GraphBreakerOpen
+        expr: clarizen_connector_circuit_breaker_state{dependency="graph"} == 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Microsoft Graph breaker OPEN on {{ $labels.instance }}"
+          description: "Sustained Graph/token-endpoint 5xx or timeouts. Distinct runbook from the Clarizen-side breaker."
+          runbook_url: "<REPO>/docs/RUNBOOKS.md#graph-breaker-open"
+
+      - alert: ConnectorDegradedLong
+        expr: max by (instance) (clarizen_connector_circuit_breaker_state) == 2
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "Connector degraded for over an hour ({{ $labels.instance }})"
+          description: "/ready is 503 while any critical breaker is open. Escalation threshold per the runbook ladder."
+          runbook_url: "<REPO>/docs/RUNBOOKS.md#degraded-mode"
+
+      # ── Dead-letter ─────────────────────────────────────────────────────────
+      - alert: DeadLetterGrowth
+        expr: clarizen_connector_dead_letter_depth > 50
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dead-letter depth {{ $value }} on {{ $labels.instance }}"
+          description: "Failed items are accumulating. Bucket by error, fix the cause, then retry-failed --clear-on-success."
+          runbook_url: "<REPO>/docs/RUNBOOKS.md#dead-letter-growth"
+
+      - alert: DeadLetterSurge
+        expr: increase(clarizen_connector_items_failed_total[1h]) > 500
+        labels:
+          severity: critical
+        annotations:
+          summary: "Item-failure surge: {{ $value }} failures in 1h ({{ $labels.instance }})"
+          description: "A step change in failures usually means a schema mismatch or auth break, not data noise."
+          runbook_url: "<REPO>/docs/RUNBOOKS.md#dead-letter-growth"
+
+      # ── Throttling ──────────────────────────────────────────────────────────
+      - alert: Graph429Storm
+        expr: rate(clarizen_connector_throttled_429_total[15m]) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained Graph 429 throttling on {{ $labels.instance }}"
+          description: "Backoff + adaptive concurrency are already engaged; persistent storms need a concurrency/schedule change."
+          runbook_url: "<REPO>/docs/RUNBOOKS.md#429-storm"
+
+      # ── Webhooks ────────────────────────────────────────────────────────────
+      - alert: WebhookForgerySpike
+        expr: increase(clarizen_connector_webhook_events_rejected_total[10m]) > 20
+        labels:
+          severity: warning
+        annotations:
+          summary: "Webhook rejection spike on {{ $labels.instance }}"
+          description: "Bad-signature/oversize/malformed posts. Legitimate senders should never fail HMAC — suspect rotation mismatch or forgery."
+          runbook_url: "<REPO>/docs/RUNBOOKS.md#webhook-flood--401-spike"
+
+      - alert: WebhookReceiverDown
+        # Deploy this rule only on fleets where the receiver is configured
+        # (CLARIZEN_WEBHOOK_PORT set) — 0 is also the normal value when the
+        # feature is off. Polling remains the correctness backstop either way.
+        expr: clarizen_connector_webhook_receiver_up == 0
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "Webhook receiver not listening on {{ $labels.instance }}"
+          description: "Event-driven incremental is off; the polling cursor still reconciles. Check bind/URL-ACL logs."
+          runbook_url: "<REPO>/docs/RUNBOOKS.md#webhook-flood--401-spike"
+
+      # ── Crawl liveness / HA ─────────────────────────────────────────────────
+      - alert: CrawlStale
+        expr: (time() - max by (instance) (clarizen_connector_last_crawl_completed_timestamp_seconds)) > 129600
+        labels:
+          severity: critical
+        annotations:
+          summary: "No completed crawl in 36h ({{ $labels.instance }})"
+          description: "With a 24h full-crawl schedule this means crawls are failing, degraded, or wedged on a lease."
+          runbook_url: "<REPO>/docs/RUNBOOKS.md#lease-stuck"
+
+      - alert: HaLeaseStuck
+        expr: min by (instance) (clarizen_connector_ha_claims_held) > 0
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node {{ $labels.instance }} has held HA leases for 6h+"
+          description: "A lease held far longer than any object crawl should take — live-but-wedged worker."
+          runbook_url: "<REPO>/docs/RUNBOOKS.md#lease-stuck"
+
+      - alert: ConnectorProcessDown
+        expr: up{job="clarizen-connector"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Connector scrape target down ({{ $labels.instance }})"
+          description: "Process/host down or HEALTH_PORT unreachable. Service restart is safe — checkpoints resume."
+          runbook_url: "<REPO>/docs/RUNBOOKS.md#ha-failover"

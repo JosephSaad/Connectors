@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SeismicConnector.wxs — WiX v5 authoring for the EXPERIMENTAL MSI package.
+
+  Built by the `msi` job in .github/workflows/release.yml:
+
+    wix build packaging/msi/SeismicConnector.wxs -arch x64
+        -d PublishDir=publish/win-x64
+        -d RepoRoot=.
+        -d ProductVersion=<semver>
+        -o SeismicConnector-<semver>-win-x64.msi
+
+  What it installs (per-machine, Program Files):
+    * SeismicConnector.exe            single-file publish output
+    * config\*.json                   shipped schema / exclusions / classification
+    * env\.env.local.example          configuration template (operator copies to
+                                      .env.local + .env.local.user after install)
+    * scripts\install-windows-service.ps1  (Event Log source creation + service
+                                      maintenance outside MSI)
+    * LICENSE / NOTICE / README.md / SECURITY.md
+
+  The Windows service "SeismicConnector" is REGISTERED (start=auto) but NOT
+  started at install time — the connector cannot run before env\.env.local and
+  the secrets exist. First start is an explicit operator action after
+  configuration (docs/DEPLOYMENT_ENTERPRISE.md). SEISMIC_CONNECTOR_HOME is set
+  machine-wide so the service resolves config/env/logs/data under the install
+  folder. MajorUpgrade gives clean in-place upgrades keyed on UpgradeCode;
+  downgrades are refused.
+
+  The zip bundles remain the supported distribution until this MSI graduates.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Seismic Copilot Connector"
+           Manufacturer="Seismic Connector Project"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="3C3CA0E0-D132-47E1-BF71-609EC0010F5C"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <SummaryInformation Description="Seismic sales-enablement content connector for Microsoft 365 Copilot (Graph external connections)." />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Seismic Copilot Connector is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="SeismicConnector">
+        <Directory Id="ConfigFolder" Name="config" />
+        <Directory Id="EnvFolder" Name="env" />
+        <Directory Id="ScriptsFolder" Name="scripts" />
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="ConnectorComponents">
+      <Component Id="MainExecutable" Directory="INSTALLFOLDER">
+        <File Id="SeismicConnectorExe"
+              Source="$(var.PublishDir)/SeismicConnector.exe"
+              KeyPath="yes" />
+        <!-- Registered but never started by the installer: configuration
+             (env\.env.local + secrets) must exist first. -->
+        <ServiceInstall Id="ConnectorService"
+                        Name="SeismicConnector"
+                        DisplayName="Seismic Copilot Connector"
+                        Description="Ingests Seismic sales-enablement content into Microsoft 365 Copilot via the Graph external connections API."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Arguments="full-deployment --continuous --full-crawl-hours 24 --incremental-hours 4"
+                        Account="LocalSystem" />
+        <ServiceControl Id="ConnectorServiceControl"
+                        Name="SeismicConnector"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+        <!-- The connector resolves config/, env/, logs/, data/ against this. -->
+        <Environment Id="ConnectorHomeEnv"
+                     Name="SEISMIC_CONNECTOR_HOME"
+                     Value="[INSTALLFOLDER]"
+                     Action="set"
+                     System="yes"
+                     Permanent="no" />
+      </Component>
+
+      <Component Id="LicenseFiles" Directory="INSTALLFOLDER">
+        <File Id="LicenseFile" Source="$(var.RepoRoot)/LICENSE" KeyPath="yes" />
+        <File Id="NoticeFile" Source="$(var.RepoRoot)/NOTICE" />
+        <File Id="ReadmeFile" Source="$(var.RepoRoot)/README.md" />
+        <File Id="SecurityFile" Source="$(var.RepoRoot)/SECURITY.md" />
+        <File Id="ChangelogFile" Source="$(var.RepoRoot)/CHANGELOG.md" />
+      </Component>
+
+      <Component Id="ConfigFiles" Directory="ConfigFolder">
+        <File Id="SchemaJson" Source="$(var.RepoRoot)/config/schema.json" KeyPath="yes" />
+        <File Id="GraphSchemaJson" Source="$(var.RepoRoot)/config/graph-schema.json" />
+        <File Id="ExclusionsJson" Source="$(var.RepoRoot)/config/exclusions.json" />
+        <File Id="ClassificationJson" Source="$(var.RepoRoot)/config/classification.json" />
+      </Component>
+
+      <Component Id="EnvTemplate" Directory="EnvFolder">
+        <File Id="EnvExample" Source="$(var.RepoRoot)/env/.env.local.example" KeyPath="yes" />
+      </Component>
+
+      <Component Id="ServiceScripts" Directory="ScriptsFolder">
+        <!-- Creates the "SeismicConnector" Event Log source idempotently and
+             covers service maintenance outside MSI. -->
+        <File Id="InstallServicePs1"
+              Source="$(var.RepoRoot)/scripts/install-windows-service.ps1"
+              KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Connector" Title="Seismic Copilot Connector" Level="1">
+      <ComponentGroupRef Id="ConnectorComponents" />
+    </Feature>
+  </Package>
+</Wix>

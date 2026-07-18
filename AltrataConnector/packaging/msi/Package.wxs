@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Altrata Copilot Connector, MSI authoring (WiX v5). EXPERIMENTAL: the MSI is
+  built by the release workflow's `msi` job (continue-on-error) and is NOT yet
+  the supported install path; scripts/install-windows-service.ps1 over the
+  zip bundle remains canonical. Structure is validated offline by
+  MsiPackagingTests (well-formed XML, service authoring, version drift guard).
+
+  Build (CI does this; requires the published win-x64 single-file output, see
+  .github/workflows/release.yml `msi` job for the exact publish flags):
+      wix build packaging/msi/Package.wxs
+          -d PublishDir=publish/win-x64 -d RepoRoot=.
+          -arch x64 -o dist/AltrataConnector-1.0.0.msi
+
+  Notes (XML comments cannot contain double hyphens, so CLI flags here are
+  spelled with a single dash; the workflow has the literal commands):
+    * Version below MUST match <Version> in AltrataConnector.csproj; a unit
+      test fails the build on drift. Bump csproj + this file + CHANGELOG.md
+      together.
+    * UpgradeCode is the product's PERMANENT identity. Never change it, or
+      upgrades stop replacing older installs (MajorUpgrade relies on it).
+    * The service is installed but NOT started: config\ and env\ must be
+      completed first (seats.json, .env.local, .env.local.user). Operators run
+      `Start-Service AltrataConnector` after a strict validate-config passes
+      (docs/DEPLOYMENT_ENTERPRISE.md).
+    * ALTRATA_CONNECTOR_HOME is not needed: the service host falls back to the
+      executable's own directory, which is exactly where this MSI lays files.
+    * The event source for EVENTLOG_ENABLED is registered by the install
+      script; when deploying by MSI alone, create it once per host:
+      New-EventLog -LogName Application -Source AltrataConnector
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Altrata Copilot Connector"
+           Manufacturer="Clouds Connected Ltd"
+           Version="1.0.0"
+           UpgradeCode="7f6e1a2b-9c4d-4e8f-b1a3-5d2c8e7f4a91"
+           Language="1033"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of the Altrata Copilot Connector is already installed."
+                  Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="AltrataConnector">
+        <Directory Id="ConfigFolder" Name="config" />
+        <Directory Id="EnvFolder" Name="env" />
+        <Directory Id="ScriptsFolder" Name="scripts" />
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="ConnectorComponents">
+
+      <Component Id="MainExecutable" Directory="INSTALLFOLDER">
+        <File Id="AltrataConnectorExe" Source="$(PublishDir)\AltrataConnector.exe" KeyPath="yes" />
+        <!-- Continuous crawl service. Account: LocalSystem by default —
+             enterprises repoint to a gMSA post-install (sc.exe config / DSC),
+             see docs/DEPLOYMENT_ENTERPRISE.md "Service account". -->
+        <ServiceInstall Id="ConnectorService"
+                        Name="AltrataConnector"
+                        DisplayName="Altrata Copilot Connector"
+                        Description="Microsoft 365 Copilot custom connector for Altrata relationship and wealth intelligence (licensed seats only)."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Arguments="full-deployment --continuous --full-crawl-hours 24 --incremental-hours 4"
+                        Vital="yes" />
+        <!-- Never Start="install": config must be completed first. Stop and
+             remove on uninstall; SCM stop is graceful (chunk-boundary flush). -->
+        <ServiceControl Id="ConnectorServiceControl"
+                        Name="AltrataConnector"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+      </Component>
+
+      <Component Id="ConfigSchema" Directory="ConfigFolder">
+        <File Id="ConfigSchemaJson" Source="$(RepoRoot)\config\schema.json" KeyPath="yes" />
+      </Component>
+      <Component Id="ConfigGraphSchema" Directory="ConfigFolder">
+        <File Id="ConfigGraphSchemaJson" Source="$(RepoRoot)\config\graph-schema.json" KeyPath="yes" />
+      </Component>
+      <Component Id="ConfigSeatsExample" Directory="ConfigFolder">
+        <File Id="ConfigSeatsJson" Source="$(RepoRoot)\config\seats.json" KeyPath="yes" />
+      </Component>
+      <Component Id="EnvExample" Directory="EnvFolder">
+        <File Id="EnvLocalExample" Source="$(RepoRoot)\env\.env.local.example" KeyPath="yes" />
+      </Component>
+      <Component Id="InstallScript" Directory="ScriptsFolder">
+        <File Id="InstallServicePs1" Source="$(RepoRoot)\scripts\install-windows-service.ps1" KeyPath="yes" />
+      </Component>
+
+    </ComponentGroup>
+
+    <Feature Id="Connector" Title="Altrata Copilot Connector" Level="1">
+      <ComponentGroupRef Id="ConnectorComponents" />
+    </Feature>
+
+  </Package>
+</Wix>

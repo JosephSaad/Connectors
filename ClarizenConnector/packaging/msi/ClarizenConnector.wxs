@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  packaging/msi/ClarizenConnector.wxs  (WiX v5, EXPERIMENTAL)
+  ===========================================================
+  MSI for SCCM/Intune/GPO rollout of the Clarizen Copilot Connector as a
+  Windows service (docs/DEPLOYMENT_ENTERPRISE.md). Built by the release
+  workflow's windows runner (see .github/workflows/release.yml "msi" job):
+  publish the self-contained single-file win-x64 exe, install the wix .NET
+  tool, then:
+
+      wix build packaging/msi/ClarizenConnector.wxs
+        -d PublishDir=publish/win-x64 -d ProjectRoot=.
+        -arch x64 -o ClarizenConnector.msi
+
+  Notes
+  * EXPERIMENTAL: the zip bundle + install-windows-service.ps1 remain the
+    canonical install path; the MSI is validated in CI (XML well-formedness on
+    every runner, wix build on the windows release runner) but is not yet the
+    supported channel.
+  * The service is INSTALLED but NOT STARTED: env\.env.local(.user) must be
+    populated first (secrets are never shipped in the MSI). Start-Service
+    ClarizenConnector once configured (docs/DEPLOYMENT_ENTERPRISE.md).
+  * Event source: the EventLogSource registry component registers the
+    "ClarizenConnector" source in the Application log at install time (same
+    effect as the idempotent New-EventLog block in
+    scripts/install-windows-service.ps1), so EVENTLOG_ENABLED=true works
+    without a separate elevated step. docs/SIEM.md documents the event ids.
+  * CLARIZEN_CONNECTOR_HOME is set machine-wide to the install folder so the
+    service resolves config\, env\, logs\ and data\ there.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Clarizen Copilot Connector"
+           Manufacturer="Clouds Connected Ltd"
+           Version="1.0.0"
+           UpgradeCode="C0A9C80D-962D-4FB1-84A0-5ABD85930546"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of the Clarizen Copilot Connector is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="ClarizenConnector">
+        <Directory Id="ConfigFolder" Name="config" />
+        <Directory Id="EnvFolder" Name="env" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Connector" Title="Clarizen Copilot Connector" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="EventLogSource" />
+      <ComponentRef Id="ConnectorHomeEnvironment" />
+      <ComponentGroupRef Id="ConfigFiles" />
+    </Feature>
+
+    <Component Id="MainExecutable" Directory="INSTALLFOLDER" Guid="56293B4E-D26B-4A92-B520-8AD59570B2A2">
+      <File Id="ClarizenConnectorExe" Source="$(var.PublishDir)\ClarizenConnector.exe" KeyPath="yes" />
+      <!-- Installed, auto-start on boot, NOT started by the installer: the
+           operator must lay down env\.env.local(.user) first. -->
+      <ServiceInstall Id="ClarizenConnectorService"
+                      Name="ClarizenConnector"
+                      DisplayName="Clarizen Copilot Connector"
+                      Description="Ingests Clarizen (Planview AdaptiveWork) work items into Microsoft 365 Copilot / Microsoft Search."
+                      Type="ownProcess"
+                      Start="auto"
+                      ErrorControl="normal"
+                      Account="LocalSystem"
+                      Arguments="full-deployment --continuous --full-crawl-hours 24 --incremental-hours 4" />
+      <ServiceControl Id="ClarizenConnectorServiceControl"
+                      Name="ClarizenConnector"
+                      Stop="both"
+                      Remove="uninstall"
+                      Wait="yes" />
+    </Component>
+
+    <!-- Windows Event Log source registration (EVENTLOG_ENABLED, docs/SIEM.md). -->
+    <Component Id="EventLogSource" Directory="INSTALLFOLDER" Guid="C36B8EEB-67F2-4147-B3AC-E45AE26A45B1">
+      <RegistryKey Root="HKLM"
+                   Key="SYSTEM\CurrentControlSet\Services\EventLog\Application\ClarizenConnector">
+        <RegistryValue Name="EventMessageFile" Type="expandable"
+                       Value="%SystemRoot%\Microsoft.NET\Framework64\v4.0.30319\EventLogMessages.dll" />
+        <RegistryValue Name="TypesSupported" Type="integer" Value="7" KeyPath="yes" />
+      </RegistryKey>
+    </Component>
+
+    <!-- config\, env\, logs\, data\ resolve against the install dir. -->
+    <Component Id="ConnectorHomeEnvironment" Directory="INSTALLFOLDER" Guid="7F8EEBCE-6D77-4128-AEFA-E9D47A29A9B5">
+      <RegistryValue Root="HKLM" Key="SOFTWARE\CloudsConnected\ClarizenConnector"
+                     Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+      <Environment Id="ConnectorHome" Name="CLARIZEN_CONNECTOR_HOME"
+                   Value="[INSTALLFOLDER]" Permanent="no" System="yes" Action="set" Part="all" />
+    </Component>
+
+    <ComponentGroup Id="ConfigFiles">
+      <Component Id="SchemaJson" Directory="ConfigFolder" Guid="4FE13AFA-4E65-4A79-96F9-644A41C497A2">
+        <File Id="SchemaJsonFile" Source="$(var.ProjectRoot)\config\schema.json" KeyPath="yes" />
+        <File Id="GraphSchemaJsonFile" Source="$(var.ProjectRoot)\config\graph-schema.json" />
+        <File Id="ClassificationJsonFile" Source="$(var.ProjectRoot)\config\classification.json" />
+      </Component>
+      <Component Id="EnvExample" Directory="EnvFolder" Guid="A6067C9F-DBCD-4B2D-B5C2-09A9BF4E3A87">
+        <!-- Template only — real env files (and secrets) are never packaged. -->
+        <File Id="EnvLocalExample" Source="$(var.ProjectRoot)\env\.env.local.example" Name="env.local.example" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Package>
+</Wix>

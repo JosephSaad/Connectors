@@ -47,11 +47,19 @@ CREATE TABLE dbo.altrata_deadletter (
     op            NVARCHAR(16)   NOT NULL CONSTRAINT df_altrata_dl_op DEFAULT N'upsert',
     payload_json  NVARCHAR(MAX)  NOT NULL,
     failed_utc    DATETIME2      NOT NULL,
-    attempts      INT            NOT NULL
+    attempts      INT            NOT NULL,
+    redacted        BIT           NOT NULL CONSTRAINT df_altrata_dl_redacted DEFAULT 0,
+    subject_ids     NVARCHAR(MAX) NOT NULL CONSTRAINT df_altrata_dl_subject_ids DEFAULT N'[]',
+    subject_hashes  NVARCHAR(MAX) NOT NULL CONSTRAINT df_altrata_dl_subject_hashes DEFAULT N'[]'
 );
 IF COL_LENGTH(N'dbo.altrata_deadletter', N'op') IS NULL
     ALTER TABLE dbo.altrata_deadletter
         ADD op NVARCHAR(16) NOT NULL CONSTRAINT df_altrata_dl_op_mig DEFAULT N'upsert';
+IF COL_LENGTH(N'dbo.altrata_deadletter', N'redacted') IS NULL
+    ALTER TABLE dbo.altrata_deadletter
+        ADD redacted       BIT           NOT NULL CONSTRAINT df_altrata_dl_redacted_mig DEFAULT 0,
+            subject_ids    NVARCHAR(MAX) NOT NULL CONSTRAINT df_altrata_dl_subject_ids_mig DEFAULT N'[]',
+            subject_hashes NVARCHAR(MAX) NOT NULL CONSTRAINT df_altrata_dl_subject_hashes_mig DEFAULT N'[]';
 IF OBJECT_ID(N'dbo.altrata_kv', N'U') IS NULL
 CREATE TABLE dbo.altrata_kv (
     connector_id  NVARCHAR(64)  NOT NULL,

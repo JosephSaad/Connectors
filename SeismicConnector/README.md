@@ -302,6 +302,24 @@ counters. Enabled by default and inert on the happy path;
 `CIRCUIT_BREAKER=false` is a passthrough escape hatch. See
 `docs/RESILIENCE.md`.
 
+## Enterprise operations
+
+The enterprise hardening pack — Windows Event Log mirroring
+(`EVENTLOG_ENABLED`), proxy/TLS-inspection support (`PROXY_URL`,
+`CA_BUNDLE_PATH`), Graph certificate credentials (`GRAPH_CLIENT_CERT_*`),
+dead-letter payload redaction (`DEADLETTER_PAYLOAD_MODE`), signed + SBOM'd
+releases, and the `ops/` dashboard/alert pack — is documented operator-first:
+
+* [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) — STRIDE per trust boundary, mitigations vs. residuals, FIPS audit result
+* [docs/RUNBOOKS.md](docs/RUNBOOKS.md) — symptom → diagnose → remediate → escalate, per failure mode
+* [docs/DR.md](docs/DR.md) — RPO/RTO, backup/restore, upgrade/rollback, schema versioning
+* [docs/SIEM.md](docs/SIEM.md) — Event Log ids, Sentinel KQL + Splunk detections, index fields
+* [docs/DEPLOYMENT_ENTERPRISE.md](docs/DEPLOYMENT_ENTERPRISE.md) — SCCM/Intune, GPO/DSC, proxy/TLS inspection, FIPS, least-privilege service account
+* [SECURITY.md](SECURITY.md) — supported versions, credential rotation runbooks, vulnerability reporting, data-at-rest inventory
+
+Grafana dashboard and Prometheus / Azure Monitor alert rules (wired to the
+runbook anchors) live in [`ops/`](ops/).
+
 ## Tests
 
 ```bash
@@ -309,7 +327,7 @@ dotnet build
 dotnet test
 ```
 
-430 xUnit tests, all offline (mock `HttpMessageHandler`, temp SQLite/state
+474 xUnit tests, all offline (mock `HttpMessageHandler`, temp SQLite/state
 dirs): CLI parsing, checkpoint resume, dead-letter write/retry and integrity
 under concurrent writers, the Retry-After + jitter contract, the $batch
 429/503 retry ladder and adaptive concurrency, sovereign-cloud endpoint

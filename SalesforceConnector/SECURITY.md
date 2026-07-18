@@ -1,0 +1,122 @@
+# Security Policy
+
+Security posture, credential rotation, reporting, and the data-at-rest
+inventory for the Salesforce Copilot Connector. Deeper analysis:
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md); hardened deployment:
+[docs/DEPLOYMENT_ENTERPRISE.md](docs/DEPLOYMENT_ENTERPRISE.md).
+
+## Supported versions
+
+| Version | Supported |
+|---|---|
+| 1.x (latest release) | Yes — security fixes ship as the next 1.x patch release |
+| 1.x (older patches) | Upgrade to latest 1.x; fixes are not backported within 1.x |
+| pre-1.0 builds | No |
+
+State schema is additive within 1.x ([docs/DR.md](docs/DR.md)), so upgrading to
+the latest patch is a binary swap + service restart — there is no technical
+reason to stay behind.
+
+## Secret rotation runbook
+
+Four credentials exist. All rotations below are **zero-downtime**: the
+connector reads credentials at token-request time (crawl start / token
+refresh), so the pattern is always *add new → point config at new → restart
+service (graceful, resumes from checkpoint) → retire old*. A restart takes
+seconds; a running crawl checkpoints and resumes.
+
+### 1. Entra client secret (`SECRET_AAD_APP_CLIENT_SECRET`)
+
+1. App registration → Certificates & secrets → **add** a second secret (old one
+   stays valid).
+2. Update the value: `env/.env.local.user` on each node, or the Key Vault
+   secret (`secret-aad-app-client-secret`) once — see Key Vault flow below.
+3. Restart the service per node (`Restart-Service SalesforceCopilotConnector`).
+4. Verify: `validate-config --strict`; startup log shows
+   `Graph auth mode: default credential chain`.
+5. **Delete the old secret** in Entra after all nodes restart. Calendar the
+   expiry of the new one.
+
+### 2. Graph certificate credential (`GRAPH_CLIENT_CERT_PATH` / `GRAPH_CLIENT_CERT_THUMBPRINT`)
+
+Certificate mode wins over the secret when both are set — which also gives the
+rotation escape hatch: a still-valid client secret keeps working if a cert
+rotation goes sideways (unset the cert vars to fall back).
+
+1. Generate/obtain the new certificate (keep the key non-exportable in the
+   machine store where possible).
+2. App registration → Certificates & secrets → **upload the new public key**
+   (both certs now registered).
+3. Per node: import to `LocalMachine\My`, grant the service account private-key
+   read (certlm → Manage private keys), then update
+   `GRAPH_CLIENT_CERT_THUMBPRINT` to the new thumbprint (or replace the PFX at
+   `GRAPH_CLIENT_CERT_PATH` + `GRAPH_CLIENT_CERT_PASSWORD`).
+4. Restart the service. Verify the startup line:
+   `Graph auth mode: client certificate (… expires YYYY-MM-DD)` shows the new
+   date. Key material is never logged.
+5. Remove the old certificate from Entra and the node stores.
+
+### 3. Salesforce Connected App consumer secret (`SECRET_SALESFORCE_CLIENT_SECRET`)
+
+Salesforce regenerates in place (no dual-secret window): rotate off-peak.
+
+1. Connected App → Manage Consumer Details → **Generate** new secret (old one
+   dies immediately).
+2. Update env file / Key Vault (`secret-salesforce-client-secret`) right away.
+3. Restart the service. A crawl that raced the rotation fails one token call
+   and the next cycle recovers; items are never lost (checkpoint + dead-letter).
+
+### 4. Key Vault rotation flow (`USE_KEY_VAULT=true`)
+
+With Key Vault, steps "update every node" collapse to one write:
+
+1. Add the new credential at the provider (Entra dual-secret / cert upload).
+2. `az keyvault secret set --vault-name <vault> --name secret-aad-app-client-secret --value <new>`
+   — new **version** of the same secret; the connector always reads latest.
+3. Restart services (they cache resolved secrets for the process lifetime).
+4. Retire the old provider-side credential.
+5. Vault hygiene: the connector's identity needs `get` only; rotation
+   automation needs `set`; nobody needs `purge`.
+
+Also rotate on: staff departure with vault/env access, any node compromise,
+`SIGNING_*` CI secrets on repository-access changes (see
+`.github/workflows/release.yml` — signing is skipped, never failed, while
+absent).
+
+## Vulnerability reporting
+
+- **Do not open a public GitHub issue for vulnerabilities.**
+- Use GitHub **private vulnerability reporting** (Security → Report a
+  vulnerability) on the repository, or email the maintainer listed in the
+  repo profile with `[SECURITY]` in the subject.
+- Include: version (`SalesforceCopilotConnector --help` header / file
+  version), deployment mode (files vs SQL, HA, service), reproduction, and
+  impact. Expect acknowledgement within 72 hours; fixes ship as a patch
+  release with a `CHANGELOG.md` **Security** entry (no embargoed details until
+  the fix is out).
+- Upstream code inherited from Microsoft's Python original: report here first;
+  we coordinate upstream if it applies there too.
+- Dependency CVEs: Dependabot + CodeQL run on the repo; the release SBOM
+  (`sbom.cdx.json`, CycloneDX) is attached to every release for your own
+  scanners.
+
+## Data-at-rest inventory
+
+What the connector persists, what's inside, and how to protect it. Paths are
+under `SFCONNECTOR_HOME` (service) / the working directory; on the SQL backend
+the same state lives in the `SalesforceConnector` database instead.
+
+| Store | Contents | Sensitivity | Protection options |
+|---|---|---|---|
+| `data/{id}_identity.db` (SQLite) / SQL identity tables | Salesforce user/group/role/territory → Entra id mappings, emails/UPNs, group memberships, field cache | Directory data (PII: emails), **no CRM record content** | File ACLs (`logs`/`data` M for service account only — [DEPLOYMENT_ENTERPRISE.md](docs/DEPLOYMENT_ENTERPRISE.md) §5), BitLocker/volume encryption; SQL: TDE + least-privilege login |
+| `data/{id}_inventory.db` / `dbo.ItemInventory` | Ingested item **ids** per object type | Low (ids only) | Same as above |
+| `logs/failed_records_{id}.jsonl` / `dbo.DeadLetter` | Failed item ids, object type, error text, timestamps — **plus full Graph request/response payloads (CRM field values) in the default `DEADLETTER_PAYLOAD_MODE=full`** | **High in full mode** (customer CRM data at rest); low in `redacted` mode (sha256 hashes + field names only, note embedded in each record) | Set `DEADLETTER_PAYLOAD_MODE=redacted` where CRM data is sensitive; file ACLs; `LOG_RETENTION_DAYS` does **not** prune this file (state, not logs) — drain it with `retry-failed --clear-on-success` |
+| `logs/checkpoint_{id}.json`, `logs/sync_state.json` | Chunk positions, sync timestamps | None | File ACLs |
+| `logs/{prefix}_{ts}/*.log` (+ summaries) | Operational logs: ids, counts, errors, URLs; record field **names**; single-item debug modes (`ingest-item`, `DEBUG_ITEM_ID`) log one full record on purpose | Medium (low if debug modes unused) | File ACLs, `LOG_RETENTION_DAYS=N` pruning, ship-and-delete via your collector ([docs/SIEM.md](docs/SIEM.md)) |
+| `env/.env.local.user` | Client secrets | **Critical** | Prefer Key Vault (`USE_KEY_VAULT=true`) so the file doesn't exist; else ACL to the service account read-only |
+| `config/*.json` | Object/field selection, schema | Low (reveals what you index) | Standard file ACLs |
+
+Not persisted anywhere: access tokens (memory only), client-assertion JWTs
+(built per token request, 10-minute lifetime), Key Vault values (resolved into
+process memory), certificate private keys (stay in the OS store / PFX you
+supplied).

@@ -516,6 +516,7 @@ public static class CommandRegistry
             var totalRecords = 0;
             var totalUnreplayable = 0;
             var totalRetired = 0;
+            var totalDroppedErased = 0;
             foreach (var (rt, _, label) in targets)
             {
                 var result = await RetryFailedCoreAsync(rt, clearOnSuccess, retireUnreplayable, label);
@@ -524,6 +525,7 @@ public static class CommandRegistry
                 totalRemaining += result.Remaining;
                 totalUnreplayable += result.Unreplayable;
                 totalRetired += result.Retired;
+                totalDroppedErased += result.DroppedErased;
             }
 
             if (totalRecords == 0)
@@ -531,6 +533,7 @@ public static class CommandRegistry
             else
                 Console.WriteLine($"TOTAL: {totalReplayed} replayed, {totalRemaining} still failing" +
                                   (totalRetired > 0 ? $", {totalRetired} retired" : "") +
+                                  (totalDroppedErased > 0 ? $", {totalDroppedErased} dropped (erased subject)" : "") +
                                   (totalUnreplayable > 0 ? $", {totalUnreplayable} un-replayable kept" : "") + ".");
             if (totalUnreplayable > 0)
                 Console.WriteLine("Un-replayable entries are transform failures (no item payload exists). " +
@@ -553,31 +556,59 @@ public static class CommandRegistry
     }
 
     private readonly record struct RetryFailedResult(
-        int Records, int Replayed, int Remaining, int Unreplayable, int Retired);
+        int Records, int Replayed, int Remaining, int Unreplayable, int Retired, int DroppedErased);
 
     /// <summary>Replay one state store's queue against its own Graph connection.
     /// Upsert ops re-PUT the captured item under an ACL REBUILT from the
     /// CURRENT seats (never the ACL captured at dead-letter time — a seat
     /// removed since then must not be re-granted) and record the hash of the
-    /// ACL actually sent; delete ops re-issue the idempotent DELETE (delta
-    /// tombstones). Un-replayable entries (transform failures) are kept and
-    /// reported, or dropped when <paramref name="retireUnreplayable"/>.</summary>
+    /// ACL actually sent; REDACTED upserts (DEADLETTER_PAYLOAD_MODE=redacted —
+    /// this connector's default) carry no payload and are re-fetched from the
+    /// feed delivery (checksum-verified) and re-transformed; delete ops
+    /// re-issue the idempotent DELETE (delta tombstones, erasure completions).
+    /// DSAR suppression guard: an upsert whose subject was ERASED since it was
+    /// queued is DROPPED, never replayed — replaying it would resurrect an
+    /// erased subject; delete ops are exempt (they COMPLETE erasures).
+    /// Un-replayable entries (transform failures) are kept and reported, or
+    /// dropped when <paramref name="retireUnreplayable"/>.</summary>
     private static async Task<RetryFailedResult> RetryFailedCoreAsync(
         Runtime runtime, bool clearOnSuccess, bool retireUnreplayable, string label)
     {
         var records = runtime.State.ReadDeadLetters();
         if (records.Count == 0)
-            return new RetryFailedResult(0, 0, 0, 0, 0);
+            return new RetryFailedResult(0, 0, 0, 0, 0, 0);
 
         Console.WriteLine($"[{label}] Replaying {records.Count} dead-lettered record(s)...");
         var remaining = new List<DeadLetterRecord>();
         var unreplayable = new List<DeadLetterRecord>();
         var replayed = 0;
         var retired = 0;
+        var droppedErased = 0;
         // Entitlement rebuilt lazily ONCE per queue from the CURRENT seat list.
         // BuildAcl fails closed on an empty seat list, keeping the record queued.
         IReadOnlyList<AclEntry>? currentAcl = null;
         string? currentSeatHash = null;
+        // Suppression sets built lazily ONCE per queue: raw ids (full-mode
+        // records) and short hashes (redacted records carry hashes only).
+        HashSet<string>? suppressedIds = null;
+        HashSet<string>? suppressedHashes = null;
+        void EnsureSuppressionSets()
+        {
+            if (suppressedIds != null)
+                return;
+            var list = runtime.State.ListSuppressedSubjects();
+            suppressedIds = new HashSet<string>(list, StringComparer.Ordinal);
+            suppressedHashes = list.Select(DeadLetterPolicy.HashSubject)
+                .ToHashSet(StringComparer.Ordinal);
+        }
+        bool ConcernsErasedSubject(DeadLetterRecord r)
+        {
+            if (r.SubjectIds.Count == 0 && r.SubjectHashes.Count == 0)
+                return false;
+            EnsureSuppressionSets();
+            return r.SubjectIds.Any(suppressedIds!.Contains)
+                   || r.SubjectHashes.Any(suppressedHashes!.Contains);
+        }
         foreach (var record in records)
         {
             if (!record.IsReplayable)
@@ -599,6 +630,16 @@ public static class CommandRegistry
                 remaining.Add(record);
                 continue;
             }
+            // DSAR suppression guard: never re-PUT an erased subject. The
+            // record is DROPPED (suppression wins, exactly like the crawl-time
+            // guard); the id-only log line is the audit breadcrumb.
+            if (record.Op != DeadLetterOps.Delete && ConcernsErasedSubject(record))
+            {
+                droppedErased++;
+                Logger.Warning($"[{label}] Dead-letter {record.ItemId} concerns an erased " +
+                               "(suppressed) subject — dropped, not replayed (suppression wins).");
+                continue;
+            }
             try
             {
                 if (record.Op == DeadLetterOps.Delete)
@@ -610,22 +651,50 @@ public static class CommandRegistry
                     continue;
                 }
 
-                var item = JsonSerializer.Deserialize<ExternalItem>(record.PayloadJson)
-                           ?? throw new InvalidOperationException("payload unreadable");
                 if (currentAcl == null)
                 {
                     var seats = runtime.Identity.GetSeats();
                     currentAcl = SeatAclBuilder.BuildAcl(seats);   // throws when seats empty — fail closed
                     currentSeatHash = SeatAclBuilder.ComputeSeatHash(seats);
                 }
-                // Replace the STALE captured ACL with the freshly built one and
-                // record the matching hash, so the re-ACL reconciliation
-                // (ListItemsWithAclHashOtherThan) stays truthful for this item.
-                item = item with { Acl = currentAcl };
+
+                ExternalItem item;
+                IReadOnlyList<string> subjectsForIndex;
+                if (record.Redacted && record.PayloadJson.Length == 0)
+                {
+                    // Redacted-mode replay: the queue never held the profile —
+                    // re-fetch the record from the (checksum-verified) feed
+                    // delivery and re-transform under the CURRENT ACL.
+                    (item, subjectsForIndex) = RefetchDeadLetterItem(runtime, record, currentAcl);
+                    // Re-check suppression against the ACTUAL subject ids from
+                    // the feed record (covers records queued without hashes).
+                    EnsureSuppressionSets();
+                    if (subjectsForIndex.Any(suppressedIds!.Contains))
+                    {
+                        droppedErased++;
+                        Logger.Warning($"[{label}] Dead-letter {record.ItemId} re-fetched to an erased " +
+                                       "(suppressed) subject — dropped, not replayed (suppression wins).");
+                        continue;
+                    }
+                }
+                else
+                {
+                    var payload = JsonSerializer.Deserialize<ExternalItem>(record.PayloadJson)
+                                  ?? throw new InvalidOperationException("payload unreadable");
+                    // Replace the STALE captured ACL with the freshly built one and
+                    // record the matching hash, so the re-ACL reconciliation
+                    // (ListItemsWithAclHashOtherThan) stays truthful for this item.
+                    item = payload with { Acl = currentAcl };
+                    subjectsForIndex = record.SubjectIds;
+                }
                 SeatAclBuilder.AssertNeverEveryone(item.Acl);
                 await runtime.Graph.PutItemAsync(item, ServiceStop.Token);
                 runtime.Identity.RecordIngestedItem(new Identity.IngestedItem(
                     item.Id, record.Dataset, currentSeatHash!, DateTime.UtcNow));
+                // Erasure reverse index: a replayed item must be withdrawable by
+                // forget-subject exactly like a first-pass ingest.
+                if (subjectsForIndex.Count > 0)
+                    runtime.Identity.RecordItemSubjects(item.Id, subjectsForIndex.ToList());
                 replayed++;
                 Metrics.Increment("altrata_items_ingested_total");
             }
@@ -652,9 +721,77 @@ public static class CommandRegistry
             runtime.State.ReplaceDeadLetters(keep);
             Console.WriteLine($"[{label}] {replayed} replayed, {remaining.Count} still failing" +
                               (retired > 0 ? $", {retired} retired" : "") +
+                              (droppedErased > 0 ? $", {droppedErased} dropped (erased subject)" : "") +
                               (unreplayable.Count > 0 ? $", {unreplayable.Count} un-replayable kept" : "") + ".");
         }
-        return new RetryFailedResult(records.Count, replayed, remaining.Count, unreplayable.Count, retired);
+        return new RetryFailedResult(records.Count, replayed, remaining.Count, unreplayable.Count,
+            retired, droppedErased);
+    }
+
+    /// <summary>
+    /// Redacted-mode replay source: locate the record's delivery under
+    /// FEED_PATH, read its dataset file(s) with the manifest checksum verified
+    /// on the same open handle, find the record whose item id matches, and
+    /// re-transform it under the given (CURRENT) ACL. Throws with an
+    /// actionable message when the delivery/record is gone — the record then
+    /// stays queued (fix: re-deliver the feed drop, or re-ingest from source).
+    /// NOTE the retention interplay: RETENTION_MODE=delete can remove the
+    /// delivery before the queue drains (docs/RUNBOOKS.md "Dead-letter growth").
+    /// </summary>
+    internal static (ExternalItem Item, IReadOnlyList<string> SubjectIds) RefetchDeadLetterItem(
+        Runtime runtime, DeadLetterRecord record, IReadOnlyList<AclEntry> acl)
+    {
+        var feedPath = runtime.Config.FeedPath
+            ?? throw new InvalidOperationException(
+                "FEED_PATH is not set — cannot re-fetch a redacted dead-letter payload from the feed");
+        var delivery = FeedReader.DiscoverDeliveries(feedPath)
+                           .FirstOrDefault(d => string.Equals(d.Id, record.DeliveryId, StringComparison.Ordinal))
+                       ?? throw new InvalidOperationException(
+                           $"delivery '{record.DeliveryId}' is no longer under FEED_PATH " +
+                           "(archived/removed by retention?) — restore the delivery or re-ingest from source");
+
+        var transformer = BuildRetryTransformer(runtime);
+        foreach (var file in delivery.Manifest.Files)
+        {
+            if (!string.Equals(Datasets.Canonical(file.Dataset), record.Dataset, StringComparison.Ordinal))
+                continue;
+            var records = FeedReader.ReadRecords(
+                Path.Combine(delivery.Directory, file.Name), record.Dataset, file.Sha256);
+            foreach (var feedRecord in records)
+            {
+                if (feedRecord.IsTombstone || feedRecord.Id == null)
+                    continue;
+                if (!string.Equals(ItemTransformer.BuildItemId(record.Dataset, feedRecord.Id),
+                        record.ItemId, StringComparison.Ordinal))
+                    continue;
+                return (transformer.Transform(feedRecord, acl), ItemTransformer.SubjectIds(feedRecord));
+            }
+        }
+        throw new InvalidOperationException(
+            $"record for item '{record.ItemId}' not found in delivery '{record.DeliveryId}' " +
+            $"({record.Dataset}) — the delivery content changed; re-ingest from source");
+    }
+
+    /// <summary>Transformer for redacted-mode replays: entity resolution +
+    /// classification exactly like the crawl; the relationship-path join is
+    /// intentionally skipped (rebuilding the index for one item is unbounded
+    /// work — the next full crawl re-materializes path properties idempotently).</summary>
+    private static ItemTransformer BuildRetryTransformer(Runtime runtime)
+    {
+        var fuzzy = new Identity.FuzzyOptions
+        {
+            Enabled = runtime.Config.EntityFuzzyMatching,
+            Threshold = runtime.Config.EntityMatchThreshold,
+            ReviewFloor = runtime.Config.EntityReviewFloor,
+            Review = new Identity.MatchReviewQueue(runtime.Config.ConnectorId),
+        };
+        return new ItemTransformer(
+            new Identity.EntityResolver(runtime.Identity, fuzzy),
+            classification: new ClassificationOptions
+            {
+                Enabled = runtime.Config.Classification,
+                Residency = runtime.Config.DataResidency,
+            });
     }
 
     // ---- identity-dry-run -------------------------------------------------------------------
@@ -951,6 +1088,45 @@ public static class CommandRegistry
                     rt.State.AddSuppressedSubject(id);
             }
 
+            // Dead-letter scrub: queued UPSERT/TRANSFORM records for the erased
+            // subject are dropped from every target's queue. In FULL payload
+            // mode those records hold the subject's whole profile AT REST — an
+            // erasure that left them behind would be incomplete; in redacted
+            // mode this only prunes noise. Queued DELETE records are KEPT (they
+            // COMPLETE erasures/tombstones). retry-failed has a matching guard
+            // for records this scrub cannot identify (queued pre-1.0, before
+            // subject stamping) once they are re-fetched.
+            var erasedHashes = subjectIds.Select(State.DeadLetterPolicy.HashSubject)
+                .ToHashSet(StringComparer.Ordinal);
+            var scrubbed = 0;
+            foreach (var (rt, label, _) in perTarget)
+            {
+                var queue = rt.State.ReadDeadLetters();
+                var keep = new List<DeadLetterRecord>(queue.Count);
+                var scrubbedHere = 0;
+                foreach (var queued in queue)
+                {
+                    var concernsSubject = queued.SubjectHashes.Any(erasedHashes.Contains)
+                                          || queued.SubjectIds.Any(subjectIds.Contains);
+                    if (concernsSubject && queued.Op != DeadLetterOps.Delete)
+                    {
+                        scrubbedHere++;
+                        continue;
+                    }
+                    keep.Add(queued);
+                }
+                if (scrubbedHere > 0)
+                {
+                    rt.State.ReplaceDeadLetters(keep);
+                    scrubbed += scrubbedHere;
+                    Logger.Warning($"[{label}] Erasure scrubbed {scrubbedHere} queued dead-letter " +
+                                   "record(s) concerning the erased subject(s) — queued payloads for an " +
+                                   "erased subject must not stay at rest or be replayed.");
+                }
+            }
+            if (scrubbed > 0)
+                Console.WriteLine($"Scrubbed {scrubbed} queued dead-letter record(s) for the subject(s).");
+
             var withdrawn = 0;
             var failures = 0;
             foreach (var (rt, label, toWithdraw) in perTarget)
@@ -982,6 +1158,10 @@ public static class CommandRegistry
                             Op = DeadLetterOps.Delete,
                             PayloadJson = "",
                             CorrelationId = CorrelationContext.Current,
+                            // Hashes only — the compensating DELETE must stay
+                            // PII-safe AND survive the scrub above (delete ops
+                            // are exempt: they COMPLETE the erasure).
+                            SubjectHashes = erasedHashes.ToList(),
                         });
                         rt.Identity.RemoveIngestedItem(itemId);
                     }
@@ -1002,6 +1182,9 @@ public static class CommandRegistry
             }
 
             Metrics.Set("altrata_suppression_list_size", runtime.State.ListSuppressedSubjects().Count);
+            // Post-append chain verification: sets the altrata_erasure_ledger_broken
+            // gauge (SIEM tamper alert) and catches a torn write immediately.
+            runtime.Erasure.Verify(out _);
             Telemetry.SetTag(span, "altrata.items.withdrawn", withdrawn);
             Telemetry.SetTag(span, "altrata.items.failed", failures);
 
@@ -1063,6 +1246,7 @@ public static class CommandRegistry
                     rt.State.RemoveSuppressedSubject(id);
             }
             runtime.Erasure.Append(actor, ErasureActions.Unsuppress, id, null, Array.Empty<string>());
+            runtime.Erasure.Verify(out _);   // refresh the ledger-integrity gauge
             Metrics.Set("altrata_suppression_list_size", runtime.State.ListSuppressedSubjects().Count);
             Console.WriteLine($"Subject '{id}' un-suppressed; it may be ingested again on the next crawl.");
             return Task.FromResult<object?>(true);

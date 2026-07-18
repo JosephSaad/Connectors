@@ -39,8 +39,12 @@ All metrics are prefixed `hadoop_connector_`:
 | `circuit_breaker_state{dependency}` | gauge | per-dependency (`hdfs`, `graph`) breaker state: 0 closed, 1 half-open, 2 open |
 | `circuit_breaker_trips_total{dependency}` | counter | times a dependency's breaker tripped to open |
 | `circuit_breaker_resets_total{dependency}` | counter | times a dependency's breaker recovered to closed |
+| `guard_refusals_total` | counter | fail-closed scale-guard refusals (unfiltered object refused — `docs/RUNBOOKS.md`) |
+| `partial_objects_total` | counter | object crawls marked PARTIAL (row cap hit or oversize file skipped) |
+| `sweeps_suppressed_total` | counter | deletion sweeps suppressed (incomplete fetch or a mass-deletion guard) |
 | `dead_letter_depth` | gauge | live dead-letter queue depth |
 | `last_crawl_completed_timestamp_seconds` | gauge | unix time of last completed crawl |
+| `ha_claims_held` | gauge | HA object-claim leases currently held by this node (0 outside HA) |
 | `uptime_seconds` | gauge | process uptime |
 
 The labelled families (`records_filtered_total`, `items_classified_total`,
@@ -51,7 +55,11 @@ Useful alerts: `time() - last_crawl_completed_timestamp_seconds > 2 *
 incremental_interval`, `dead_letter_depth > 0` for an hour,
 `circuit_breaker_state == 2` for more than a few minutes, and
 `rate(records_matched_total) == 0` across a full-crawl window (filters or the
-source went dark — see `docs/FILTERS.md` troubleshooting).
+source went dark — see `docs/FILTERS.md` troubleshooting). Ready-made rules
+(incl. guard-refusal, sweep-suppressed and 26-hour watermark-staleness alerts)
+ship in `ops/prometheus-alerts.yml` and `ops/azure-monitor-alerts.kql`, keyed
+to `docs/RUNBOOKS.md`; a Grafana dashboard ships in
+`ops/grafana-dashboard.json`.
 
 ## Structured logs (`LOG_FORMAT=json`)
 

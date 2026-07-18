@@ -242,6 +242,10 @@ public static class SyncState
     {
         if (failures.Count == 0)
             return;
+        // DEADLETTER_PAYLOAD_MODE=redacted strips record values BEFORE dispatch,
+        // so neither backend (JSONL file / dbo.DeadLetter) ever stores them.
+        requestBodies = DeadLetterRedaction.Apply(requestBodies, DeadLetterRedaction.RedactRequestBody);
+        responseBodies = DeadLetterRedaction.Apply(responseBodies, DeadLetterRedaction.RedactResponseBody);
         if (UseSqlServer)
         {
             SqlStateStore.AppendDeadLetter(connectorId, failures, objectType, requestBodies, responseBodies);

@@ -57,6 +57,11 @@ public class GraphClient
     private DateTimeOffset _tokenExpiresAt = DateTimeOffset.MinValue;
     private readonly SemaphoreSlim _tokenLock = new(1, 1);
 
+    /// <summary>Lazily resolved certificate credential (path/store); null = secret flow.</summary>
+    private System.Security.Cryptography.X509Certificates.X509Certificate2? _clientCertificate;
+    private bool _certificateResolved;
+    private bool _authModeLogged;
+
     /// <summary>Async delay seam so tests never really sleep.</summary>
     internal Func<TimeSpan, CancellationToken, Task> DelayAsync { get; set; } =
         (delay, ct) => Task.Delay(delay, ct);
@@ -70,8 +75,11 @@ public class GraphClient
         // Null → passthrough (disabled) breaker, so the many test fixtures that
         // construct a GraphClient directly are byte-identical to before.
         _breaker = breaker ?? CircuitBreaker.Disabled;
+        // No injected test handler → the shared enterprise transport policy
+        // (PROXY_URL/PROXY_BYPASS for corporate egress, CA_BUNDLE_PATH for
+        // TLS-inspection proxies re-signing Graph traffic).
         _http = handler is null
-            ? new HttpClient { Timeout = TimeSpan.FromSeconds(120) }
+            ? new HttpClient(HttpTransport.CreateHandler()) { Timeout = TimeSpan.FromSeconds(120) }
             : new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
     }
 
@@ -103,13 +111,7 @@ public class GraphClient
             if (_token is not null && DateTimeOffset.UtcNow < _tokenExpiresAt)
                 return _token;
 
-            using var content = new FormUrlEncodedContent(new Dictionary<string, string>
-            {
-                ["client_id"] = _config.AadClientId,
-                ["client_secret"] = _config.AadClientSecret,
-                ["scope"] = TokenScope,
-                ["grant_type"] = "client_credentials",
-            });
+            using var content = new FormUrlEncodedContent(BuildTokenRequest());
             using var response = await _http.PostAsync(TokenEndpoint, content, ct).ConfigureAwait(false);
             var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
@@ -133,6 +135,48 @@ public class GraphClient
         {
             _tokenLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Token request form: certificate credential (client_assertion, RFC 7523)
+    /// when GRAPH_CLIENT_CERT_PATH / GRAPH_CLIENT_CERT_THUMBPRINT is set —
+    /// the certificate WINS over a configured secret — else the classic
+    /// client_secret flow. Only the auth MODE is logged, never material.
+    /// </summary>
+    internal Dictionary<string, string> BuildTokenRequest()
+    {
+        if (!_certificateResolved)
+        {
+            // Resolved once; a bad path/thumbprint fails fast here, naming the
+            // setting (ClientAssertion.LoadConfigured throws ArgumentException).
+            _clientCertificate = ClientAssertion.LoadConfigured(_config);
+            _certificateResolved = true;
+        }
+        if (!_authModeLogged)
+        {
+            _authModeLogged = true;
+            Logger.Info(_clientCertificate is not null
+                ? "Graph auth mode: certificate (client_assertion)"
+                : "Graph auth mode: client secret");
+        }
+
+        var form = new Dictionary<string, string>
+        {
+            ["client_id"] = _config.AadClientId,
+            ["scope"] = TokenScope,
+            ["grant_type"] = "client_credentials",
+        };
+        if (_clientCertificate is not null)
+        {
+            form["client_assertion_type"] = ClientAssertion.AssertionType;
+            form["client_assertion"] = ClientAssertion.Build(
+                _clientCertificate, _config.AadClientId, TokenEndpoint);
+        }
+        else
+        {
+            form["client_secret"] = _config.AadClientSecret;
+        }
+        return form;
     }
 
     // ── Requests ─────────────────────────────────────────────────────────────

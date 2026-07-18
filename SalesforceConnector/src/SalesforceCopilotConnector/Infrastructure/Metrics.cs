@@ -40,6 +40,16 @@ public static class Metrics
     // Gauges (can go up or down / be set to an absolute value).
     private static long _deadLetterDepth;
     private static long _lastCrawlCompletedUnix;
+    private static long _adaptiveConcurrencyLevel;
+    private static long _haClaimsHeld;
+
+    // Per-object crawl progress (records fetched vs the count reported by
+    // Salesforce at crawl start). Rendered as two labeled gauge families.
+    // ConcurrentDictionary: written from parallel object workers.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long>
+        ObjectRecordsTotal = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long>
+        ObjectRecordsFetched = new();
 
     // Process start, used to derive uptime. Captured at type init.
     private static readonly DateTime StartUtc = DateTime.UtcNow;
@@ -83,6 +93,42 @@ public static class Metrics
     public static void MarkCrawlCompletedNow() =>
         SetLastCrawlCompletedUnix(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
+    /// <summary>Set the current adaptive Graph concurrency level (AdaptiveConcurrency seam).</summary>
+    public static void SetAdaptiveConcurrency(long level) =>
+        Interlocked.Exchange(ref _adaptiveConcurrencyLevel, level);
+
+    /// <summary>An HA object claim's heartbeat started on this node.</summary>
+    public static void IncHaClaimsHeld() => Interlocked.Increment(ref _haClaimsHeld);
+
+    /// <summary>An HA object claim's heartbeat ended (claim completed/released).</summary>
+    public static void DecHaClaimsHeld()
+    {
+        // Clamp at zero: a double-dispose must not push the gauge negative.
+        long current;
+        while ((current = Interlocked.Read(ref _haClaimsHeld)) > 0)
+        {
+            if (Interlocked.CompareExchange(ref _haClaimsHeld, current - 1, current) == current)
+                return;
+        }
+    }
+
+    // ── Per-object crawl progress ────────────────────────────────────────────
+
+    /// <summary>Record the Salesforce-reported record count for one object type (crawl start).</summary>
+    public static void SetObjectTotal(string objectType, long total) =>
+        ObjectRecordsTotal[objectType] = total;
+
+    /// <summary>Add fetched records for one object type (per-chunk seam).</summary>
+    public static void AddObjectFetched(string objectType, long count) =>
+        ObjectRecordsFetched.AddOrUpdate(objectType, count, (_, previous) => previous + count);
+
+    /// <summary>Clear per-object progress at the start of a crawl cycle.</summary>
+    public static void ResetObjectProgress()
+    {
+        ObjectRecordsTotal.Clear();
+        ObjectRecordsFetched.Clear();
+    }
+
     // ── Read-only accessors (handy for tests) ────────────────────────────────
 
     public static long ItemsIngested => Interlocked.Read(ref _itemsIngested);
@@ -94,6 +140,8 @@ public static class Metrics
     public static long Throttle429Total => Interlocked.Read(ref _throttle429Total);
     public static long DeadLetterDepth => Interlocked.Read(ref _deadLetterDepth);
     public static long LastCrawlCompletedUnix => Interlocked.Read(ref _lastCrawlCompletedUnix);
+    public static long AdaptiveConcurrencyLevel => Interlocked.Read(ref _adaptiveConcurrencyLevel);
+    public static long HaClaimsHeld => Interlocked.Read(ref _haClaimsHeld);
 
     /// <summary>Seconds since the process (metrics registry) started.</summary>
     public static double UptimeSeconds => (DateTime.UtcNow - StartUtc).TotalSeconds;
@@ -113,6 +161,9 @@ public static class Metrics
         Interlocked.Exchange(ref _throttle429Total, 0);
         Interlocked.Exchange(ref _deadLetterDepth, 0);
         Interlocked.Exchange(ref _lastCrawlCompletedUnix, 0);
+        Interlocked.Exchange(ref _adaptiveConcurrencyLevel, 0);
+        Interlocked.Exchange(ref _haClaimsHeld, 0);
+        ResetObjectProgress();
     }
 
     // ── Prometheus rendering ─────────────────────────────────────────────────
@@ -139,10 +190,51 @@ public static class Metrics
 
         Gauge(sb, "dead_letter_depth", "Current number of records in the dead-letter queue.", DeadLetterDepth);
         Gauge(sb, "last_crawl_completed_timestamp_seconds", "Unix timestamp (seconds) of the last completed crawl; 0 if none yet.", LastCrawlCompletedUnix);
+        Gauge(sb, "adaptive_concurrency_level", "Current adaptive Graph batch concurrency level (dials down on 429s, up on sustained success); 0 until the first crawl.", AdaptiveConcurrencyLevel);
+        Gauge(sb, "ha_claims_held", "HA object claims currently held (heartbeating) by this node; 0 outside HA mode.", HaClaimsHeld);
         GaugeDouble(sb, "uptime_seconds", "Seconds since the connector process started.", UptimeSeconds);
+
+        LabeledGaugeFamily(
+            sb, "object_records_total",
+            "Salesforce-reported record count per object type for the current crawl.",
+            ObjectRecordsTotal);
+        LabeledGaugeFamily(
+            sb, "object_records_fetched",
+            "Records fetched from Salesforce per object type in the current crawl.",
+            ObjectRecordsFetched);
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Render a gauge family with an <c>object_type</c> label, one sample per
+    /// object type (sorted for stable output). Families with no samples are
+    /// omitted entirely — Prometheus treats absent series as absent, and this
+    /// keeps default scrapes byte-stable with the pre-family output.
+    /// </summary>
+    private static void LabeledGaugeFamily(
+        StringBuilder sb,
+        string name,
+        string help,
+        System.Collections.Concurrent.ConcurrentDictionary<string, long> samples)
+    {
+        if (samples.IsEmpty)
+            return;
+        var full = Prefix + name;
+        sb.Append("# HELP ").Append(full).Append(' ').Append(help).Append('\n');
+        sb.Append("# TYPE ").Append(full).Append(' ').Append("gauge").Append('\n');
+        foreach (var (objectType, value) in samples.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+        {
+            sb.Append(full)
+              .Append("{object_type=\"").Append(EscapeLabelValue(objectType)).Append("\"} ")
+              .Append(value.ToString(CultureInfo.InvariantCulture))
+              .Append('\n');
+        }
+    }
+
+    /// <summary>Prometheus label-value escaping: backslash, double quote, newline.</summary>
+    internal static string EscapeLabelValue(string value) =>
+        value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n");
 
     private static void Counter(StringBuilder sb, string name, string help, long value) =>
         Metric(sb, name, help, "counter", value.ToString(CultureInfo.InvariantCulture));

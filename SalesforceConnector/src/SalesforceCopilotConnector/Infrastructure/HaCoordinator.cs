@@ -308,6 +308,7 @@ public static class HaCoordinator
                 }
             }
         }, CancellationToken.None);
+        Metrics.IncHaClaimsHeld();  // /metrics: ha_claims_held gauge
         return new HeartbeatScope(cts, loop);
     }
 
@@ -315,6 +316,7 @@ public static class HaCoordinator
     {
         private readonly CancellationTokenSource _cts;
         private readonly Task _loop;
+        private int _disposed;
 
         public HeartbeatScope(CancellationTokenSource cts, Task loop)
         {
@@ -324,6 +326,9 @@ public static class HaCoordinator
 
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+            Metrics.DecHaClaimsHeld();
             _cts.Cancel();
             try
             {

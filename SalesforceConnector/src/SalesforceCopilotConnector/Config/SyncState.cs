@@ -281,6 +281,13 @@ public static class SyncState
         {
             return;
         }
+        // DEADLETTER_PAYLOAD_MODE=redacted: strip item property values/content
+        // before the record is persisted (either backend). Default full.
+        if (DeadLetterRedaction.RedactedMode)
+        {
+            requestBodies = DeadLetterRedaction.RedactBodies(requestBodies);
+            responseBodies = DeadLetterRedaction.RedactBodies(responseBodies);
+        }
         if (UseSqlServer)
         {
             SqlStateStore.AppendDeadLetter(

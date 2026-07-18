@@ -36,6 +36,38 @@ jobs:
       - name: Test
         run: dotnet test -c Release
 
+  # ---------------------------------------------------------------------------
+  # Software bill of materials (CycloneDX) — one SBOM covering the whole
+  # solution's NuGet dependency graph, attached to the release for supply-chain
+  # review / vulnerability correlation (SECURITY.md).
+  # ---------------------------------------------------------------------------
+  sbom:
+    name: SBOM (CycloneDX)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          dotnet tool install --global CycloneDX
+          dotnet CycloneDX HadoopConnector.sln --json --output sbom \
+            --filename hadoop-connector.cdx.json
+          python3 -c "import json; json.load(open('sbom/hadoop-connector.cdx.json')); print('SBOM is valid JSON')"
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-cyclonedx
+          path: sbom/hadoop-connector.cdx.json
+          if-no-files-found: error
+
   package:
     name: Package (${{ matrix.rid }})
     needs: test
@@ -64,6 +96,27 @@ jobs:
             echo "version=0.0.0-ci.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
           fi
 
+      # Signing is OPT-IN by secrets so forks and secretless dry runs keep
+      # working: each check step reports clearly when a signature is skipped.
+      - name: Check signing secrets
+        id: signing
+        env:
+          AUTHENTICODE_PFX_BASE64: ${{ secrets.AUTHENTICODE_PFX_BASE64 }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+        run: |
+          if [[ -n "$AUTHENTICODE_PFX_BASE64" ]]; then
+            echo "authenticode=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "authenticode=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AUTHENTICODE_PFX_BASE64 not configured — Authenticode signing skipped (unsigned exe)."
+          fi
+          if [[ -n "$COSIGN_PRIVATE_KEY" ]]; then
+            echo "cosign=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cosign=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::COSIGN_PRIVATE_KEY not configured — cosign bundle signatures skipped."
+          fi
+
       - name: Publish (self-contained single file)
         run: >-
           dotnet publish src/HadoopConnector -c Release
@@ -72,6 +125,28 @@ jobs:
           -p:IncludeNativeLibrariesForSelfExtract=true
           -p:Version=${{ steps.ver.outputs.version }}
           -o publish/${{ matrix.rid }}
+
+      # Authenticode (win-x64 exe) via osslsigncode, gated on secrets:
+      #   AUTHENTICODE_PFX_BASE64  base64 of the code-signing PFX
+      #   AUTHENTICODE_PFX_PASSWORD
+      - name: Authenticode-sign HadoopConnector.exe
+        if: ${{ matrix.rid == 'win-x64' && steps.signing.outputs.authenticode == 'true' }}
+        env:
+          AUTHENTICODE_PFX_BASE64: ${{ secrets.AUTHENTICODE_PFX_BASE64 }}
+          AUTHENTICODE_PFX_PASSWORD: ${{ secrets.AUTHENTICODE_PFX_PASSWORD }}
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q osslsigncode
+          umask 077
+          echo "$AUTHENTICODE_PFX_BASE64" | base64 -d > signing.pfx
+          osslsigncode sign \
+            -pkcs12 signing.pfx -pass "$AUTHENTICODE_PFX_PASSWORD" \
+            -n "BDH Hadoop Copilot Connector" \
+            -t http://timestamp.digicert.com \
+            -in  publish/win-x64/HadoopConnector.exe \
+            -out publish/win-x64/HadoopConnector-signed.exe
+          mv publish/win-x64/HadoopConnector-signed.exe publish/win-x64/HadoopConnector.exe
+          rm -f signing.pfx
+          osslsigncode verify publish/win-x64/HadoopConnector.exe || true
 
       # Bundle layout mirrors a checkout: the app resolves config/ (and env/)
       # relative to its working directory, so the zip extracts to a directory
@@ -94,6 +169,23 @@ jobs:
           fi
           (cd bundle && zip -qr "$NAME.zip" "$NAME" && sha256sum "$NAME.zip" > "$NAME.zip.sha256")
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      # Detached cosign signature over the bundle zip, gated on secrets:
+      #   COSIGN_PRIVATE_KEY  (cosign.key contents)  COSIGN_PASSWORD
+      # Verify with: cosign verify-blob --key cosign.pub --signature X.zip.sig X.zip
+      - name: Install cosign
+        if: ${{ steps.signing.outputs.cosign == 'true' }}
+        uses: sigstore/cosign-installer@v3
+
+      - name: Cosign-sign bundle
+        if: ${{ steps.signing.outputs.cosign == 'true' }}
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          ZIP="bundle/${{ steps.bundle.outputs.name }}.zip"
+          cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY \
+            --output-signature "$ZIP.sig" "$ZIP"
 
       # Prove the artifact is actually runnable — a single-file self-contained
       # publish can build fine and still fail to bootstrap (missing native
@@ -157,9 +249,66 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # ---------------------------------------------------------------------------
+  # EXPERIMENTAL MSI (WiX v5) for SCCM/Intune distribution — see
+  # packaging/msi/HadoopConnector.wxs and docs/DEPLOYMENT_ENTERPRISE.md.
+  # continue-on-error: a failed MSI must not block a release while the format
+  # is experimental; the zip bundles remain the canonical artifacts.
+  # ---------------------------------------------------------------------------
+  msi:
+    name: MSI package (win-x64, experimental)
+    needs: test
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish (win-x64 single file)
+        run: >-
+          dotnet publish src/HadoopConnector -c Release
+          -r win-x64 --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.ver.outputs.version }}
+          -o publish/win-x64
+
+      - name: Build MSI (WiX v5)
+        shell: bash
+        run: |
+          dotnet tool install --global wix --version "5.*"
+          wix build packaging/msi/HadoopConnector.wxs \
+            -d Version=${{ steps.ver.outputs.version }} \
+            -d PublishDir=publish/win-x64 \
+            -d RepoRoot=. \
+            -arch x64 \
+            -o "HadoopConnector-${{ steps.ver.outputs.version }}-win-x64.msi"
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v7
+        with:
+          name: msi-win-x64
+          path: "*.msi"
+          if-no-files-found: error
+
   release:
     name: Create GitHub release
-    needs: package
+    needs: [package, sbom]
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     steps:
@@ -168,6 +317,21 @@ jobs:
         with:
           pattern: bundle-*
           merge-multiple: true
+          path: dist
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v8
+        with:
+          name: sbom-cyclonedx
+          path: dist
+
+      # Best-effort: the experimental MSI is attached when its job produced
+      # one, and its absence never blocks the release.
+      - name: Download MSI (experimental, optional)
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: msi-win-x64
           path: dist
 
       - name: Create release

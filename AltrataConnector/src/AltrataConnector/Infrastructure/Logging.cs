@@ -86,6 +86,8 @@ public static class Logging
                         FileMode.Append, FileAccess.Write, FileShare.Read),
                     new UTF8Encoding(false))
                 { AutoFlush = true };
+                // Lifecycle marker mirrored to the Windows Event Log when enabled.
+                EventLogSink.Lifecycle($"Run started: {prefix} (logs: {dir})");
             }
             catch (Exception exc)
             {
@@ -148,6 +150,12 @@ public static class Logging
         {
             try { _fileWriter?.WriteLine(line); } catch { /* ignore */ }
         }
+
+        // Windows Event Log mirroring (EVENTLOG_ENABLED): WARNING/ERROR only,
+        // the same PII-safe message text the file sink received. No-op unless
+        // enabled; never throws (see EventLogSink).
+        if (level is "WARNING" or "ERROR")
+            EventLogSink.Mirror(level, logger, message, exception);
 
         var toConsole = level is "WARNING" or "ERROR" || Verbose;
         if (!toConsole)

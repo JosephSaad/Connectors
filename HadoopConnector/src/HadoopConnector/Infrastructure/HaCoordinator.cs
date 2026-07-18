@@ -93,7 +93,10 @@ public sealed class HaCoordinator
             """,
             ("@key", crawlKey), ("@type", objectType), ("@node", NodeId), ("@timeout", ClaimTimeoutSeconds));
         if (taken > 0)
+        {
+            Metrics.AddHaClaimsHeld(+1);
             return true;
+        }
 
         var exists = _sql.Scalar(
             "SELECT COUNT(*) FROM dbo.ObjectClaims WHERE CrawlKey = @key AND ObjectType = @type;",
@@ -109,6 +112,8 @@ public sealed class HaCoordinator
                 VALUES (@key, @type, @node, SYSUTCDATETIME(), 'claimed');
                 """,
                 ("@key", crawlKey), ("@type", objectType), ("@node", NodeId));
+            if (inserted > 0)
+                Metrics.AddHaClaimsHeld(+1);
             return inserted > 0;
         }
         catch (Exception exc)
@@ -157,6 +162,12 @@ public sealed class HaCoordinator
              WHERE CrawlKey = @key AND ObjectType = @type AND NodeId = @node;
             """,
             ("@key", crawlKey), ("@type", objectType), ("@node", NodeId), ("@status", status));
+        // ha_claims_held tracks leases THIS node believes it holds. Decrement
+        // unconditionally (clamped in the reader path at render time is not
+        // needed — claims and terminals pair 1:1 in the pipeline; a lease lost
+        // to reclaim mid-stall still ends here when the stalled worker returns,
+        // so the gauge cannot drift stuck-high).
+        Metrics.AddHaClaimsHeld(-1);
     }
 
     /// <summary>

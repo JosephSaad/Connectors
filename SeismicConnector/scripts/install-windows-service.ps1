@@ -87,6 +87,18 @@ else {
 # The connector resolves config/, env/, logs/, data/ against SEISMIC_CONNECTOR_HOME.
 [Environment]::SetEnvironmentVariable("SEISMIC_CONNECTOR_HOME", $InstallDir, "Machine")
 
+# Windows Event Log source (EVENTLOG_ENABLED=true mirrors WARNING+ and lifecycle
+# events to the Application log — docs/SIEM.md). Source creation needs admin,
+# which this script already requires; the runtime service account then only
+# needs to WRITE to an existing source. Idempotent: no-op when it exists.
+if (-not [System.Diagnostics.EventLog]::SourceExists("SeismicConnector")) {
+    New-EventLog -LogName Application -Source "SeismicConnector"
+    Write-Host "Event Log source 'SeismicConnector' created (Application log)."
+}
+else {
+    Write-Host "Event Log source 'SeismicConnector' already exists — unchanged."
+}
+
 # Restart policy: give transient failures three retries.
 sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/300000/restart/900000 | Out-Null
 

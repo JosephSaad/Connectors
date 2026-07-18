@@ -236,10 +236,47 @@ tags — followable end-to-end. **PII caution**: spans tag only ids/counts/
 hashes/enums (allowlist-enforced) — never names, emails or wealth figures. See
 **docs/OBSERVABILITY.md**.
 
+## Enterprise operations
+
+The enterprise hardening package — deployment at fleet scale, security
+posture, and day-2 operations:
+
+* **[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)** — STRIDE per trust
+  boundary, FIPS audit result, least-privilege Graph permissions, DSAR/GDPR
+  erasure-completeness posture and its limits.
+* **[docs/RUNBOOKS.md](docs/RUNBOOKS.md)** — Symptom → Diagnose → Remediate →
+  Escalate for every failure mode (breaker/degraded, dead-letter growth,
+  manifest mismatch, seat-file failure, mid-flight erasure failure, ledger
+  verification failure, review-queue growth, HA failover, stuck leases,
+  state corruption, 429 storms, auth failures).
+* **[docs/DR.md](docs/DR.md)** — RPO/RTO, backup tiers (the erasure
+  suppression list + ledger are the ONLY state not recoverable by re-crawl),
+  restore + erasure-reconciliation procedure, upgrade/rollback, schema
+  versioning.
+* **[docs/SIEM.md](docs/SIEM.md)** — Windows Event Log ids
+  (`EVENTLOG_ENABLED`), Sentinel KQL (ledger tamper = SECURITY incident,
+  entitlement refusals, erasure-race withdrawals), Splunk sketch, PII-safe
+  index fields.
+* **[docs/DEPLOYMENT_ENTERPRISE.md](docs/DEPLOYMENT_ENTERPRISE.md)** —
+  SCCM/Intune packaging, GPO/DSC baseline, proxy + TLS-inspection
+  (`PROXY_URL`/`CA_BUNDLE_PATH`), FIPS mode, service-account least privilege
+  and strict file ACLs on the ledger/suppression/state files.
+* **[SECURITY.md](SECURITY.md)** — supported versions, credential rotation
+  runbooks (Graph secret + certificate, feed credentials), vulnerability
+  reporting, data-at-rest inventory, and the `DEADLETTER_PAYLOAD_MODE`
+  default-redacted decision record.
+
+Also in the package: `ops/grafana-dashboard.json`,
+`ops/prometheus-alerts.yml`, `ops/azure-monitor-alerts.kql` (rules link to
+runbook anchors; the ledger-tamper rule is severity critical / class
+security), an experimental WiX v5 MSI (`packaging/msi/`), CycloneDX SBOM +
+gated Authenticode/cosign signing on releases, and a coverage-gated,
+perf-smoked CI.
+
 ## Tests
 
 ```bash
-dotnet test        # 404 tests: CLI parsing, checkpoint resume, dead-letter
+dotnet test        # 449 tests: CLI parsing, checkpoint resume, dead-letter
                    # (incl. 16-writer concurrency corruption stress),
                    # retry/backoff math (Retry-After honoured exactly + 60s clamp,
                    # ±20% jitter), $batch pipeline (429 ladder, adaptive

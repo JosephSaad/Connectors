@@ -21,7 +21,7 @@ SQLite identity store) so it can pick up where the Python version left off.
 | `src/SalesforceCopilotConnector/Config/` | `config/sync_state.py` — checkpoints & dead-letter files |
 | `src/SalesforceCopilotConnector/Commands/` + `Program.cs` | `commands/` + `run.py` — CLI (argparse replica) |
 | `src/SalesforceCopilotConnector/Dashboard.cs` | `dashboard.py` (rich → Spectre.Console) |
-| `tests/SalesforceCopilotConnector.Tests/` | `tests/` — full pytest suite as xUnit + C# additions (845 tests) |
+| `tests/SalesforceCopilotConnector.Tests/` | `tests/` — full pytest suite as xUnit + C# additions (899 tests) |
 | `config/` | schema.json, graph-schema.json, template.json (same files) |
 
 ## Install from a release
@@ -162,14 +162,23 @@ timestamp. Details, failure modes and a deployment checklist: `docs/HA.md`;
 schema/proc contract: `docs/SQL_CONTRACT.md`; retry/throttling behavior:
 `docs/RETRY.md`; sustainable throughput vs Graph API limits: `docs/CAPACITY.md`.
 
+## Enterprise operations
+
+- [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — STRIDE analysis per trust boundary, least-privilege Graph permissions, FIPS audit.
+- [`docs/RUNBOOKS.md`](docs/RUNBOOKS.md) — per-alert runbooks (symptom → diagnose → remediate → escalate); `ops/` alert rules link here.
+- [`docs/DR.md`](docs/DR.md) — RPO/RTO, state backup/restore (SQLite + SQL Server), upgrade/rollback, schema versioning policy.
+- [`docs/SIEM.md`](docs/SIEM.md) — Windows Event Log source/ids (`EVENTLOG_ENABLED`), Sentinel KQL and Splunk ingestion of `LOG_FORMAT=json`.
+- [`docs/DEPLOYMENT_ENTERPRISE.md`](docs/DEPLOYMENT_ENTERPRISE.md) — SCCM/Intune MSI rollout, GPO/DSC config, `PROXY_URL`/`CA_BUNDLE_PATH`, service-account least privilege.
+- [`SECURITY.md`](SECURITY.md) — supported versions, secret/certificate rotation runbooks, vulnerability reporting, data-at-rest inventory.
+
 ## Tests
 
 ```bash
 dotnet test
 ```
 
-845 tests — a 1:1 port of the Python suite plus C#-side additions (SQL/HA,
-log pruning, retry jitter). Test collections run serially
+899 tests — a 1:1 port of the Python suite plus C#-side additions (SQL/HA,
+log pruning, retry jitter, enterprise hardening). Test collections run serially
 (`xunit.runner.json`) because several tests swap process-global seams
 (ingest hooks, sync-state paths, HTTP session, env vars), mirroring the
 Python suite's monkeypatching.

@@ -212,7 +212,7 @@ public class DiagnosabilityTests
         // The log line identifies object type, record id and chunk, and carries
         // the full exception (type + stack trace) for the unexpected failure.
         var logged = Assert.Single(
-            capture.Messages(LogLevel.Error).Where(e => e.Contains("failed to transform")));
+            capture.Messages(LogLevel.Error), e => e.Contains("failed to transform"));
         Assert.Contains("[Task]", logged);
         Assert.Contains("Task_p0", logged);
         Assert.Contains("chunk 2", logged);
@@ -319,8 +319,8 @@ public class DiagnosabilityTests
             var exitCode = await Program.ExecuteAsync(new[] { "ingest-object", "--type", "Task" });
 
             Assert.Equal(1, exitCode);
-            var final = Assert.Single(capture.Lines.Where(l =>
-                l.Level == LogLevel.Error && l.Logger == "clarizen_connector.cli"));
+            var final = Assert.Single(capture.Lines, l =>
+                l.Level == LogLevel.Error && l.Logger == "clarizen_connector.cli");
             // The structured backstop names the COMMAND and keeps the exception
             // (type + stack) so the failure is diagnosable from logs alone.
             Assert.Contains("'ingest-object'", final.Message);

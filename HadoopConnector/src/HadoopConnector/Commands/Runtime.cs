@@ -99,6 +99,9 @@ public sealed class RuntimeContext : IDisposable
         Tracing?.Dispose();
         IdentityStore.Dispose();
         Source.Dispose();
+        // Lifecycle-stop event (id 1001) for SIEM collectors; no-op when the
+        // sink is off. Last, so any disposal warnings above are still mirrored.
+        EventLogSink.Shutdown();
     }
 }
 
@@ -119,6 +122,11 @@ internal static class Runtime
     {
         EnvLoader.LoadLayered();
         Logging.Initialize(runPrefix, args.Verbose);
+        // Windows Event Log mirroring (EVENTLOG_ENABLED; no-op off-Windows).
+        // After Logging.Initialize so the lifecycle-start event carries the pid
+        // of a fully bootstrapped logger; before AppConfig.Load so config
+        // failures already reach the event log.
+        EventLogSink.Initialize();
         LogPruner.PruneIfConfigured(Logging.LogsRoot);
 
         var config = AppConfig.Load();

@@ -36,6 +36,37 @@ jobs:
       - name: Test
         run: dotnet test -c Release
 
+  # ---------------------------------------------------------------------------
+  # SBOM: CycloneDX bill of materials for the whole solution (supply-chain
+  # inventory for procurement/vuln response). Attached to the GitHub release.
+  # ---------------------------------------------------------------------------
+  sbom:
+    name: SBOM (CycloneDX)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          dotnet tool install --global CycloneDX
+          dotnet restore
+          dotnet-CycloneDX AltrataConnector.sln --json --output sbom \
+            --filename altrata-connector.cdx.json --disable-github-licenses
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: sbom/altrata-connector.cdx.json
+          if-no-files-found: error
+
   package:
     name: Package (${{ matrix.rid }})
     needs: test
@@ -46,6 +77,14 @@ jobs:
         # win-x64 first-class: Windows Server + service mode is the primary
         # deployment target. linux-x64 covers containers/VMs.
         rid: [win-x64, linux-x64]
+    env:
+      # Signing material is OPTIONAL: forks and dry runs have no secrets and
+      # every signing step below skips gracefully (with a log line) when its
+      # secret is absent. Secrets land in job env so step `if:` can test them.
+      AUTHENTICODE_PFX_B64: ${{ secrets.AUTHENTICODE_PFX_B64 }}
+      AUTHENTICODE_PFX_PASSWORD: ${{ secrets.AUTHENTICODE_PFX_PASSWORD }}
+      COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -73,6 +112,26 @@ jobs:
           -p:Version=${{ steps.ver.outputs.version }}
           -o publish/${{ matrix.rid }}
 
+      # Authenticode over the Windows exe (osslsigncode: signs PE files on the
+      # linux runner). Skips with a notice when the cert secret is absent.
+      - name: Authenticode sign (win-x64)
+        if: ${{ matrix.rid == 'win-x64' && env.AUTHENTICODE_PFX_B64 != '' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q && sudo apt-get install -y -q osslsigncode
+          echo "$AUTHENTICODE_PFX_B64" | base64 -d > signing.pfx
+          osslsigncode sign -pkcs12 signing.pfx -pass "$AUTHENTICODE_PFX_PASSWORD" \
+            -n "Altrata Copilot Connector" -t http://timestamp.digicert.com \
+            -in  publish/win-x64/AltrataConnector.exe \
+            -out publish/win-x64/AltrataConnector.signed.exe
+          mv publish/win-x64/AltrataConnector.signed.exe publish/win-x64/AltrataConnector.exe
+          rm -f signing.pfx
+          osslsigncode verify publish/win-x64/AltrataConnector.exe || true
+
+      - name: Authenticode skipped (no signing secret)
+        if: ${{ matrix.rid == 'win-x64' && env.AUTHENTICODE_PFX_B64 == '' }}
+        run: echo "AUTHENTICODE_PFX_B64 not configured — shipping the exe unsigned (fork/dry-run path)."
+
       # Bundle layout mirrors a checkout: the app resolves config/ (and env/)
       # relative to its working directory, so the zip extracts to a directory
       # you run it from.
@@ -95,6 +154,27 @@ jobs:
           fi
           (cd bundle && zip -qr "$NAME.zip" "$NAME" && sha256sum "$NAME.zip" > "$NAME.zip.sha256")
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      # Cosign (keyed sign-blob) over the bundle zip: verifiable provenance for
+      # air-gapped consumers (`cosign verify-blob`). Skips gracefully without
+      # the key secret.
+      - name: Cosign sign bundle
+        if: ${{ env.COSIGN_PRIVATE_KEY != '' }}
+        uses: sigstore/cosign-installer@v3
+
+      - name: Cosign sign-blob
+        if: ${{ env.COSIGN_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          NAME="${{ steps.bundle.outputs.name }}"
+          echo "$COSIGN_PRIVATE_KEY" > cosign.key
+          cosign sign-blob --yes --key cosign.key \
+            --output-signature "bundle/$NAME.zip.sig" "bundle/$NAME.zip"
+          rm -f cosign.key
+
+      - name: Cosign skipped (no signing secret)
+        if: ${{ env.COSIGN_PRIVATE_KEY == '' }}
+        run: echo "COSIGN_PRIVATE_KEY not configured — bundle ships with SHA-256 checksum only."
 
       # Prove the artifact is actually runnable — a single-file self-contained
       # publish can build fine and still fail to bootstrap (missing native
@@ -158,9 +238,68 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # ---------------------------------------------------------------------------
+  # MSI (EXPERIMENTAL): WiX v5 build of packaging/msi/Package.wxs on a Windows
+  # runner. continue-on-error — the zip bundle + install script remain the
+  # supported path; the MSI is published for SCCM/Intune pilots
+  # (docs/DEPLOYMENT_ENTERPRISE.md). The .wxs structure itself is guarded by
+  # offline unit tests (MsiPackagingTests) so drift is caught even while this
+  # job is allowed to fail.
+  # ---------------------------------------------------------------------------
+  msi:
+    name: MSI (windows, experimental)
+    needs: test
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-ci.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish (win-x64 single file)
+        run: >-
+          dotnet publish src/AltrataConnector -c Release
+          -r win-x64 --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.ver.outputs.version }}
+          -o publish/win-x64
+
+      - name: Build MSI (WiX v5)
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet tool install --global wix --version "5.*"
+          mkdir -p dist
+          wix build packaging/msi/Package.wxs \
+            -d PublishDir=publish/win-x64 -d RepoRoot=. \
+            -arch x64 \
+            -o "dist/AltrataConnector-${{ steps.ver.outputs.version }}.msi"
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v7
+        with:
+          name: msi
+          path: dist/*.msi
+          if-no-files-found: error
+
   release:
     name: Create GitHub release
-    needs: package
+    needs: [package, sbom]
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     steps:
@@ -169,6 +308,21 @@ jobs:
         with:
           pattern: bundle-*
           merge-multiple: true
+          path: dist
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v8
+        with:
+          name: sbom
+          path: dist
+
+      # The MSI is experimental (continue-on-error above): attach it when it
+      # built, release without it when it did not.
+      - name: Download MSI (optional)
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: msi
           path: dist
 
       - name: Create release

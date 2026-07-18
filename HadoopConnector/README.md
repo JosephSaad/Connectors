@@ -362,15 +362,35 @@ heartbeats, a dead node's claims expire and survivors resume from its
 checkpoint, and exactly one node closes the crawl and writes the sync
 timestamp. Details: `docs/HA.md`; schema contract: `docs/SQL_CONTRACT.md`.
 
+## Enterprise operations
+
+The enterprise hardening pack — read these before a production rollout:
+
+- [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — STRIDE per trust boundary, filters.json as a security control, FIPS posture, least-privilege matrix
+- [`docs/RUNBOOKS.md`](docs/RUNBOOKS.md) — Symptom → Diagnose → Remediate → Escalate per failure mode (guard refusals, partial crawls, watermark gaps, breaker/degraded, HA, state corruption, 429/token)
+- [`docs/DR.md`](docs/DR.md) — RPO/RTO, backup/restore, upgrade/rollback, schema versioning (a full crawl rebuilds everything from BDH)
+- [`docs/SIEM.md`](docs/SIEM.md) — Windows Event Log ids (`EVENTLOG_ENABLED`), Sentinel KQL + Splunk searches, the delegation-token-leak canary
+- [`docs/DEPLOYMENT_ENTERPRISE.md`](docs/DEPLOYMENT_ENTERPRISE.md) — SCCM/Intune, GPO/DSC, proxy + private-CA TLS (`PROXY_URL`/`CA_BUNDLE_PATH`), FIPS hosts, service-account least privilege, file ACLs
+- [`SECURITY.md`](SECURITY.md) — supported versions, credential-rotation runbooks (HDFS, Graph secret + certificate), vulnerability reporting, data-at-rest inventory
+
+Dashboards and alert rules ship in [`ops/`](ops/) (`grafana-dashboard.json`,
+`prometheus-alerts.yml`, `azure-monitor-alerts.kql`), keyed to the runbook
+anchors and the actual `hadoop_connector_*` metric names.
+
 ## Tests
 
 ```bash
 dotnet test
 ```
 
-601 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
-shape and concurrency invariants, retry/backoff math (numeric Retry-After,
-60 s clamp, jitter), Graph client throttling/hardening (mock HTTP), adaptive
+650 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
+shape and concurrency invariants, dead-letter payload redaction
+(`DEADLETTER_PAYLOAD_MODE`), retry/backoff math (numeric Retry-After,
+60 s clamp, jitter), Graph client throttling/hardening (mock HTTP), Graph
+certificate credential (client-assertion JWT structure/signature,
+cert-wins-over-secret), outbound transport policy (proxy bypass, additive
+private-CA trust with in-test certificate chains), Windows Event Log sink
+dispatch, adaptive
 concurrency, connection-sharding validation + end-to-end per-shard routing,
 sovereign-cloud endpoint/scope/authority override, WebHDFS client (URI
 building, LISTSTATUS/OPEN, retry ladder, RemoteException surfacing, breaker

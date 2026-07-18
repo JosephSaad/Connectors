@@ -7,6 +7,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SeismicConnector.Infrastructure;
 using SeismicConnector.Seismic;
 
 namespace SeismicConnector.Config;
@@ -102,6 +103,17 @@ public sealed class GraphSettings
     public required string TenantId { get; init; }
     public required string ClientId { get; init; }
     public required string ClientSecret { get; init; }
+
+    /// <summary>GRAPH_CLIENT_CERT_PATH: PFX/PEM file for certificate (client_assertion)
+    /// auth. When set (or the thumbprint is), the certificate WINS over the client
+    /// secret. Null = secret auth (default).</summary>
+    public string? ClientCertPath { get; init; }
+
+    /// <summary>GRAPH_CLIENT_CERT_PASSWORD: optional PFX/encrypted-PEM password.</summary>
+    public string? ClientCertPassword { get; init; }
+
+    /// <summary>GRAPH_CLIENT_CERT_THUMBPRINT: certificate store lookup alternative to the path.</summary>
+    public string? ClientCertThumbprint { get; init; }
     public string BaseUrl { get; init; } = "https://graph.microsoft.com";
     public string ApiVersion { get; init; } = "v1.0";
     public int MaxRetries { get; init; } = 4;
@@ -173,6 +185,12 @@ public sealed class AppConfig
         Settings.ValidateConnectorId(connectorId);
 
         var tenant = Settings.RequireEnv("SEISMIC_TENANT");
+        var graphCertPath = Environment.GetEnvironmentVariable(
+            SeismicConnector.Graph.CertificateCredential.CertPathEnvVar);
+        var graphCertThumbprint = Environment.GetEnvironmentVariable(
+            SeismicConnector.Graph.CertificateCredential.CertThumbprintEnvVar);
+        var graphCertConfigured = !string.IsNullOrWhiteSpace(graphCertPath)
+            || !string.IsNullOrWhiteSpace(graphCertThumbprint);
         var config = new AppConfig
         {
             Connector = new ConnectorSettings
@@ -207,7 +225,16 @@ public sealed class AppConfig
             {
                 TenantId = Settings.RequireEnv("AAD_APP_TENANT_ID"),
                 ClientId = Settings.RequireEnv("AAD_APP_CLIENT_ID"),
-                ClientSecret = Settings.RequireSecret("SECRET_AAD_APP_CLIENT_SECRET"),
+                // Certificate credential (GRAPH_CLIENT_CERT_PATH / _THUMBPRINT)
+                // wins over the client secret; with a certificate configured the
+                // secret becomes optional so cert-only deployments carry none.
+                ClientSecret = graphCertConfigured
+                    ? (SecretProvider.GetSecret("SECRET_AAD_APP_CLIENT_SECRET") ?? "")
+                    : Settings.RequireSecret("SECRET_AAD_APP_CLIENT_SECRET"),
+                ClientCertPath = graphCertPath,
+                ClientCertPassword = SecretProvider.GetSecret(
+                    SeismicConnector.Graph.CertificateCredential.CertPasswordEnvVar),
+                ClientCertThumbprint = graphCertThumbprint,
                 BaseUrl = Settings.EnvOr("GRAPH_BASE_URL", "https://graph.microsoft.com").TrimEnd('/'),
                 ApiVersion = Settings.EnvOr("GRAPH_API_VERSION", "v1.0"),
                 MaxRetries = Math.Max(0, Settings.IntEnv("GRAPH_MAX_RETRIES", 4)),

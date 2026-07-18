@@ -40,11 +40,17 @@ public static class Metrics
     private static long _itemsReAcled;
     private static long _aclDriftDetected;
     private static long _degradedPauses;
+    private static long _webhookAccepted;
+    private static long _webhookRejected;
+    private static long _webhookDropped;
+    private static long _haClaimsAcquired;
 
     // Gauges (can go up or down / be set to an absolute value).
     private static long _deadLetterDepth;
     private static long _lastCrawlCompletedUnix;
     private static long _lastDriftFindings;
+    private static long _webhookQueueDepth;
+    private static long _haClaimsHeld;
 
     // Labeled extraction counters (format → count). The content-extraction
     // pipeline records one attempt per payload and one success per non-empty
@@ -91,6 +97,18 @@ public static class Metrics
 
     /// <summary>Record that a crawl paused into degraded mode (a critical breaker was open).</summary>
     public static void IncDegradedPauses(long count = 1) => Interlocked.Add(ref _degradedPauses, count);
+
+    /// <summary>Record one webhook request accepted (valid HMAC signature, 202).</summary>
+    public static void IncWebhookAccepted(long count = 1) => Interlocked.Add(ref _webhookAccepted, count);
+
+    /// <summary>Record one webhook request rejected 401 (invalid/missing HMAC signature).</summary>
+    public static void IncWebhookRejected(long count = 1) => Interlocked.Add(ref _webhookRejected, count);
+
+    /// <summary>Record webhook events shed by the drop-oldest queue cap.</summary>
+    public static void IncWebhookDropped(long count = 1) => Interlocked.Add(ref _webhookDropped, count);
+
+    /// <summary>Record one HA resource claim acquired by this node (incl. steals).</summary>
+    public static void IncHaClaimsAcquired(long count = 1) => Interlocked.Add(ref _haClaimsAcquired, count);
 
     /// <summary>Record one content-extraction attempt for <paramref name="format"/> (labelled counter).</summary>
     public static void RecordExtraction(string format, bool success)
@@ -149,6 +167,20 @@ public static class Metrics
     public static void SetLastDriftFindings(long count) =>
         Interlocked.Exchange(ref _lastDriftFindings, count);
 
+    /// <summary>Set the current undrained webhook event queue depth.</summary>
+    public static void SetWebhookQueueDepth(long depth) =>
+        Interlocked.Exchange(ref _webhookQueueDepth, depth);
+
+    /// <summary>Adjust the HA claims currently held by this node (never below zero).</summary>
+    public static void AddHaClaimsHeld(long delta)
+    {
+        var value = Interlocked.Add(ref _haClaimsHeld, delta);
+        // A steal elsewhere can complete a claim we no longer hold; clamp
+        // rather than report a negative node-local gauge.
+        if (value < 0)
+            Interlocked.CompareExchange(ref _haClaimsHeld, 0, value);
+    }
+
     /// <summary>
     /// Convenience: stamp <see cref="SetLastCrawlCompletedUnix"/> with the current
     /// UTC time. Call from the crawl-completion path.
@@ -168,9 +200,15 @@ public static class Metrics
     public static long ItemsReAcled => Interlocked.Read(ref _itemsReAcled);
     public static long AclDriftDetected => Interlocked.Read(ref _aclDriftDetected);
     public static long DegradedPauses => Interlocked.Read(ref _degradedPauses);
+    public static long WebhookAccepted => Interlocked.Read(ref _webhookAccepted);
+    public static long WebhookRejected => Interlocked.Read(ref _webhookRejected);
+    public static long WebhookDropped => Interlocked.Read(ref _webhookDropped);
+    public static long HaClaimsAcquired => Interlocked.Read(ref _haClaimsAcquired);
     public static long DeadLetterDepth => Interlocked.Read(ref _deadLetterDepth);
     public static long LastDriftFindings => Interlocked.Read(ref _lastDriftFindings);
     public static long LastCrawlCompletedUnix => Interlocked.Read(ref _lastCrawlCompletedUnix);
+    public static long WebhookQueueDepth => Interlocked.Read(ref _webhookQueueDepth);
+    public static long HaClaimsHeld => Math.Max(0, Interlocked.Read(ref _haClaimsHeld));
 
     /// <summary>Seconds since the process (metrics registry) started.</summary>
     public static double UptimeSeconds => (DateTime.UtcNow - StartUtc).TotalSeconds;
@@ -191,9 +229,15 @@ public static class Metrics
         Interlocked.Exchange(ref _itemsReAcled, 0);
         Interlocked.Exchange(ref _aclDriftDetected, 0);
         Interlocked.Exchange(ref _degradedPauses, 0);
+        Interlocked.Exchange(ref _webhookAccepted, 0);
+        Interlocked.Exchange(ref _webhookRejected, 0);
+        Interlocked.Exchange(ref _webhookDropped, 0);
+        Interlocked.Exchange(ref _haClaimsAcquired, 0);
         Interlocked.Exchange(ref _deadLetterDepth, 0);
         Interlocked.Exchange(ref _lastCrawlCompletedUnix, 0);
         Interlocked.Exchange(ref _lastDriftFindings, 0);
+        Interlocked.Exchange(ref _webhookQueueDepth, 0);
+        Interlocked.Exchange(ref _haClaimsHeld, 0);
         ExtractionAttempts.Clear();
         ExtractionSuccesses.Clear();
         ClassifiedByLabel.Clear();
@@ -224,6 +268,10 @@ public static class Metrics
         Counter(sb, "items_reacled_total", "Total items whose ACL was refreshed after a permission change (re-ACL).", ItemsReAcled);
         Counter(sb, "acl_drift_detected_total", "Total items whose resolved ACL drifted from the indexed ACL.", AclDriftDetected);
         Counter(sb, "degraded_pauses_total", "Total crawls that paused into degraded mode (a critical breaker was open).", DegradedPauses);
+        Counter(sb, "webhook_accepted_total", "Webhook requests accepted with a valid HMAC signature (202).", WebhookAccepted);
+        Counter(sb, "webhook_rejected_total", "Webhook requests rejected 401 (invalid or missing HMAC signature).", WebhookRejected);
+        Counter(sb, "webhook_dropped_total", "Webhook events shed by the drop-oldest queue cap (healed by the next crawl).", WebhookDropped);
+        Counter(sb, "ha_claims_acquired_total", "HA crawl-resource claims acquired by this node (including steals).", HaClaimsAcquired);
 
         // Per-dependency circuit-breaker state (0=closed, 1=open, 2=half-open)
         // plus trip/reset counters, so a scrape shows dependency health.
@@ -240,6 +288,8 @@ public static class Metrics
             "Sensitive-data detections, by category (PII/PCI/secret/MNE-adjacent).", DetectionsByCategory, "category");
 
         Gauge(sb, "dead_letter_depth", "Current number of records in the dead-letter queue.", DeadLetterDepth);
+        Gauge(sb, "webhook_queue_depth", "Current undrained webhook event queue depth.", WebhookQueueDepth);
+        Gauge(sb, "ha_claims_held", "HA crawl-resource claims currently held by this node.", HaClaimsHeld);
         Gauge(sb, "last_crawl_completed_timestamp_seconds", "Unix timestamp (seconds) of the last completed crawl; 0 if none yet.", LastCrawlCompletedUnix);
         Gauge(sb, "last_drift_findings", "Finding count of the last reconcile drift sweep; 0 when in sync or never run.", LastDriftFindings);
         GaugeDouble(sb, "uptime_seconds", "Seconds since the connector process started.", UptimeSeconds);

@@ -1,0 +1,156 @@
+# Prometheus alert rules for the Salesforce Copilot Connector.
+#
+# Scrape target: the connector's /metrics endpoint (HEALTH_PORT>0), metric
+# prefix salesforce_connector_ (Infrastructure/Metrics.cs). Every alert names
+# its runbook anchor in docs/RUNBOOKS.md — page/warn severities follow that
+# file's escalation guidance. Log-only failure modes (auth failures, deletion
+# sweep guard trips, state corruption) have NO metrics and are covered by
+# ops/azure-monitor-alerts.kql (or your SIEM per docs/SIEM.md) instead.
+#
+# Tune the thresholds to your schedule: the defaults assume the shipped
+# --full-crawl-hours 24 --incremental-hours 4 cadence.
+
+groups:
+  - name: salesforce-connector
+    rules:
+      # ── Availability ───────────────────────────────────────────────────────
+      - alert: SfConnectorDown
+        expr: up{job="salesforce-connector"} == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Connector scrape target {{ $labels.instance }} is down"
+          description: >-
+            The /metrics endpoint stopped answering — service stopped, crashed,
+            or HEALTH_PORT misconfigured.
+          runbook_url: "https://github.com/JosephSaad/SalesforceCopilotConnector/blob/main/docs/RUNBOOKS.md#crawl-stalled"
+
+      - alert: SfConnectorRestartLoop
+        # uptime_seconds is monotonic per process; resets = process restarts.
+        expr: resets(salesforce_connector_uptime_seconds{job="salesforce-connector"}[1h]) > 2
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "Connector on {{ $labels.instance }} restarted >2x in 1h (crash loop)"
+          description: >-
+            The SCM restart policy is cycling the service. Check the Windows
+            Application event log (source SalesforceConnector, id 3000) or the
+            run-dir log for the crash cause — usually config or auth.
+          runbook_url: "https://github.com/JosephSaad/SalesforceCopilotConnector/blob/main/docs/RUNBOOKS.md#crawl-stalled"
+
+      # ── Crawl progress ─────────────────────────────────────────────────────
+      - alert: SfConnectorCrawlStalled
+        # Newest completed crawl older than schedule (24h) + generous crawl
+        # window (6h). The "> 0" filter ignores nodes that have not completed
+        # any crawl yet (see SfConnectorCrawlNeverCompleted).
+        expr: >-
+          (time() - max(salesforce_connector_last_crawl_completed_timestamp_seconds{job="salesforce-connector"} > 0))
+          > 108000
+        for: 15m
+        labels:
+          severity: page
+        annotations:
+          summary: "No completed crawl in >30h"
+          description: >-
+            last_crawl_completed_timestamp_seconds has not advanced for longer
+            than the 24h schedule plus a 6h crawl window.
+          runbook_url: "https://github.com/JosephSaad/SalesforceCopilotConnector/blob/main/docs/RUNBOOKS.md#crawl-stalled"
+
+      - alert: SfConnectorCrawlNeverCompleted
+        # Fresh node that has been up half a day without ever finishing a crawl.
+        expr: >-
+          (max by (instance) (salesforce_connector_last_crawl_completed_timestamp_seconds{job="salesforce-connector"}) == 0)
+          and (max by (instance) (salesforce_connector_uptime_seconds{job="salesforce-connector"}) > 43200)
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.instance }} has never completed a crawl (up >12h)"
+          runbook_url: "https://github.com/JosephSaad/SalesforceCopilotConnector/blob/main/docs/RUNBOOKS.md#crawl-stalled"
+
+      - alert: SfConnectorLeaseStuck
+        # Approximation: a crawl is open (started > completed) but NO object is
+        # fetching records anywhere for 45m — the wedge signature. Per-object
+        # fetched gauges reset at crawl start, so a healthy running crawl always
+        # shows movement. Confirm against dbo.ObjectClaims per the runbook.
+        expr: >-
+          (sum(salesforce_connector_crawls_started_total{job="salesforce-connector"})
+           - sum(salesforce_connector_crawls_completed_total{job="salesforce-connector"})) > 0
+          and
+          sum(rate(salesforce_connector_object_records_fetched{job="salesforce-connector"}[45m])) == 0
+        for: 45m
+        labels:
+          severity: page
+        annotations:
+          summary: "Crawl open but no per-object progress for 45m (stuck lease/worker)"
+          runbook_url: "https://github.com/JosephSaad/SalesforceCopilotConnector/blob/main/docs/RUNBOOKS.md#lease-stuck"
+
+      # ── Throttling / degradation ───────────────────────────────────────────
+      - alert: SfConnectorThrottle429Storm
+        expr: sum by (instance) (rate(salesforce_connector_throttled_429_total{job="salesforce-connector"}[15m])) > 0.5
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Sustained Graph 429 storm on {{ $labels.instance }} (>0.5/s over 15m)"
+          runbook_url: "https://github.com/JosephSaad/SalesforceCopilotConnector/blob/main/docs/RUNBOOKS.md#429-storm"
+
+      - alert: SfConnectorConcurrencyPinned
+        # Breaker-open equivalent: adaptive concurrency stuck at the floor while
+        # work is still flowing (ingest rate > 0 rules out idle-between-cycles).
+        expr: >-
+          max by (instance) (salesforce_connector_adaptive_concurrency_level{job="salesforce-connector"}) == 1
+          and
+          sum by (instance) (rate(salesforce_connector_items_ingested_total{job="salesforce-connector"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Adaptive concurrency pinned at 1 on {{ $labels.instance }} for 15m"
+          description: >-
+            The pipeline is running single-worker after repeated 429s and is not
+            ramping back up (3 consecutive successes per step).
+          runbook_url: "https://github.com/JosephSaad/SalesforceCopilotConnector/blob/main/docs/RUNBOOKS.md#adaptive-concurrency-degradation"
+
+      # ── Dead-letter queue ──────────────────────────────────────────────────
+      - alert: SfConnectorDeadLetterDepthHigh
+        expr: max(salesforce_connector_dead_letter_depth{job="salesforce-connector"}) > 100
+        for: 30m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Dead-letter backlog above 100 records"
+          description: >-
+            Check the dominant error signature before retrying — one signature
+            = systematic failure, long tail = throttling remnants.
+          runbook_url: "https://github.com/JosephSaad/SalesforceCopilotConnector/blob/main/docs/RUNBOOKS.md#dead-letter-growth"
+
+      - alert: SfConnectorDeadLetterNotDraining
+        # A non-empty backlog that survived a full day includes at least one
+        # scheduled crawl + operator window without a successful retry-failed.
+        expr: min_over_time(salesforce_connector_dead_letter_depth{job="salesforce-connector"}[24h]) > 0
+        for: 1h
+        labels:
+          severity: warn
+        annotations:
+          summary: "Dead-letter backlog has not drained in 24h"
+          runbook_url: "https://github.com/JosephSaad/SalesforceCopilotConnector/blob/main/docs/RUNBOOKS.md#dead-letter-growth"
+
+      # ── Failure ratio ──────────────────────────────────────────────────────
+      - alert: SfConnectorHighFailureRatio
+        # >5% of items failing over an hour of real ingest volume.
+        expr: >-
+          sum(rate(salesforce_connector_items_failed_total{job="salesforce-connector"}[1h]))
+          /
+          (sum(rate(salesforce_connector_items_ingested_total{job="salesforce-connector"}[1h]))
+           + sum(rate(salesforce_connector_items_failed_total{job="salesforce-connector"}[1h]))) > 0.05
+          and
+          sum(rate(salesforce_connector_items_failed_total{job="salesforce-connector"}[1h])) > 0.01
+        for: 30m
+        labels:
+          severity: warn
+        annotations:
+          summary: "More than 5% of items failing to ingest (1h window)"
+          runbook_url: "https://github.com/JosephSaad/SalesforceCopilotConnector/blob/main/docs/RUNBOOKS.md#dead-letter-growth"

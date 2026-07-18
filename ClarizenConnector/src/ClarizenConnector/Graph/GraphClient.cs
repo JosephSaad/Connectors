@@ -57,6 +57,10 @@ public class GraphClient
     private DateTimeOffset _tokenExpiresAt = DateTimeOffset.MinValue;
     private readonly SemaphoreSlim _tokenLock = new(1, 1);
 
+    /// <summary>Cached signing certificate (resolved once per client lifetime).</summary>
+    private System.Security.Cryptography.X509Certificates.X509Certificate2? _clientCertificate;
+    private bool _authModeLogged;
+
     /// <summary>Async delay seam so tests never really sleep.</summary>
     internal Func<TimeSpan, CancellationToken, Task> DelayAsync { get; set; } =
         (delay, ct) => Task.Delay(delay, ct);
@@ -70,8 +74,10 @@ public class GraphClient
         // Null → passthrough (disabled) breaker, so the many test fixtures that
         // construct a GraphClient directly are byte-identical to before.
         _breaker = breaker ?? CircuitBreaker.Disabled;
+        // Injected handlers (tests) bypass the factory; production clients get
+        // PROXY_URL / PROXY_BYPASS / CA_BUNDLE_PATH support (docs/DEPLOYMENT_ENTERPRISE.md).
         _http = handler is null
-            ? new HttpClient { Timeout = TimeSpan.FromSeconds(120) }
+            ? new HttpClient(HttpClientFactory.CreateHandler()) { Timeout = TimeSpan.FromSeconds(120) }
             : new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
     }
 
@@ -103,13 +109,36 @@ public class GraphClient
             if (_token is not null && DateTimeOffset.UtcNow < _tokenExpiresAt)
                 return _token;
 
-            using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+            // Certificate credential (GRAPH_CLIENT_CERT_PATH / _THUMBPRINT)
+            // wins over the client secret when both are configured. The mode is
+            // logged once; key material never is.
+            var form = new Dictionary<string, string>
             {
                 ["client_id"] = _config.AadClientId,
-                ["client_secret"] = _config.AadClientSecret,
                 ["scope"] = TokenScope,
                 ["grant_type"] = "client_credentials",
-            });
+            };
+            if (_config.UseGraphCertificate)
+            {
+                _clientCertificate ??= ClientAssertion.Resolve(_config);
+                form["client_assertion_type"] = ClientAssertion.AssertionType;
+                form["client_assertion"] = ClientAssertion.Build(
+                    _clientCertificate, _config.AadClientId, TokenEndpoint);
+                LogAuthModeOnce(
+                    !string.IsNullOrWhiteSpace(_config.GraphClientCertPath)
+                        ? "certificate (GRAPH_CLIENT_CERT_PATH)"
+                        : "certificate (GRAPH_CLIENT_CERT_THUMBPRINT, Windows store)");
+            }
+            else
+            {
+                form["client_secret"] = _config.AadClientSecret
+                    ?? throw new InvalidOperationException(
+                        "Invalid configuration: Missing SECRET_AAD_APP_CLIENT_SECRET "
+                        + "(and no certificate credential is configured).");
+                LogAuthModeOnce("client secret (SECRET_AAD_APP_CLIENT_SECRET)");
+            }
+
+            using var content = new FormUrlEncodedContent(form);
             using var response = await _http.PostAsync(TokenEndpoint, content, ct).ConfigureAwait(false);
             var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
@@ -297,6 +326,16 @@ public class GraphClient
             // can never be leaked and the breaker can never wedge.
             Settle(_breaker.OnIgnored);
         }
+    }
+
+    /// <summary>Log the active Graph credential mode once per client — the mode
+    /// and its SOURCE setting only, never key material.</summary>
+    private void LogAuthModeOnce(string mode)
+    {
+        if (_authModeLogged)
+            return;
+        _authModeLogged = true;
+        Logger.Info($"Graph auth mode: {mode}.");
     }
 
     /// <summary>Classify a terminal HTTP status for the Graph breaker.</summary>

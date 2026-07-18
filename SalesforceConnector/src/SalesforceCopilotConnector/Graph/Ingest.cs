@@ -67,6 +67,7 @@ internal sealed class AdaptiveConcurrency
         _max = Math.Max(1, maxWorkers);
         _current = _max;
         _successStreak = 0;
+        Metrics.SetAdaptiveConcurrency(_current);
     }
 
     public int Current => _current;
@@ -81,6 +82,7 @@ internal sealed class AdaptiveConcurrency
             {
                 _current += 1;
                 _successStreak = 0;
+                Metrics.SetAdaptiveConcurrency(_current);
                 Logger.Info($"Graph concurrency ramped up to {_current}");
             }
         }
@@ -94,6 +96,7 @@ internal sealed class AdaptiveConcurrency
             var prev = _current;
             _current = Math.Max(1, _current - 1);
             _successStreak = 0;
+            Metrics.SetAdaptiveConcurrency(_current);
             if (_current != prev)
                 Logger.Warning($"Graph 429 throttling — concurrency reduced to {_current}");
         }
@@ -1150,6 +1153,7 @@ public static class Ingest
                     stats.ObjectTypeCounts[objectType] =
                         stats.ObjectTypeCounts.GetValueOrDefault(objectType, 0) + batchSize;
                 }
+                Metrics.AddObjectFetched(objectType, batchSize);
 
                 Logger.Info(
                     "\n" + new string('=', 70) +
@@ -1513,6 +1517,10 @@ public static class Ingest
             dashboard.SetActivity("Querying Salesforce record counts...");
             var totalCounts = await GetObjectCountsHook(config, since);
             dashboard.SetTotalCounts(totalCounts);
+            // /metrics per-object progress denominators (only known when the
+            // record counts were queried, i.e. dashboard runs).
+            foreach (var (countObjectType, count) in totalCounts)
+                Metrics.SetObjectTotal(countObjectType, count);
             Logger.Info($"Record counts: {PyDictRepr(totalCounts)} (total: {totalCounts.Values.Sum()})");
         }
 

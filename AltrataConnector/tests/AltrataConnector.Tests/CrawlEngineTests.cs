@@ -116,25 +116,39 @@ public class CrawlEngineTests
     [Fact]
     public async Task FailedItemsAreDeadLetteredAndStillReconcile()
     {
-        using var harness = new CrawlHarness();
-        TestFixtures.WriteDelivery(harness.FeedPath, "d1",
-            ("persons.json", Datasets.PersonProfile,
-                TestFixtures.PersonJson(("P1", "A", null, null), ("P2", "B", null, null),
-                                        ("P3", "C", null, null)), 3));
-        harness.Graph.FailingItemIds.Add("PersonProfile-P2");
+        // This test pins the FULL payload-capture path; the connector DEFAULT
+        // is DEADLETTER_PAYLOAD_MODE=redacted (DeadLetterProtectionTests).
+        Environment.SetEnvironmentVariable(DeadLetterPolicy.EnvVar, DeadLetterPolicy.Full);
+        try
+        {
+            using var harness = new CrawlHarness();
+            TestFixtures.WriteDelivery(harness.FeedPath, "d1",
+                ("persons.json", Datasets.PersonProfile,
+                    TestFixtures.PersonJson(("P1", "A", null, null), ("P2", "B", null, null),
+                                            ("P3", "C", null, null)), 3));
+            harness.Graph.FailingItemIds.Add("PersonProfile-P2");
 
-        var result = await harness.Engine.RunAsync(CrawlKind.Full);
+            var result = await harness.Engine.RunAsync(CrawlKind.Full);
 
-        Assert.Equal(2, result.ItemsIngested);
-        Assert.Equal(1, result.ItemsDeadLettered);
-        var deadLetters = harness.State.ReadDeadLetters();
-        Assert.Single(deadLetters);
-        Assert.Equal("PersonProfile-P2", deadLetters[0].ItemId);
-        Assert.NotEmpty(deadLetters[0].PayloadJson);
+            Assert.Equal(2, result.ItemsIngested);
+            Assert.Equal(1, result.ItemsDeadLettered);
+            var deadLetters = harness.State.ReadDeadLetters();
+            Assert.Single(deadLetters);
+            Assert.Equal("PersonProfile-P2", deadLetters[0].ItemId);
+            Assert.NotEmpty(deadLetters[0].PayloadJson);
+            Assert.False(deadLetters[0].Redacted);
+            // Full mode stamps the raw subject id + its hash for the DSAR guard.
+            Assert.Contains("P2", deadLetters[0].SubjectIds);
+            Assert.Contains(DeadLetterPolicy.HashSubject("P2"), deadLetters[0].SubjectHashes);
 
-        // ingested + dead-lettered == manifest ⇒ reconciled and marked processed.
-        Assert.Equal(Reconciliation.StatusReconciled, result.Reconciliations[0].Status);
-        Assert.True(harness.State.IsDeliveryProcessed("d1"));
+            // ingested + dead-lettered == manifest ⇒ reconciled and marked processed.
+            Assert.Equal(Reconciliation.StatusReconciled, result.Reconciliations[0].Status);
+            Assert.True(harness.State.IsDeliveryProcessed("d1"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(DeadLetterPolicy.EnvVar, null);
+        }
     }
 
     [Fact]

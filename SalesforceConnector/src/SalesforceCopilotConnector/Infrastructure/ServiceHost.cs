@@ -45,6 +45,14 @@ public static class ServiceHost
         Directory.SetCurrentDirectory(
             !string.IsNullOrWhiteSpace(home) ? home : AppContext.BaseDirectory);
 
+        // Windows Event Log mirroring (EVENTLOG_ENABLED=true): attach before the
+        // host starts so the service lifecycle events below reach the event log
+        // even though file/console logging is only wired later by SetupLogging.
+        // The lifecycle logger runs at INFO so those records pass the root level
+        // gate (root still defaults to WARNING at this point).
+        EventLogSink.AttachIfEnabled();
+        Logging.GetLoggerObject("salesforce_connector.service").Level = LogLevels.Info;
+
         var builder = Host.CreateApplicationBuilder();
         builder.Services.AddWindowsService(
             options => options.ServiceName = "SalesforceCopilotConnector");

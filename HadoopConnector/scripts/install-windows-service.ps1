@@ -88,6 +88,25 @@ else {
 [Environment]::SetEnvironmentVariable("HADOOP_CONNECTOR_HOME", $InstallDir, "Machine")
 sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
 
+# Register the Windows Event Log source used by EVENTLOG_ENABLED=true
+# (docs/SIEM.md). Idempotent: SourceExists is checked first, and a re-run
+# against an existing source is a no-op. Creation needs elevation — which this
+# script already requires — so the service account itself never needs the
+# registry rights to create sources at runtime.
+$eventSource = "HadoopConnector"
+try {
+    if (-not [System.Diagnostics.EventLog]::SourceExists($eventSource)) {
+        New-EventLog -LogName Application -Source $eventSource
+        Write-Host "Event log source '$eventSource' registered (Application log)."
+    }
+    else {
+        Write-Host "Event log source '$eventSource' already registered."
+    }
+}
+catch {
+    Write-Warning "Could not register event log source '$eventSource': $_ — EVENTLOG_ENABLED mirroring will be disabled until it exists."
+}
+
 Write-Host "Service '$ServiceName' installed."
 Write-Host "  Binary : $binPath"
 Write-Host "  Home   : $InstallDir  (HADOOP_CONNECTOR_HOME)"

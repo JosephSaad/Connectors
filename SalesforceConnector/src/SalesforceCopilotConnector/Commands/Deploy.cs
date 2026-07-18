@@ -95,6 +95,7 @@ public static class Deploy
 
             config = configOverride ?? LoadConfigHook();
             Metrics.IncCrawlsStarted();
+            Metrics.ResetObjectProgress();  // per-object gauges restart each crawl
 
             // Full or incremental based on 'since' parameter
             // (in HA mode only the node that CREATES the crawl clears the shared

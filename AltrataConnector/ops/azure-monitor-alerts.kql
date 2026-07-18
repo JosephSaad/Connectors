@@ -1,0 +1,128 @@
+// Azure Monitor / Microsoft Sentinel scheduled-query rules
+// Altrata Copilot Connector — log-signal alerting (docs/SIEM.md)
+//
+// Source tables assumed:
+//   * Event                    — Windows Application log collected via AMA/WEF,
+//                                Source "AltrataConnector" (EVENTLOG_ENABLED=true;
+//                                ids: 1000 lifecycle / 2000 warning / 3000 error)
+//   * AltrataConnectorLogs_CL  — optional custom text table tailing the JSON
+//                                run logs (LOG_FORMAT=json); raw line in RawData
+// Adjust table/DCR names to your workspace. Each block header states the
+// suggested rule config; runbook anchors point into docs/RUNBOOKS.md.
+// Metric-side rules live in ops/prometheus-alerts.yml — keep BOTH ledger
+// rules enabled; the metric and log paths cross-check each other.
+
+// ============================================================================
+// RULE 1 — Erasure ledger tamper                       *** SECURITY INCIDENT ***
+// Severity: High/Critical | Class: security | Freq: 5m over 15m | Threshold: > 0
+// Tactics: Impact, DefenseEvasion | Create incident: YES, security queue (not ops)
+// Runbook: docs/RUNBOOKS.md#ledger-verify-failure
+//   Triage tamper-vs-torn there: mid-file break or parseable-but-mismatched
+//   hashes = tamper (forensics + DPO); torn final line = ops restore.
+// ============================================================================
+Event
+| where Source == "AltrataConnector" and EventID == 3000
+| where RenderedDescription has "FAILED verification: chain broken at seq"
+     or RenderedDescription has "REFUSING to append"
+| extend BrokenSeq = extract(@"chain broken at seq (\d+)", 1, RenderedDescription),
+         LedgerPath = extract(@"Erasure ledger '([^']+)'", 1, RenderedDescription)
+| project TimeGenerated, Computer, EventID, BrokenSeq, LedgerPath, RenderedDescription
+
+// ============================================================================
+// RULE 2 — Entitlement-violation refusals (fail-closed)
+// Severity: Medium (>=3 in 15m: High) | Class: security | Freq: 15m | Threshold: > 0
+// The connector REFUSED to build/apply an ACL: empty seat list or a forbidden
+// everyone-grant. One = broken seat config (ingestion stopped by design);
+// a burst = someone probing the seat boundary.
+// Runbook: docs/RUNBOOKS.md#seat-file-parse-failure
+// ============================================================================
+Event
+| where Source == "AltrataConnector" and EventID == 3000
+| where RenderedDescription has "ENTITLEMENT:"
+     or RenderedDescription has "refusing to build an ACL"
+     or RenderedDescription has "is forbidden: Altrata items must"
+     or RenderedDescription has "Seat source yielded zero principals"
+| summarize Refusals = count(), Sample = any(RenderedDescription)
+    by Computer, bin(TimeGenerated, 15m)
+
+// ============================================================================
+// RULE 3 — Erasure-race withdrawals (DSAR vs crawl interleave)
+// Severity: Informational (volume > 5/h: Low) | Freq: 1h | Threshold: see query
+// Correct-by-design compensations: a PUT landed while a forget-subject
+// completed; the crawl withdrew the item (suppression wins). Keep as DSAR
+// evidence; alert only on volume (erasures racing bulk ingest windows).
+// Runbook: docs/RUNBOOKS.md#forget-subject-failure-mid-flight
+// ============================================================================
+Event
+| where Source == "AltrataConnector" and EventID == 2000
+| where RenderedDescription has "Erasure-race withdrawal"
+     or RenderedDescription has "DSAR race: withdrew"
+| summarize Withdrawals = count(), Failed = countif(RenderedDescription has "dead-lettered")
+    by Computer, bin(TimeGenerated, 1h)
+| where Withdrawals > 5
+
+// ============================================================================
+// RULE 4 — Erasure completion outstanding (DELETE dead-lettered mid-erasure)
+// Severity: Medium | Freq: 1h | Threshold: > 0
+// A forget-subject could not withdraw everything; suppression + ledger held,
+// Graph DELETEs are queued. A DSAR completion clock is running until
+// retry-failed drains them.
+// Runbook: docs/RUNBOOKS.md#forget-subject-failure-mid-flight
+// ============================================================================
+Event
+| where Source == "AltrataConnector" and EventID == 3000
+| where RenderedDescription has "DELETE dead-lettered; suppression stays durable"
+| project TimeGenerated, Computer, RenderedDescription
+
+// ============================================================================
+// RULE 5 — Feed delivery rejected (manifest gate)
+// Severity: Medium; unexplained repeats: High + security review | Freq: 1h | Threshold: > 0
+// Nothing from a rejected delivery was ingested. Truncated transfer is the
+// benign cause; a mismatch you cannot attribute to corruption = possible feed
+// tampering (THREAT_MODEL boundary 1).
+// Runbook: docs/RUNBOOKS.md#feed-manifest-mismatch
+// ============================================================================
+Event
+| where Source == "AltrataConnector" and EventID == 3000
+| where RenderedDescription has "REJECTED"
+| extend DeliveryId = extract(@"Delivery '([^']+)'", 1, RenderedDescription)
+| project TimeGenerated, Computer, DeliveryId, RenderedDescription
+
+// ============================================================================
+// RULE 6 — Graph auth failure
+// Severity: Medium | Freq: 30m | Threshold: >= 3 (tolerate a blip, catch a rotation miss)
+// Runbook: docs/RUNBOOKS.md#auth-failure  (secret vs certificate triage there;
+// the run log's one-time "Graph auth mode:" line says which credential is live)
+// ============================================================================
+Event
+| where Source == "AltrataConnector" and EventID == 3000
+| where RenderedDescription has "Token request failed"
+| summarize Failures = count(), Sample = any(RenderedDescription)
+    by Computer, bin(TimeGenerated, 30m)
+| where Failures >= 3
+
+// ============================================================================
+// RULE 7 — Mirror-channel silence (heartbeat)
+// Severity: Low | Freq: 1h over 26h window
+// Continuous-mode hosts emit lifecycle id-1000 events at least daily (run
+// start markers). Silence = host down, service stopped, EVENTLOG_ENABLED
+// dropped, or the event source was removed — the one failure the channel
+// cannot report about itself.
+// Runbook: docs/RUNBOOKS.md#ha-failover
+// ============================================================================
+Event
+| where Source == "AltrataConnector" and EventID == 1000
+| summarize LastLifecycle = max(TimeGenerated) by Computer
+| where LastLifecycle < ago(26h)
+
+// ============================================================================
+// RULE 8 (JSON-file variant) — ledger tamper with correlation pivot
+// Use when the custom table ingests LOG_FORMAT=json run logs; correlationId
+// joins the whole erasure cycle (logs + dead-letter + reconciliation + ledger).
+// ============================================================================
+AltrataConnectorLogs_CL
+| extend d = parse_json(RawData)
+| extend level = tostring(d.level), logger = tostring(d.logger),
+         correlationId = tostring(d.correlationId), message = tostring(d.message)
+| where level == "ERROR" and message has "chain broken at seq"
+| project TimeGenerated, Computer, correlationId, logger, message

@@ -33,10 +33,29 @@ public sealed class Alerting : IAlertSink
     public Alerting(string connectorId, HttpClient? http = null)
     {
         _connectorId = connectorId;
-        _http = http ?? SharedHttp;
+        _http = http ?? SharedHttp.Value;
     }
 
-    private static readonly HttpClient SharedHttp = new() { Timeout = TimeSpan.FromSeconds(15) };
+    /// <summary>Webhook client honours PROXY_URL / CA_BUNDLE_PATH too, but a
+    /// BAD connectivity config only degrades to a direct client here — alert
+    /// delivery must never break ingestion (the Graph/API clients are the ones
+    /// that fail fast naming the setting).</summary>
+    private static readonly Lazy<HttpClient> SharedHttp = new(() =>
+    {
+        try
+        {
+            return new HttpClient(HttpConnectivity.CreateHandler())
+            {
+                Timeout = TimeSpan.FromSeconds(15),
+            };
+        }
+        catch (Exception exc)
+        {
+            Logger.Warning($"Alert webhook client falling back to a direct connection " +
+                           $"({exc.Message}) — fix PROXY_URL / CA_BUNDLE_PATH.");
+            return new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        }
+    });
 
     public static string? WebhookUrl
     {

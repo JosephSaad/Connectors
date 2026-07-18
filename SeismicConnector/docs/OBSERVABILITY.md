@@ -39,6 +39,12 @@ All metric names are prefixed `seismic_connector_`:
 | `circuit_breaker_trips_total{dependency}` | counter | times a dependency breaker opened |
 | `circuit_breaker_resets_total{dependency}` | counter | times a dependency breaker recovered (half-open→closed) |
 | `degraded_pauses_total` | counter | crawls that paused into degraded mode (a critical breaker was open) |
+| `webhook_accepted_total` | counter | webhook requests accepted with a valid HMAC signature (202) |
+| `webhook_rejected_total` | counter | webhook requests rejected 401 (invalid/missing HMAC signature) — see docs/RUNBOOKS.md#webhook-401-spike |
+| `webhook_dropped_total` | counter | webhook events shed by the drop-oldest queue cap (healed by the next crawl) |
+| `webhook_queue_depth` | gauge | current undrained webhook event queue depth (cap 10,000) |
+| `ha_claims_acquired_total` | counter | HA crawl-resource claims acquired by this node (including steals) |
+| `ha_claims_held` | gauge | HA claims currently held by this node (node-local view) |
 
 ## Logs
 
@@ -54,6 +60,12 @@ All metric names are prefixed `seismic_connector_`:
   touched.
 * The **reconciliation report** (`reconciliation_*.jsonl`, see
   docs/EXCLUSIONS.md) lives in the same run directory.
+* `EVENTLOG_ENABLED=true` (Windows) mirrors WARNING+ records and lifecycle
+  start/stop marks to the Application Event Log, source `SeismicConnector`,
+  stable event ids 1000/1100/2000/3000 — collection queries in docs/SIEM.md.
+
+Ready-made Grafana dashboard and Prometheus / Azure Monitor alert rules
+(matching the docs/RUNBOOKS.md anchors) ship in `ops/`.
 
 ## Alerts (`ALERT_WEBHOOK_URL`)
 

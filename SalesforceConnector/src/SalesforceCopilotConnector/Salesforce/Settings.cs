@@ -298,6 +298,11 @@ public static class Settings
     {
         LoadLocalEnvironment();
 
+        // Enterprise egress preflight: a broken PROXY_URL / CA_BUNDLE_PATH must
+        // fail HERE with the setting named, not later as a
+        // TypeInitializationException from the first static HttpClient.
+        HttpClientFactory.ValidateStartupConfiguration();
+
         var connectorId = RequireEnv("CONNECTOR_ID");
         ValidateConnectorId(connectorId);
 

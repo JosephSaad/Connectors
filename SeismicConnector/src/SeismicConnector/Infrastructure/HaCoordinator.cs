@@ -330,7 +330,11 @@ public class HaCoordinator
                 cmd.Parameters.AddWithValue("@NodeId", NodeId);
                 var affected = cmd.ExecuteNonQuery();
                 if (affected > 0)
+                {
+                    Metrics.IncHaClaimsAcquired();
+                    Metrics.AddHaClaimsHeld(1);
                     Logger.Info($"[HA] Node {NodeId} claimed '{resource}' (crawl {crawlId})");
+                }
                 return affected > 0;
             }
             catch (SqlException ex) when (ex.Number is 2627 or 2601)
@@ -375,7 +379,8 @@ public class HaCoordinator
             cmd.Parameters.AddWithValue("@CrawlId", crawlId);
             cmd.Parameters.AddWithValue("@Key", Key(resource));
             cmd.Parameters.AddWithValue("@NodeId", NodeId);
-            cmd.ExecuteNonQuery();
+            if (cmd.ExecuteNonQuery() > 0)
+                Metrics.AddHaClaimsHeld(-1);
         });
     }
 

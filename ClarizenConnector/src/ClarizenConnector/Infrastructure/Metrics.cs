@@ -36,6 +36,7 @@ public static class Metrics
     private static long _lastCrawlCompletedUnix;
     private static long _apiBudgetRemaining;
     private static long _webhookReceiverUp;
+    private static long _haClaimsHeld;
 
     private static readonly DateTime StartUtc = DateTime.UtcNow;
 
@@ -62,6 +63,8 @@ public static class Metrics
         SensitiveDetections.AddOrUpdate(category, 1, (_, v) => v + 1);
 
     public static void SetDeadLetterDepth(long depth) => Interlocked.Exchange(ref _deadLetterDepth, depth);
+    /// <summary>HA object-type leases this node currently holds (0 outside HA mode).</summary>
+    public static void SetHaClaimsHeld(long count) => Interlocked.Exchange(ref _haClaimsHeld, count);
     public static void SetApiBudgetRemaining(long remaining) => Interlocked.Exchange(ref _apiBudgetRemaining, remaining);
     /// <summary>1 while the webhook receiver is bound and listening, else 0.</summary>
     public static void SetWebhookReceiverUp(bool up) => Interlocked.Exchange(ref _webhookReceiverUp, up ? 1 : 0);
@@ -87,6 +90,7 @@ public static class Metrics
     public static long WebhookEventsRejected => Interlocked.Read(ref _webhookEventsRejected);
     public static long WebhookReceiverUp => Interlocked.Read(ref _webhookReceiverUp);
     public static long DeadLetterDepth => Interlocked.Read(ref _deadLetterDepth);
+    public static long HaClaimsHeld => Interlocked.Read(ref _haClaimsHeld);
     public static long ApiBudgetRemaining => Interlocked.Read(ref _apiBudgetRemaining);
     public static long LastCrawlCompletedUnix => Interlocked.Read(ref _lastCrawlCompletedUnix);
 
@@ -117,6 +121,7 @@ public static class Metrics
         Interlocked.Exchange(ref _webhookEventsRejected, 0);
         Interlocked.Exchange(ref _webhookReceiverUp, 0);
         Interlocked.Exchange(ref _deadLetterDepth, 0);
+        Interlocked.Exchange(ref _haClaimsHeld, 0);
         Interlocked.Exchange(ref _apiBudgetRemaining, 0);
         Interlocked.Exchange(ref _lastCrawlCompletedUnix, 0);
         ItemsClassified.Clear();
@@ -147,6 +152,7 @@ public static class Metrics
         Gauge(sb, "webhook_receiver_up", "1 while the webhook receiver is bound and listening, else 0.", WebhookReceiverUp);
         Gauge(sb, "tracing_enabled", "1 when OpenTelemetry OTLP export is registered (OTEL_EXPORTER_OTLP_ENDPOINT set), else 0.", Tracing.Enabled ? 1 : 0);
         Gauge(sb, "dead_letter_depth", "Current number of records in the dead-letter queue.", DeadLetterDepth);
+        Gauge(sb, "ha_claims_held", "HA object-type leases this node currently holds (0 outside HA mode).", HaClaimsHeld);
         Gauge(sb, "api_budget_remaining", "Remaining Clarizen API calls in today's client-side budget.", ApiBudgetRemaining);
         Gauge(sb, "last_crawl_completed_timestamp_seconds", "Unix timestamp (seconds) of the last completed crawl; 0 if none yet.", LastCrawlCompletedUnix);
         GaugeDouble(sb, "uptime_seconds", "Seconds since the connector process started.", UptimeSeconds);

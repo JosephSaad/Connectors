@@ -250,6 +250,117 @@ public static class SyncState
 
     // ── Dead-letter queue ────────────────────────────────────────────────────
 
+    /// <summary>
+    /// DEADLETTER_PAYLOAD_MODE: <c>full</c> (default — request/response bodies
+    /// stored verbatim for debugging) or <c>redacted</c> — indexed content and
+    /// property VALUES are stripped before the record is persisted (file or
+    /// SQL backend alike), keeping ids, teamsite/version identifiers, error
+    /// details, attempt metadata and a SHA-256 of each stripped value so
+    /// payloads can still be compared. retry-failed is unaffected: it re-reads
+    /// only <c>item_id</c>/<c>object_type</c> and re-fetches content from
+    /// Seismic — it never replays stored payloads.
+    /// </summary>
+    public const string PayloadModeEnvVar = "DEADLETTER_PAYLOAD_MODE";
+
+    /// <summary>True when DEADLETTER_PAYLOAD_MODE=redacted (case-insensitive). Read live.</summary>
+    internal static bool RedactDeadLetterPayloads =>
+        string.Equals(
+            Environment.GetEnvironmentVariable(PayloadModeEnvVar),
+            "redacted",
+            StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Top-level keys whose values survive redaction verbatim (identifiers,
+    /// error/attempt metadata — never indexed content). Key match is
+    /// case-insensitive; any key ENDING in "id" also survives.</summary>
+    private static readonly HashSet<string> RedactionKeptKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "id", "teamsite", "teamsiteId", "version", "versionId", "error", "errors",
+        "attempt", "attempts", "status", "code", "timestamp", "object_type", "type",
+        "accessType", "@odata.type", "acl",
+    };
+
+    private static bool IsKeptKey(string key) =>
+        RedactionKeptKeys.Contains(key)
+        || key.EndsWith("id", StringComparison.OrdinalIgnoreCase)
+        || key.EndsWith("@odata.type", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Replacement stub carrying the SHA-256 (first 16 bytes, hex) and
+    /// byte length of the stripped value, so two dead-letter records with the
+    /// same payload are still comparable without exposing the payload.</summary>
+    internal static string RedactionStub(string value)
+    {
+        var bytes = Utf8NoBom.GetBytes(value);
+        var hash = System.Security.Cryptography.SHA256.HashData(bytes);
+        return $"[redacted sha256={Convert.ToHexString(hash, 0, 16).ToLowerInvariant()} bytes={bytes.Length}]";
+    }
+
+    /// <summary>
+    /// Redact one dead-letter payload (request or response body): the
+    /// externalItem <c>content.value</c> and every non-identifier
+    /// <c>properties</c>/object value is replaced with a hash stub (strings) or
+    /// null (numbers/booleans). Identifiers (*id keys), teamsite/version,
+    /// error/attempt/status metadata, ACL entries and @odata.type annotations
+    /// are preserved. Returns a redacted CLONE; the input is never mutated.
+    /// </summary>
+    internal static JsonNode? RedactDeadLetterPayload(JsonNode? payload)
+    {
+        if (payload is null)
+            return null;
+        var clone = payload.DeepClone();
+        RedactNode(clone);
+        return clone;
+    }
+
+    private static void RedactNode(JsonNode? node)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var key in obj.Select(p => p.Key).ToList())
+                {
+                    var value = obj[key];
+                    switch (value)
+                    {
+                        case JsonObject or JsonArray:
+                            if (!IsKeptKey(key))
+                                RedactNode(value);
+                            break;
+                        case JsonValue when IsKeptKey(key):
+                            break;
+                        case JsonValue v when v.GetValueKind() == JsonValueKind.String:
+                            obj[key] = RedactionStub(v.GetValue<string>());
+                            break;
+                        case JsonValue v when v.GetValueKind() is JsonValueKind.Number
+                            or JsonValueKind.True or JsonValueKind.False:
+                            obj[key] = null;
+                            break;
+                    }
+                }
+                break;
+            case JsonArray array:
+                for (var i = 0; i < array.Count; i++)
+                {
+                    var element = array[i];
+                    if (element is JsonValue v && v.GetValueKind() == JsonValueKind.String)
+                        array[i] = RedactionStub(v.GetValue<string>());
+                    else
+                        RedactNode(element);
+                }
+                break;
+        }
+    }
+
+    /// <summary>Apply the payload-protection mode to a bodies map (no-op in full mode).</summary>
+    private static Dictionary<string, JsonNode?>? ApplyPayloadMode(Dictionary<string, JsonNode?>? bodies)
+    {
+        if (bodies is null || bodies.Count == 0 || !RedactDeadLetterPayloads)
+            return bodies;
+        var redacted = new Dictionary<string, JsonNode?>(bodies.Count, StringComparer.Ordinal);
+        foreach (var (itemId, body) in bodies)
+            redacted[itemId] = RedactDeadLetterPayload(body);
+        return redacted;
+    }
+
     /// <summary>Return the path to the dead-letter JSONL file for <paramref name="connectorId"/>.</summary>
     public static string FailedRecordsPath(string connectorId)
     {
@@ -281,6 +392,10 @@ public static class SyncState
         {
             return;
         }
+        // Payload protection (DEADLETTER_PAYLOAD_MODE=redacted) applies before
+        // the backend branch so file and SQL records are redacted identically.
+        requestBodies = ApplyPayloadMode(requestBodies);
+        responseBodies = ApplyPayloadMode(responseBodies);
         if (UseSqlServer)
         {
             SqlStateStore.AppendDeadLetter(

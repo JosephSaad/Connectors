@@ -214,6 +214,9 @@ public sealed class MatchReviewQueue : IMatchReviewSink
             using var stream = new FileStream(Path, FileMode.Append, FileAccess.Write, FileShare.Read);
             using var writer = new StreamWriter(stream, new UTF8Encoding(false));
             writer.WriteLine(System.Text.Json.JsonSerializer.Serialize(entry));
+            // Review-queue depth gauge (adjudication backlog alerting —
+            // docs/RUNBOOKS.md "Review-queue growth").
+            Infrastructure.Metrics.Set("altrata_match_review_depth", _seen.Count);
         }
     }
 

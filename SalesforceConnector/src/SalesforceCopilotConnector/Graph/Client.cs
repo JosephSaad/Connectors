@@ -133,7 +133,10 @@ public class GraphClient
     // logs via logging.getLogger("azure.identity").setLevel(logging.WARNING);
     // Azure.Identity for .NET does not emit through our logger, so no equivalent is needed.
 
-    private readonly DefaultAzureCredential _credential;
+    // TokenCredential, not DefaultAzureCredential: GraphAuth returns a
+    // certificate-based credential when GRAPH_CLIENT_CERT_PATH/_THUMBPRINT is
+    // set, and the default chain (client secret et al.) otherwise.
+    private readonly TokenCredential _credential;
     // internal (not private): tests preset a token the way the Python tests
     // patch DefaultAzureCredential.get_token (fixture ``client``).
     internal AccessToken? _token;
@@ -155,9 +158,10 @@ public class GraphClient
         int maxRetries = 4,
         int retryBackoffBase = 2)
     {
-        _credential = new DefaultAzureCredential();
+        _credential = GraphAuth.CreateCredential();
         _token = null;
-        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
+        // HttpClientFactory applies PROXY_URL / CA_BUNDLE_PATH uniformly.
+        _http = new HttpClient(HttpClientFactory.CreateHandler()) { Timeout = TimeSpan.FromSeconds(120) };
         _baseUrl = $"{GraphBaseUrl}/{apiVersion}";
         _delaySeconds = delaySeconds;
         _maxRetries = maxRetries;
@@ -405,7 +409,8 @@ public class GraphClient
         {
             if (_token is null || (_token.Value.ExpiresOn - DateTimeOffset.UtcNow).TotalSeconds < RefreshBuffer)
             {
-                _token = await _credential.GetTokenAsync(new TokenRequestContext(new[] { GraphScope }));
+                _token = await _credential.GetTokenAsync(
+                    new TokenRequestContext(new[] { GraphScope }), CancellationToken.None);
             }
         }
         finally

@@ -517,7 +517,8 @@ public class AsyncSalesforceClient
     {
         InstanceUrl = instanceUrl.TrimEnd('/');
         ApiVersion = apiVersion;
-        _session = new HttpClient(new SocketsHttpHandler { MaxConnectionsPerServer = 20 })
+        // HttpClientFactory applies PROXY_URL / CA_BUNDLE_PATH uniformly.
+        _session = new HttpClient(HttpClientFactory.CreateHandler(maxConnectionsPerServer: 20))
         {
             Timeout = Timeout.InfiniteTimeSpan,
         };

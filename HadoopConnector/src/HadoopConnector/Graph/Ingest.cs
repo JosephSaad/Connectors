@@ -450,7 +450,10 @@ public sealed class IngestPipeline
         var fetch = await FetchRecordsAsync(objectConfig, fullCrawl, since, ct).ConfigureAwait(false);
         var records = fetch.Records;
         if (fetch.Incomplete)
+        {
             summary.PartialObjects.Add(objectConfig.ObjectName);
+            Metrics.IncPartialObjects();
+        }
         Logger.Info($"{objectConfig.ObjectName}: {records.Count} record(s) to process.");
 
         var chunks = Chunk(records, cfg.IngestChunkSize);
@@ -512,6 +515,7 @@ public sealed class IngestPipeline
                 $"{objectConfig.ObjectName}: deletion sweep skipped — {reason}, so the source "
                 + "id set is incomplete.");
             summary.SweepSkipped.Add(objectConfig.ObjectName);
+            Metrics.IncSweepsSuppressed();
         }
     }
 
@@ -592,6 +596,7 @@ public sealed class IngestPipeline
                 + $"be deleted, above the DELETION_SYNC_MAX_ITEMS={maxItems} absolute safety cap. "
                 + "If this drop is real, raise the cap (or set it to 0 to disable) and re-run.");
             summary.SweepSkipped.Add(objectConfig.ObjectName);
+            Metrics.IncSweepsSuppressed();
             await Alerting.RaiseAsync(
                 "deletion_sweep_skipped",
                 $"Deletion sweep for '{objectConfig.ObjectName}' skipped: {stale.Count} stale item(s) "
@@ -628,6 +633,7 @@ public sealed class IngestPipeline
                     + $"DELETION_SYNC_MAX_PERCENT={maxPercent} safety guard. If this drop is real, "
                     + "raise the threshold (or set it to 0/100 to disable the guard) and re-run.");
                 summary.SweepSkipped.Add(objectConfig.ObjectName);
+                Metrics.IncSweepsSuppressed();
                 await Alerting.RaiseAsync(
                     "deletion_sweep_skipped",
                     $"Deletion sweep for '{objectConfig.ObjectName}' skipped: {stale.Count}/{indexed.Count} "

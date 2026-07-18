@@ -42,7 +42,8 @@ public static class ApiClient
     /// </summary>
     private static HttpClient BuildSfSession()
     {
-        var handler = new SocketsHttpHandler { MaxConnectionsPerServer = 20 };
+        // HttpClientFactory applies PROXY_URL / CA_BUNDLE_PATH uniformly.
+        var handler = HttpClientFactory.CreateHandler(maxConnectionsPerServer: 20);
         return new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
     }
 

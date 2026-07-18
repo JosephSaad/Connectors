@@ -90,6 +90,11 @@ public class MetricsTests
         Metrics.IncRecordsMatched(60);
         Metrics.IncRecordsFiltered("predicate", 40);
         Metrics.SetDeadLetterDepth(2);
+        Metrics.IncGuardRefusals();
+        Metrics.IncPartialObjects(2);
+        Metrics.IncSweepsSuppressed(3);
+        Metrics.AddHaClaimsHeld(+2);
+        Metrics.AddHaClaimsHeld(-1);
 
         Assert.Equal(5, Metrics.ItemsIngested);
         Assert.Equal(1, Metrics.ItemsFailed);
@@ -112,12 +117,39 @@ public class MetricsTests
         Assert.Contains("hadoop_connector_records_filtered_total{stage=\"predicate\"} 40", text);
         Assert.Contains("hadoop_connector_dead_letter_depth 2", text);
         Assert.Contains("hadoop_connector_tracing_enabled", text);
+        // Enterprise ops pack counters/gauges (ops/grafana-dashboard.json and
+        // ops/prometheus-alerts.yml key on these exact names).
+        Assert.Contains("# TYPE hadoop_connector_guard_refusals_total counter", text);
+        Assert.Contains("hadoop_connector_guard_refusals_total 1", text);
+        Assert.Contains("# TYPE hadoop_connector_partial_objects_total counter", text);
+        Assert.Contains("hadoop_connector_partial_objects_total 2", text);
+        Assert.Contains("# TYPE hadoop_connector_sweeps_suppressed_total counter", text);
+        Assert.Contains("hadoop_connector_sweeps_suppressed_total 3", text);
+        Assert.Contains("# TYPE hadoop_connector_ha_claims_held gauge", text);
+        Assert.Contains("hadoop_connector_ha_claims_held 1", text);
         Assert.Contains("# HELP hadoop_connector_uptime_seconds", text);
         // Retired Clarizen-era metric families must not resurface.
         Assert.DoesNotContain("api_budget_remaining", text);
         Assert.DoesNotContain("webhook", text);
         Assert.DoesNotContain("clarizen", text);
         Assert.DoesNotContain("attachments_", text);
+        Metrics.ResetForTests();
+    }
+
+    [Fact]
+    public async Task GuardRefusal_IncrementsCounter_ForSiemDashboards()
+    {
+        Metrics.ResetForTests();
+        var fetcher = new Hdfs.BdhFetcher(
+            TestConfig.Make(), new FakeBdhSource(), R2.AllowAll(/* nothing allowed */));
+        await Assert.ThrowsAsync<Hdfs.FullScanRefusedException>(
+            () => fetcher.FetchAsync(R2.Obj("Contact"), fullCrawl: true, sinceUtc: null));
+        Assert.Equal(1, Metrics.GuardRefusals);
+        // An exempted object refuses nothing and counts nothing.
+        var allowed = new Hdfs.BdhFetcher(
+            TestConfig.Make(), new FakeBdhSource(), R2.AllowAll("Contact"));
+        allowed.GuardFullScan(R2.Obj("Contact"));
+        Assert.Equal(1, Metrics.GuardRefusals);
         Metrics.ResetForTests();
     }
 

@@ -142,6 +142,10 @@ public sealed class CrawlEngine
         if (string.IsNullOrEmpty(_config.FeedPath))
             throw new ConfigurationError("FEED_PATH is not set — nothing to crawl");
 
+        // Fail fast on a garbage DEADLETTER_PAYLOAD_MODE before any work: a
+        // crawl must never discover mid-delivery that it cannot dead-letter.
+        _ = DeadLetterPolicy.Mode;
+
         // 1. Entitlement first: seats + potential re-ACL pass.
         SeatSyncResult seatSync;
         using (var seatSpan = Telemetry.Span("seat.sync"))
@@ -519,6 +523,10 @@ public sealed class CrawlEngine
         var suppressed = 0;
         var deadLettered = 0;
         var superChunk = Math.Max(1, _config.GraphBatchSize) * Math.Max(1, _config.GraphBatchWorkers);
+        // Dead-letter payload protection (DEADLETTER_PAYLOAD_MODE, default
+        // redacted): with redaction on, queue records carry ids/subject-hashes/
+        // error/attempts ONLY — never the transformed profile payload.
+        var redactPayloads = DeadLetterPolicy.IsRedacted;
 
         var index = startIndex;
         while (index < records.Count)
@@ -562,6 +570,7 @@ public sealed class CrawlEngine
             for (var i = index; i < end; i++)
             {
                 var record = records[i];
+                IReadOnlyList<string> subjects = Array.Empty<string>();
                 try
                 {
                     if (record.IsTombstone)
@@ -577,7 +586,7 @@ public sealed class CrawlEngine
 
                     // Erasure durability: never re-ingest an erased subject
                     // (any subject of the record being suppressed skips it).
-                    var subjects = ItemTransformer.SubjectIds(record);
+                    subjects = ItemTransformer.SubjectIds(record);
                     if (subjects.Any(_state.IsSubjectSuppressed))
                     {
                         suppressed++;
@@ -616,6 +625,8 @@ public sealed class CrawlEngine
                         Error = exc.Message,
                         Op = DeadLetterOps.Transform,
                         PayloadJson = "",
+                        SubjectIds = redactPayloads ? Array.Empty<string>() : subjects,
+                        SubjectHashes = DeadLetterPolicy.HashSubjects(subjects),
                     });
                     // Same visibility as a failed PUT: dataset + record id +
                     // delivery + why (ids only — never a profile field value).
@@ -676,13 +687,20 @@ public sealed class CrawlEngine
                 }
                 else
                 {
+                    var failedSubjects = itemSubjects.GetValueOrDefault(result.ItemId)
+                                         ?? Array.Empty<string>();
                     deadLetters.Add(new DeadLetterRecord
                     {
                         ItemId = result.ItemId,
                         Dataset = dataset,
                         DeliveryId = delivery.Id,
                         Error = result.Error ?? $"HTTP {result.Status}",
-                        PayloadJson = payloadJson.GetValueOrDefault(result.ItemId, ""),
+                        // Payload protection: redacted queues never hold the
+                        // profile; replay re-fetches from the feed delivery.
+                        PayloadJson = redactPayloads ? "" : payloadJson.GetValueOrDefault(result.ItemId, ""),
+                        Redacted = redactPayloads,
+                        SubjectIds = redactPayloads ? Array.Empty<string>() : failedSubjects,
+                        SubjectHashes = DeadLetterPolicy.HashSubjects(failedSubjects),
                     });
                     Logger.Warning($"Dead-lettered {dataset} item {result.ItemId}: {result.Error}");
                 }
@@ -744,6 +762,9 @@ public sealed class CrawlEngine
                         Error = result.Error ?? $"HTTP {result.Status}",
                         Op = DeadLetterOps.Delete,
                         PayloadJson = "",
+                        SubjectHashes = tombstonedPersonIds.TryGetValue(result.ItemId, out var tombstonedPerson)
+                            ? DeadLetterPolicy.HashSubjects(new[] { tombstonedPerson })
+                            : Array.Empty<string>(),
                     });
                     Logger.Warning($"Dead-lettered tombstone {dataset} item {result.ItemId}: {result.Error}");
                 }
@@ -780,6 +801,8 @@ public sealed class CrawlEngine
                             Op = DeadLetterOps.Delete,
                             PayloadJson = "",
                             CorrelationId = CorrelationContext.Current,
+                            SubjectHashes = DeadLetterPolicy.HashSubjects(
+                                itemSubjects.GetValueOrDefault(result.ItemId) ?? Array.Empty<string>()),
                         });
                         Logger.Warning($"Erasure-race withdrawal dead-lettered for {result.ItemId} " +
                                        $"(delivery '{delivery.Id}'): {result.Error} — retry-failed completes the erasure.");
@@ -808,13 +831,18 @@ public sealed class CrawlEngine
             {
                 if (!resolved.Contains(item.Id))
                 {
+                    var unaccountedSubjects = itemSubjects.GetValueOrDefault(item.Id)
+                                              ?? Array.Empty<string>();
                     deadLetters.Add(new DeadLetterRecord
                     {
                         ItemId = item.Id,
                         Dataset = dataset,
                         DeliveryId = delivery.Id,
                         Error = "[Graph] item unaccounted for by the batch pipeline",
-                        PayloadJson = payloadJson.GetValueOrDefault(item.Id, ""),
+                        PayloadJson = redactPayloads ? "" : payloadJson.GetValueOrDefault(item.Id, ""),
+                        Redacted = redactPayloads,
+                        SubjectIds = redactPayloads ? Array.Empty<string>() : unaccountedSubjects,
+                        SubjectHashes = DeadLetterPolicy.HashSubjects(unaccountedSubjects),
                     });
                 }
             }

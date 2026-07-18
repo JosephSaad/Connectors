@@ -63,7 +63,22 @@ public sealed partial class AppConfig
     // ── Microsoft Graph / Entra ──────────────────────────────────────────────
     public required string AadTenantId { get; init; }
     public required string AadClientId { get; init; }
+    /// <summary>Client secret (SECRET_AAD_APP_CLIENT_SECRET). Empty when a
+    /// certificate credential is configured — the certificate wins.</summary>
     public required string AadClientSecret { get; init; }
+
+    /// <summary>PFX/PEM file for the certificate credential (GRAPH_CLIENT_CERT_PATH).</summary>
+    public string? GraphClientCertPath { get; init; }
+    /// <summary>PFX password (GRAPH_CLIENT_CERT_PASSWORD; SECRET-style, Key Vault supported).</summary>
+    public string? GraphClientCertPassword { get; init; }
+    /// <summary>Windows cert-store thumbprint lookup (GRAPH_CLIENT_CERT_THUMBPRINT).</summary>
+    public string? GraphClientCertThumbprint { get; init; }
+
+    /// <summary>True when a certificate credential is configured (path or
+    /// thumbprint). The certificate always wins over a client secret.</summary>
+    public bool HasGraphClientCertificate =>
+        !string.IsNullOrWhiteSpace(GraphClientCertPath)
+        || !string.IsNullOrWhiteSpace(GraphClientCertThumbprint);
     /// <summary>Token authority host (AAD_APP_OAUTH_AUTHORITY_HOST) — sovereign clouds
     /// use e.g. https://login.microsoftonline.us.</summary>
     public string AadAuthorityHost { get; init; } = "https://login.microsoftonline.com";
@@ -133,6 +148,13 @@ public sealed partial class AppConfig
         if (hdfsMode == "localpath" && string.IsNullOrWhiteSpace(exportPath))
             throw new ArgumentException("Invalid configuration: Missing BDH_EXPORT_PATH");
 
+        // Graph certificate credential (docs/DEPLOYMENT_ENTERPRISE.md): a file
+        // path or a Windows-store thumbprint. Certificate wins over the secret.
+        var certPath = Environment.GetEnvironmentVariable("GRAPH_CLIENT_CERT_PATH");
+        var certThumbprint = Environment.GetEnvironmentVariable("GRAPH_CLIENT_CERT_THUMBPRINT");
+        var certConfigured = !string.IsNullOrWhiteSpace(certPath)
+            || !string.IsNullOrWhiteSpace(certThumbprint);
+
         return new AppConfig
         {
             ConnectorId = connectorId,
@@ -158,8 +180,14 @@ public sealed partial class AppConfig
 
             AadTenantId = Require("AAD_APP_TENANT_ID"),
             AadClientId = Require("AAD_APP_CLIENT_ID"),
+            // With a certificate credential configured the client secret is
+            // optional (and ignored — the certificate wins); without one it
+            // stays REQUIRED exactly as before.
             AadClientSecret = SecretProvider.GetSecret("SECRET_AAD_APP_CLIENT_SECRET")
-                ?? throw Missing("SECRET_AAD_APP_CLIENT_SECRET"),
+                ?? (certConfigured ? string.Empty : throw Missing("SECRET_AAD_APP_CLIENT_SECRET")),
+            GraphClientCertPath = certPath,
+            GraphClientCertPassword = SecretProvider.GetSecret("GRAPH_CLIENT_CERT_PASSWORD"),
+            GraphClientCertThumbprint = certThumbprint,
             AadAuthorityHost = EnvFlags.GetString(
                 "AAD_APP_OAUTH_AUTHORITY_HOST", "https://login.microsoftonline.com").TrimEnd('/'),
             GraphBaseUrl = EnvFlags.GetString("GRAPH_BASE_URL", "https://graph.microsoft.com").TrimEnd('/'),
@@ -214,6 +242,9 @@ public sealed partial class AppConfig
         AadTenantId = AadTenantId,
         AadClientId = AadClientId,
         AadClientSecret = AadClientSecret,
+        GraphClientCertPath = GraphClientCertPath,
+        GraphClientCertPassword = GraphClientCertPassword,
+        GraphClientCertThumbprint = GraphClientCertThumbprint,
         AadAuthorityHost = AadAuthorityHost,
         GraphBaseUrl = GraphBaseUrl,
         GraphApiVersion = GraphApiVersion,

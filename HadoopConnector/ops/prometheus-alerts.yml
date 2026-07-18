@@ -1,0 +1,166 @@
+# Prometheus alert rules — BDH Hadoop Copilot Connector.
+#
+# Load via rule_files in prometheus.yml (or a PrometheusRule CR with the same
+# groups). Every rule uses the connector's ACTUAL metric names (prefix
+# hadoop_connector_, docs/OBSERVABILITY.md) and links its runbook anchor in
+# docs/RUNBOOKS.md via the runbook annotation — keep anchors in sync with that
+# file's headings. Dashboard: ops/grafana-dashboard.json. Azure Monitor
+# equivalents: ops/azure-monitor-alerts.kql.
+#
+# Replace RUNBOOK_BASE with your rendered-docs URL, e.g.
+# https://github.com/<org>/<repo>/blob/main/docs/RUNBOOKS.md
+
+groups:
+  - name: hadoop-connector-fail-closed
+    rules:
+      # Any guard refusal usually means a filters.json regression reached
+      # production — the object silently stops being indexed until fixed.
+      - alert: HadoopConnectorGuardRefusalSpike
+        expr: increase(hadoop_connector_guard_refusals_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          service: hadoop-connector
+        annotations:
+          summary: "Fail-closed scale guard refused an unfiltered object ({{ $value }} refusal(s) in 1h on {{ $labels.instance }})"
+          description: "An object with no effective filter refused to crawl (FullScanRefusedException). Diff config/filters.json; run validate-config --strict. Remember the effectively-filtered rule: dt isNotNull alone does not count."
+          runbook: "RUNBOOK_BASE#guard-refusal-unfiltered-object"
+
+      # Sweep suppressed = deletions are NOT being withdrawn for some object
+      # (incomplete fetch — row cap/oversize — or a mass-deletion guard).
+      - alert: HadoopConnectorSweepSuppressed
+        expr: increase(hadoop_connector_sweeps_suppressed_total[6h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          service: hadoop-connector
+        annotations:
+          summary: "Deletion sweep suppressed {{ $value }} time(s) in 6h on {{ $labels.instance }}"
+          description: "A deletion sweep was skipped: incomplete source fetch (row cap hit or oversize file skipped) or a DELETION_SYNC_MAX_* safety guard. Stale items linger until a clean full crawl; investigate the cause, do not just raise caps."
+          runbook: "RUNBOOK_BASE#oversize-skip-partial-crawl-sweep-suppressed"
+
+      # Partial objects: the row cap or an oversize skip truncated a crawl.
+      - alert: HadoopConnectorPartialObjects
+        expr: increase(hadoop_connector_partial_objects_total[6h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          service: hadoop-connector
+        annotations:
+          summary: "{{ $value }} object crawl(s) marked PARTIAL in 6h on {{ $labels.instance }}"
+          description: "BDH_MAX_RECORDS_PER_OBJECT hit or a file exceeded BDH_MAX_FILE_BYTES. The object's deletion sweep is suppressed until an untruncated full crawl. Tighten filters (preferred) or raise the bound deliberately."
+          runbook: "RUNBOOK_BASE#row-cap-hit-crawl-partial"
+
+  - name: hadoop-connector-freshness
+    rules:
+      # BDH loads nightly (24h contract); 26h = contract + slack. The
+      # last-crawl gauge is 0 until the first completed crawl — the > 0 guard
+      # keeps a fresh deployment from paging.
+      - alert: HadoopConnectorWatermarkStale
+        expr: >-
+          (time() - hadoop_connector_last_crawl_completed_timestamp_seconds > 26 * 3600)
+          and (hadoop_connector_last_crawl_completed_timestamp_seconds > 0)
+        for: 15m
+        labels:
+          severity: critical
+          service: hadoop-connector
+        annotations:
+          summary: "No completed crawl for over 26h on {{ $labels.instance }} — index staleness beyond the nightly-load contract"
+          description: "Copilot answers are drifting beyond the documented 24h BDH lag. Check the BDH nightly load, the dt watermark vs the newest partitions, and BDH_LAG_HOURS."
+          runbook: "RUNBOOK_BASE#dt-watermark-gaps-missing-partitions"
+
+      # The scrape target vanished: process down/wedged, or /metrics unbound.
+      - alert: HadoopConnectorDown
+        expr: up{job="hadoop-connector"} == 0
+        for: 10m
+        labels:
+          severity: critical
+          service: hadoop-connector
+        annotations:
+          summary: "Connector metrics endpoint down on {{ $labels.instance }}"
+          description: "HEALTH_PORT stopped answering. Check the Windows service state and event log lifecycle events (1000/1001, docs/SIEM.md); in HA the fleet keeps crawling — this is a node loss."
+          runbook: "RUNBOOK_BASE#ha-failover-node-death"
+
+  - name: hadoop-connector-ingestion
+    rules:
+      - alert: HadoopConnectorDeadLetterGrowth
+        expr: hadoop_connector_dead_letter_depth > 0
+        for: 1h
+        labels:
+          severity: warning
+          service: hadoop-connector
+        annotations:
+          summary: "Dead-letter queue non-empty for 1h (depth {{ $value }} on {{ $labels.instance }})"
+          description: "Failed items are accumulating. Cluster the queue's error field, fix the cause, then retry-failed --clear-on-success. Pair with the webhook dead_letter alert (ALERT_DEADLETTER_THRESHOLD)."
+          runbook: "RUNBOOK_BASE#dead-letter-growth"
+
+      - alert: HadoopConnectorIngestFailureRatio
+        expr: >-
+          sum(rate(hadoop_connector_items_failed_total[30m]))
+          / clamp_min(sum(rate(hadoop_connector_items_ingested_total[30m]))
+                      + sum(rate(hadoop_connector_items_failed_total[30m])), 1e-9)
+          > 0.05
+        for: 30m
+        labels:
+          severity: warning
+          service: hadoop-connector
+        annotations:
+          summary: "More than 5% of ingest attempts failing over 30m"
+          description: "Sustained failure ratio — usually schema/property drift or a Graph-side rejection pattern rather than isolated bad records. The dead-letter error field names the cluster."
+          runbook: "RUNBOOK_BASE#dead-letter-growth"
+
+      - alert: HadoopConnectorThrottle429Storm
+        expr: sum(rate(hadoop_connector_throttled_429_total[15m])) * 60 > 30
+        for: 15m
+        labels:
+          severity: warning
+          service: hadoop-connector
+        annotations:
+          summary: "Graph 429 storm: >30 throttles/min sustained for 15m"
+          description: "The adaptive dial is already at/near 1 worker. Lower GRAPH_BATCH_WORKERS, enable GRAPH_RETRY_JITTER, stagger HA schedules, or shard connections (docs/SHARDING.md) — do not raise retries."
+          runbook: "RUNBOOK_BASE#429-storm-graph-throttling"
+
+  - name: hadoop-connector-dependencies
+    rules:
+      # Breaker open = degraded mode: crawls paused at a safe boundary,
+      # /ready returns 503, auto-recovery via half-open probes.
+      - alert: HadoopConnectorBreakerOpen
+        expr: hadoop_connector_circuit_breaker_state == 2
+        for: 10m
+        labels:
+          severity: critical
+          service: hadoop-connector
+        annotations:
+          summary: "Circuit breaker OPEN for {{ $labels.dependency }} on {{ $labels.instance }} (degraded mode)"
+          description: "Sustained real failures (5xx/timeout/connection — never 4xx/429) tripped the {{ $labels.dependency }} breaker. Fix the dependency; the crawl resumes itself. For hdfs check namenode/Knox/proxy; for graph check service health and token auth."
+          runbook: "RUNBOOK_BASE#webhdfs-flapping--breaker-open-degraded-mode"
+
+      - alert: HadoopConnectorBreakerFlapping
+        expr: increase(hadoop_connector_circuit_breaker_trips_total[1h]) >= 3
+        for: 0m
+        labels:
+          severity: warning
+          service: hadoop-connector
+        annotations:
+          summary: "{{ $labels.dependency }} breaker tripped {{ $value }} times in 1h on {{ $labels.instance }}"
+          description: "Trip/reset cycling means the dependency is flapping, not down. Escalate to the owning platform team with the retry-ladder warnings from the run log."
+          runbook: "RUNBOOK_BASE#webhdfs-flapping--breaker-open-degraded-mode"
+
+  - name: hadoop-connector-ha
+    rules:
+      # Leases held but zero pipeline progress = the lease-stuck signature
+      # (heartbeat keeps a wedged worker's claim alive, so no takeover fires).
+      - alert: HadoopConnectorHaLeaseStuck
+        expr: >-
+          (hadoop_connector_ha_claims_held > 0)
+          and (rate(hadoop_connector_records_scanned_total[30m]) == 0)
+          and (rate(hadoop_connector_items_ingested_total[30m]) == 0)
+          and (rate(hadoop_connector_items_deleted_total[30m]) == 0)
+        for: 30m
+        labels:
+          severity: warning
+          service: hadoop-connector
+        annotations:
+          summary: "Node {{ $labels.instance }} holds {{ $value }} HA lease(s) with zero pipeline progress for 30m"
+          description: "A live-but-wedged worker keeps heartbeating so its claim never expires. Gracefully stop (or kill) the node; the claim expires after HA_CLAIM_TIMEOUT_SECONDS and a survivor resumes from the checkpoint. Never hand-edit claims to 'completed'."
+          runbook: "RUNBOOK_BASE#lease-stuck-claim-never-released"

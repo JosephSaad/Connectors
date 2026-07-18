@@ -37,6 +37,36 @@ jobs:
       - name: Test
         run: dotnet test -c Release
 
+  # ---------------------------------------------------------------------------
+  # SBOM: CycloneDX bill of materials for the whole solution, attached to the
+  # release so consumers can scan the dependency tree without building.
+  # ---------------------------------------------------------------------------
+  sbom:
+    name: SBOM (CycloneDX)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install CycloneDX tool
+        run: dotnet tool install --global CycloneDX
+
+      - name: Generate SBOM (JSON)
+        run: dotnet CycloneDX SalesforceCopilotConnector.sln -o sbom -fn sbom.cdx.json -j
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom/sbom.cdx.json
+          if-no-files-found: error
+
   package:
     name: Package (${{ matrix.rid }})
     needs: test
@@ -73,6 +103,34 @@ jobs:
           -p:IncludeNativeLibrariesForSelfExtract=true
           -p:Version=${{ steps.ver.outputs.version }}
           -o publish/${{ matrix.rid }}
+
+      # Authenticode signing — GATED on the signing secrets existing. Without
+      # them the steps are skipped with a notice and the release still ships
+      # (unsigned), so forks and dry runs never fail here. osslsigncode signs
+      # PE files on the linux runner; timestamped so signatures outlive the
+      # cert. Secrets: SIGNING_CERT_PFX_BASE64 (base64 PFX), SIGNING_CERT_PASSWORD.
+      - name: Authenticode sign win-x64 binary
+        if: ${{ matrix.rid == 'win-x64' && secrets.SIGNING_CERT_PFX_BASE64 != '' }}
+        env:
+          SIGNING_CERT_PFX_BASE64: ${{ secrets.SIGNING_CERT_PFX_BASE64 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q osslsigncode
+          umask 077
+          echo "$SIGNING_CERT_PFX_BASE64" | base64 -d > signing-cert.pfx
+          EXE="publish/win-x64/SalesforceCopilotConnector.exe"
+          osslsigncode sign \
+            -pkcs12 signing-cert.pfx -pass "$SIGNING_CERT_PASSWORD" \
+            -n "Salesforce Copilot Connector" \
+            -t http://timestamp.digicert.com \
+            -in "$EXE" -out "$EXE.signed"
+          mv "$EXE.signed" "$EXE"
+          osslsigncode verify -in "$EXE" || true
+          rm -f signing-cert.pfx
+
+      - name: Authenticode signing skipped (no signing secrets)
+        if: ${{ matrix.rid == 'win-x64' && secrets.SIGNING_CERT_PFX_BASE64 == '' }}
+        run: echo "::notice::SIGNING_CERT_PFX_BASE64 not configured — shipping the win-x64 binary unsigned."
 
       # Bundle layout mirrors a checkout: the app resolves config/ (and env/)
       # relative to its working directory, so the zip extracts to a directory
@@ -151,6 +209,7 @@ jobs:
           fi
 
       - name: Build image (push on tag builds only)
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -160,9 +219,105 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # cosign image signing — GATED on the cosign key secrets existing; skipped
+      # with a notice otherwise. Signs by digest (not tag) so the signature
+      # covers exactly the pushed image. Secrets: SIGNING_COSIGN_PRIVATE_KEY
+      # (cosign.key contents), SIGNING_COSIGN_PASSWORD.
+      - name: Install cosign
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SIGNING_COSIGN_PRIVATE_KEY != '' }}
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image with cosign
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SIGNING_COSIGN_PRIVATE_KEY != '' }}
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.SIGNING_COSIGN_PASSWORD }}
+        run: |
+          IMAGE="$(echo "${{ steps.img.outputs.tags }}" | cut -d',' -f1 | cut -d':' -f1)"
+          DIGEST="${{ steps.build.outputs.digest }}"
+          echo "Signing ${IMAGE}@${DIGEST}"
+          cosign sign --yes --key env://COSIGN_PRIVATE_KEY "${IMAGE}@${DIGEST}"
+
+      - name: cosign signing skipped (no cosign secrets)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SIGNING_COSIGN_PRIVATE_KEY == '' }}
+        run: echo "::notice::SIGNING_COSIGN_PRIVATE_KEY not configured — image pushed unsigned."
+
+  # ---------------------------------------------------------------------------
+  # MSI packaging (EXPERIMENTAL): WiX v5 build of packaging/msi/ on a Windows
+  # runner — authored on a non-Windows dev box, so treat the artifact as
+  # candidate-quality until it has been installed on a test server. Uploaded as
+  # a run artifact only (not attached to the release) while experimental.
+  # continue-on-error keeps a red MSI build from blocking the release train.
+  # ---------------------------------------------------------------------------
+  msi:
+    name: MSI package (experimental)
+    needs: test
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER="0.0.0-ci.${GITHUB_RUN_NUMBER}"
+          fi
+          # MSI ProductVersion must be numeric x.y.z — strip any prerelease tag.
+          MSIVER="${VER%%-*}"
+          if [[ "$MSIVER" == "0.0.0" ]]; then MSIVER="0.0.1"; fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "msiversion=$MSIVER" >> "$GITHUB_OUTPUT"
+
+      - name: Publish win-x64 payload
+        run: >-
+          dotnet publish src/SalesforceCopilotConnector -c Release
+          -r win-x64 --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.ver.outputs.version }}
+          -o publish/win-x64
+
+      - name: Install WiX v5
+        run: dotnet tool install --global wix --version 5.0.2
+
+      - name: Build MSI
+        shell: bash
+        run: |
+          mkdir -p out
+          wix build packaging/msi/SalesforceConnector.wxs \
+            -arch x64 \
+            -d PublishDir=publish/win-x64 \
+            -d RepoRoot=. \
+            -d ProductVersion=${{ steps.ver.outputs.msiversion }} \
+            -o out/SalesforceCopilotConnector-${{ steps.ver.outputs.version }}-x64.msi
+
+      - name: Validate MSI (smoke)
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem out/*.msi | Select-Object -First 1
+          if (-not $msi) { throw "MSI not produced" }
+          Write-Host "MSI: $($msi.Name) ($([math]::Round($msi.Length/1MB,1)) MB)"
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: msi-experimental
+          path: out/*.msi
+          if-no-files-found: error
+
   release:
     name: Create GitHub release
-    needs: package
+    needs: [package, sbom]
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     steps:
@@ -171,6 +326,12 @@ jobs:
         with:
           pattern: bundle-*
           merge-multiple: true
+          path: dist
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom
           path: dist
 
       - name: Create release

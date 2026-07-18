@@ -74,6 +74,76 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
+  # Coverage gate: line coverage of the src assembly must stay >= 57%.
+  # Measured at gate introduction: 62.0% (61.96% line-rate, 5,705 coverable
+  # lines) — the threshold is that figure minus 5 points, so the gate catches
+  # a real coverage slide without flaking on small refactors.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: Coverage gate (lines >= 57%)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Test with coverage
+        run: >-
+          dotnet test -c Release
+          --collect:"XPlat Code Coverage"
+          --results-directory ./CoverageResults
+
+      - name: Enforce line-coverage threshold
+        run: |
+          FILE=$(find CoverageResults -name 'coverage.cobertura.xml' | head -n1)
+          if [ -z "$FILE" ]; then
+            echo "::error::No cobertura coverage file produced."
+            exit 1
+          fi
+          python3 - "$FILE" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          THRESHOLD = 57.0  # actual at introduction: 62.0% — gate = actual - 5 points
+          rate = float(ET.parse(sys.argv[1]).getroot().get("line-rate")) * 100
+          print(f"line coverage: {rate:.2f}% (threshold {THRESHOLD:.1f}%)")
+          sys.exit(0 if rate >= THRESHOLD else 1)
+          PY
+
+  # ---------------------------------------------------------------------------
+  # Perf smoke: run ONLY the stress-harness classes (Stress_* / Stress2_* —
+  # HMAC flood, queue cap, breaker slots, version churn, HA contention, soak)
+  # under a generous wall-clock budget. These classes assert their own
+  # invariants and measured numbers; this job exists so a pathological
+  # slowdown (e.g. a lock added on the hot path) fails CI even when the
+  # invariants still hold. Budget is deliberately generous — the loopback
+  # HttpListener classes share the serialized "LoopbackWebhook" collection
+  # (parallelizeTestCollections=false), so the run is deterministic, never
+  # tuned to the runner's speed.
+  # ---------------------------------------------------------------------------
+  perf-smoke:
+    name: Perf smoke (stress classes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Run stress classes
+        run: >-
+          dotnet test -c Release
+          --filter "FullyQualifiedName~SeismicConnector.Tests.Stress"
+          --logger "console;verbosity=normal"
+
+  # ---------------------------------------------------------------------------
   # SQL provisioning: spin up SQL Server 2022 and run
   # scripts/sql/create-database.sql TWICE — the second pass proves the
   # documented idempotent re-run/upgrade path against a live engine, not just

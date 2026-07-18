@@ -29,7 +29,20 @@ public sealed partial class AppConfig
     // ── Microsoft Graph / Entra ──────────────────────────────────────────────
     public required string AadTenantId { get; init; }
     public required string AadClientId { get; init; }
-    public required string AadClientSecret { get; init; }
+    /// <summary>Client secret; optional when a certificate credential is configured.</summary>
+    public string? AadClientSecret { get; init; }
+    /// <summary>PFX/PEM certificate file for the Graph client-credential flow
+    /// (GRAPH_CLIENT_CERT_PATH). The certificate credential wins over the secret.</summary>
+    public string? GraphClientCertPath { get; init; }
+    /// <summary>Password for an encrypted GRAPH_CLIENT_CERT_PATH file (optional).</summary>
+    public string? GraphClientCertPassword { get; init; }
+    /// <summary>Windows-store thumbprint lookup (GRAPH_CLIENT_CERT_THUMBPRINT).</summary>
+    public string? GraphClientCertThumbprint { get; init; }
+
+    /// <summary>True when a certificate credential is configured (wins over the secret).</summary>
+    public bool UseGraphCertificate =>
+        !string.IsNullOrWhiteSpace(GraphClientCertPath)
+        || !string.IsNullOrWhiteSpace(GraphClientCertThumbprint);
     /// <summary>Token authority host (AAD_APP_OAUTH_AUTHORITY_HOST) — sovereign clouds
     /// use e.g. https://login.microsoftonline.us.</summary>
     public string AadAuthorityHost { get; init; } = "https://login.microsoftonline.com";
@@ -118,6 +131,45 @@ public sealed partial class AppConfig
             throw new ArgumentException(
                 "Invalid configuration: FINANCIAL_DATA_MODE=acl requires FINANCIAL_DATA_GROUP_ID.");
 
+        // DEADLETTER_PAYLOAD_MODE must be an exact known value — a typo silently
+        // meaning "full" would be a data-governance hazard (docs/THREAT_MODEL.md).
+        var deadLetterMode = EnvFlags.GetString(
+            Infrastructure.DeadLetterRedactor.ModeEnvVar, "full").ToLowerInvariant();
+        if (deadLetterMode is not ("full" or "redacted"))
+            throw new ArgumentException(
+                $"Invalid configuration: {Infrastructure.DeadLetterRedactor.ModeEnvVar} "
+                + "must be one of full | redacted.");
+
+        // Proxy / custom trust roots fail fast here, naming the setting, rather
+        // than surfacing later as an opaque TLS or connect error mid-crawl.
+        Infrastructure.HttpClientFactory.ValidateConfiguration();
+
+        // Graph credential: certificate (path or Windows-store thumbprint) wins
+        // over the client secret; at least one of the two must be configured.
+        var certPath = Environment.GetEnvironmentVariable("GRAPH_CLIENT_CERT_PATH");
+        var certThumbprint = Environment.GetEnvironmentVariable("GRAPH_CLIENT_CERT_THUMBPRINT");
+        if (!string.IsNullOrWhiteSpace(certPath) && !File.Exists(certPath))
+            throw new ArgumentException(
+                $"Invalid configuration: GRAPH_CLIENT_CERT_PATH '{certPath}' does not exist.");
+        if (string.IsNullOrWhiteSpace(certPath)
+            && !string.IsNullOrWhiteSpace(certThumbprint)
+            && !OperatingSystem.IsWindows())
+        {
+            throw new ArgumentException(
+                "Invalid configuration: GRAPH_CLIENT_CERT_THUMBPRINT requires the Windows "
+                + "certificate store — use GRAPH_CLIENT_CERT_PATH on this platform.");
+        }
+        var clientSecret = SecretProvider.GetSecret("SECRET_AAD_APP_CLIENT_SECRET");
+        if (string.IsNullOrEmpty(clientSecret)
+            && string.IsNullOrWhiteSpace(certPath)
+            && string.IsNullOrWhiteSpace(certThumbprint))
+        {
+            throw new ArgumentException(
+                "Invalid configuration: Missing SECRET_AAD_APP_CLIENT_SECRET "
+                + "(or configure GRAPH_CLIENT_CERT_PATH / GRAPH_CLIENT_CERT_THUMBPRINT "
+                + "for certificate auth).");
+        }
+
         return new AppConfig
         {
             ConnectorId = connectorId,
@@ -138,8 +190,10 @@ public sealed partial class AppConfig
 
             AadTenantId = Require("AAD_APP_TENANT_ID"),
             AadClientId = Require("AAD_APP_CLIENT_ID"),
-            AadClientSecret = SecretProvider.GetSecret("SECRET_AAD_APP_CLIENT_SECRET")
-                ?? throw Missing("SECRET_AAD_APP_CLIENT_SECRET"),
+            AadClientSecret = clientSecret,
+            GraphClientCertPath = certPath,
+            GraphClientCertPassword = SecretProvider.GetSecret("GRAPH_CLIENT_CERT_PASSWORD"),
+            GraphClientCertThumbprint = certThumbprint,
             AadAuthorityHost = EnvFlags.GetString(
                 "AAD_APP_OAUTH_AUTHORITY_HOST", "https://login.microsoftonline.com").TrimEnd('/'),
             GraphBaseUrl = EnvFlags.GetString("GRAPH_BASE_URL", "https://graph.microsoft.com").TrimEnd('/'),
@@ -224,6 +278,9 @@ public sealed partial class AppConfig
         AadTenantId = AadTenantId,
         AadClientId = AadClientId,
         AadClientSecret = AadClientSecret,
+        GraphClientCertPath = GraphClientCertPath,
+        GraphClientCertPassword = GraphClientCertPassword,
+        GraphClientCertThumbprint = GraphClientCertThumbprint,
         AadAuthorityHost = AadAuthorityHost,
         GraphBaseUrl = GraphBaseUrl,
         GraphApiVersion = GraphApiVersion,

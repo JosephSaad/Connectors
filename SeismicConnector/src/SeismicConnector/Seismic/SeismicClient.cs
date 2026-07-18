@@ -71,7 +71,11 @@ public class SeismicClient
         SeismicSettings settings, HttpMessageHandler? handler = null, CircuitBreaker? breaker = null)
     {
         _settings = settings;
-        _http = handler is null ? new HttpClient() : new HttpClient(handler);
+        // Production path (no injected handler) routes through the shared
+        // outbound transport policy: PROXY_URL/PROXY_BYPASS + CA_BUNDLE_PATH.
+        _http = handler is null
+            ? new HttpClient(HttpTransport.CreateHandler(), disposeHandler: true)
+            : new HttpClient(handler);
         _http.Timeout = TimeSpan.FromSeconds(120);
         _breaker = breaker ?? CircuitBreakerRegistry.Register(
             new CircuitBreaker(CircuitBreakerRegistry.SeismicName, CircuitBreakerOptions.FromEnv(), critical: true));

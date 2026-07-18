@@ -46,7 +46,8 @@ public static class Alerting
     /// HTTP client used for webhook POSTs. Lazily created with a short timeout;
     /// tests inject a fake handler by assigning this. Never null once accessed.
     /// </summary>
-    internal static HttpClient HttpClient { get; set; } = new() { Timeout = TimeSpan.FromSeconds(5) };
+    internal static HttpClient HttpClient { get; set; } =
+        new(HttpClientFactory.CreateHandler()) { Timeout = TimeSpan.FromSeconds(5) };
 
     /// <summary>
     /// Optional connector id stamped into the alert envelope as <c>connector</c>.

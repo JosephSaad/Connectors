@@ -7,11 +7,11 @@ lives in its own top-level folder.
 
 | Connector | Source system | Highlights | Tests |
 |---|---|---|---|
-| [SalesforceConnector](SalesforceConnector/) | Salesforce CRM | Sharing-model ACLs, standard + custom objects, sovereign-cloud ready | 845 |
-| [ClarizenConnector](ClarizenConnector/) | Planview AdaptiveWork (Clarizen) | REST v2 + TDW bulk, financial-field governance, webhooks | 516 |
-| [SeismicConnector](SeismicConnector/) | Seismic (sales enablement) | Version-aware, No-MNE exclusion filter, usage ranking | 430 |
-| [AltrataConnector](AltrataConnector/) | Altrata (relationship & wealth intelligence) | Licensed feeds, seat-only entitlement, DSAR erasure | 404 |
-| [HadoopConnector](HadoopConnector/) | BDH Hadoop data mart (nightly Salesforce mirror) | Filter-first at 150M+ scale, partition pruning, 24h-lag aware | 601 |
+| [SalesforceConnector](SalesforceConnector/) | Salesforce CRM | Sharing-model ACLs, standard + custom objects, sovereign-cloud ready | 899 |
+| [ClarizenConnector](ClarizenConnector/) | Planview AdaptiveWork (Clarizen) | REST v2 + TDW bulk, financial-field governance, webhooks | 575 |
+| [SeismicConnector](SeismicConnector/) | Seismic (sales enablement) | Version-aware, No-MNE exclusion filter, usage ranking | 474 |
+| [AltrataConnector](AltrataConnector/) | Altrata (relationship & wealth intelligence) | Licensed feeds, seat-only entitlement, DSAR erasure | 449 |
+| [HadoopConnector](HadoopConnector/) | BDH Hadoop data mart (nightly Salesforce mirror) | Filter-first at 150M+ scale, partition pruning, 24h-lag aware | 650 |
 
 ## Shared chassis
 
@@ -28,9 +28,18 @@ components:
 - Circuit breakers with degraded-mode fail-safe
 - Unified data classification & sensitivity labeling (Public → Restricted)
 - SCM-aware Windows service, Docker image, GitHub Actions CI/CodeQL/release
+- Enterprise operations pack: Windows Event Log/SIEM integration, corporate
+  proxy + TLS-inspection CA support, certificate-credential Graph auth,
+  dead-letter payload redaction, threat model, runbooks, DR plan, Grafana
+  dashboards + alert rules, SBOM + signed releases, MSI packaging (see each
+  connector's "Enterprise operations" README section)
 
 See each connector's own `README.md` for source-specific features, environment
 variables, deployment and hardware guidance.
+
+All five share one tenant's Graph quotas (30 connections, 50M indexed items):
+[TENANT_GOVERNANCE.md](TENANT_GOVERNANCE.md) allocates connections, item
+budgets, app registrations and crawl windows across the fleet.
 
 ## Build & test a connector
 

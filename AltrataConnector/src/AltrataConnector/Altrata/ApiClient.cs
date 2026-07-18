@@ -93,7 +93,11 @@ public sealed class AltrataApiClient
         _config = config;
         _state = state;
         _audit = audit;
-        _http = handler == null ? new HttpClient() : new HttpClient(handler);
+        // Injected handler = tests; otherwise the enterprise connectivity
+        // handler (PROXY_URL / PROXY_BYPASS / CA_BUNDLE_PATH).
+        _http = handler == null
+            ? new HttpClient(HttpConnectivity.CreateHandler())
+            : new HttpClient(handler);
         _http.Timeout = TimeSpan.FromSeconds(60);
         _rateLimiter = new RateLimiter(config.AltrataApiCallsPerMinute);
         _delay = delay ?? ((wait, ct) => Task.Delay(wait, ct));

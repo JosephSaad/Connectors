@@ -130,8 +130,11 @@ public sealed class SeatService
     {
         var seats = LoadSeats();
         if (seats.Count == 0)
+        {
+            Metrics.Increment("altrata_entitlement_refusals_total");
             throw new EntitlementViolationException(
                 "Seat source yielded zero principals — refusing to sync an empty seat list.");
+        }
 
         _identity.ReplaceSeats(seats);
         var hash = SeatAclBuilder.ComputeSeatHash(seats);

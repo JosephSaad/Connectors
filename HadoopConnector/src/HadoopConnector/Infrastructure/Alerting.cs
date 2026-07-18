@@ -27,8 +27,27 @@ public static class Alerting
         WriteIndented = false,
     };
 
-    /// <summary>HTTP client for webhook POSTs; tests inject a fake handler by assigning this.</summary>
-    internal static HttpClient HttpClient { get; set; } = new() { Timeout = TimeSpan.FromSeconds(5) };
+    /// <summary>HTTP client for webhook POSTs; tests inject a fake handler by
+    /// assigning this. Default construction honours the shared transport policy
+    /// (PROXY_URL / CA_BUNDLE_PATH) — webhook receivers sit behind the same
+    /// corporate egress as everything else.</summary>
+    internal static HttpClient HttpClient { get; set; } = CreateDefaultClient();
+
+    private static HttpClient CreateDefaultClient()
+    {
+        try
+        {
+            return new HttpClient(HttpTransport.CreateHandler()) { Timeout = TimeSpan.FromSeconds(5) };
+        }
+        catch
+        {
+            // A misconfigured PROXY_URL/CA_BUNDLE_PATH already failed fast (with
+            // the setting named) when the WebHDFS/Graph clients were built in
+            // Runtime.Create; alerting must never be the thing that crashes a
+            // process, so it degrades to the bare default transport here.
+            return new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        }
+    }
 
     /// <summary>Optional connector id stamped into the alert envelope as <c>connector</c>.</summary>
     internal static string? ConnectorId { get; set; }

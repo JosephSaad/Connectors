@@ -71,6 +71,22 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     throw "Service '$ServiceName' already exists. Remove it first with -Uninstall."
 }
 
+# Windows Event Log source for EVENTLOG_ENABLED mirroring (docs/SIEM.md).
+# Idempotent: creating a source requires admin (we are elevated here), so the
+# installer registers it once; the connector itself never tries to create it.
+$eventSource = "AltrataConnector"
+try {
+    if (-not [System.Diagnostics.EventLog]::SourceExists($eventSource)) {
+        New-EventLog -LogName Application -Source $eventSource
+        Write-Host "Created Windows Event Log source '$eventSource' (Application log)."
+    } else {
+        Write-Host "Windows Event Log source '$eventSource' already exists."
+    }
+} catch {
+    Write-Warning "Could not create/verify event source '$eventSource': $_"
+    Write-Warning "EVENTLOG_ENABLED mirroring will silently drop until the source exists."
+}
+
 Write-Host "Creating service '$ServiceName'..."
 New-Service -Name $ServiceName `
     -BinaryPathName "`"$exe`" $Arguments" `

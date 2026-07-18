@@ -12,9 +12,14 @@
 // Usage:
 //   dotnet run -c Release --project tools/StressHarness -- \
 //       [--items N] [--scenario all|throughput|throttle|failures|stop-resume] \
-//       [--latency-ms M] [--workdir DIR]
+//       [--latency-ms M] [--workdir DIR] [--summary-json FILE]
+//
+// --summary-json writes a machine-readable per-scenario summary (name, items,
+// wallSecs, itemsPerSec, peakRssMb, allocMb, pass) for CI threshold gates
+// (the perf-smoke job in .github/workflows/ci.yml parses it with jq).
 
 using System.Globalization;
+using System.Text.Json;
 
 namespace StressHarness;
 
@@ -30,6 +35,7 @@ public static class Program
         var scenario = "all";
         var workdir = "stress-out";
         var countOnlyAcks = false;
+        string? summaryJsonPath = null;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -46,6 +52,9 @@ public static class Program
                     break;
                 case "--workdir":
                     workdir = args[++i];
+                    break;
+                case "--summary-json":
+                    summaryJsonPath = args[++i];
                     break;
                 case "--count-only-acks":
                     // Long-soak leak attribution: skip the harness's per-item ack
@@ -121,7 +130,32 @@ public static class Program
         }
 
         PrintSummary(results);
+        if (summaryJsonPath != null)
+            WriteSummaryJson(summaryJsonPath, results);
         return results.All(r => r.Pass) ? 0 : 1;
+    }
+
+    /// <summary>Machine-readable summary for CI perf gates (one object per scenario).</summary>
+    private static void WriteSummaryJson(string path, List<ScenarioResult> results)
+    {
+        var payload = results.Select(r => new
+        {
+            name = r.Name,
+            items = r.Items,
+            wallSecs = Math.Round(r.WallSecs, 3),
+            itemsPerSec = Math.Round(r.ItemsPerSec, 1),
+            peakRssMb = Math.Round(r.PeakRssMb, 1),
+            allocMb = Math.Round(r.AllocMb, 1),
+            pass = r.Pass,
+        }).ToList();
+        var fullPath = Path.GetFullPath(path);
+        var dir = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
+        File.WriteAllText(
+            fullPath,
+            JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }) + "\n");
+        Console.WriteLine($"Summary JSON written to {fullPath}");
     }
 
     private static void PrintSummary(List<ScenarioResult> results)

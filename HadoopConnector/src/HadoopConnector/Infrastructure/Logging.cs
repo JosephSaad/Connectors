@@ -170,6 +170,11 @@ public static class Logging
 
         TestSink?.Invoke(level, loggerName, message);
 
+        // Mirror Warning/Error (and Info with EVENTLOG_LEVEL=info) to the
+        // Windows Event Log when EVENTLOG_ENABLED=true (docs/SIEM.md). Inert
+        // until EventLogSink.Initialize() activates it; never throws.
+        EventLogSink.Mirror(level, loggerName, message);
+
         // Stamp the ambient correlation id (per crawl cycle / webhook event) so
         // a single run is followable end-to-end. Null when outside a scope.
         var correlationId = CorrelationContext.Current;

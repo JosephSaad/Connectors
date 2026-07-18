@@ -141,6 +141,66 @@ public sealed class MetricsTests
         Assert.Contains("\nsalesforce_connector_dead_letter_depth 9\n", text, StringComparison.Ordinal);
     }
 
+    // ── Enterprise-hardening additions: new gauges + labeled families ────────
+
+    [Fact]
+    public void AdaptiveConcurrencyGaugeSetsAndRenders()
+    {
+        Metrics.ResetForTests();
+        Metrics.SetAdaptiveConcurrency(6);
+        Assert.Equal(6, Metrics.AdaptiveConcurrencyLevel);
+        Assert.Contains(
+            "\nsalesforce_connector_adaptive_concurrency_level 6\n",
+            Metrics.RenderPrometheus(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HaClaimsHeldGaugeClampsAtZero()
+    {
+        Metrics.ResetForTests();
+        Metrics.IncHaClaimsHeld();
+        Metrics.IncHaClaimsHeld();
+        Assert.Equal(2, Metrics.HaClaimsHeld);
+        Metrics.DecHaClaimsHeld();
+        Metrics.DecHaClaimsHeld();
+        Metrics.DecHaClaimsHeld();  // extra dec must clamp, not go negative
+        Assert.Equal(0, Metrics.HaClaimsHeld);
+        Assert.Contains(
+            "\nsalesforce_connector_ha_claims_held 0\n",
+            Metrics.RenderPrometheus(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PerObjectProgressRendersLabeledSamples()
+    {
+        Metrics.ResetForTests();
+        Metrics.SetObjectTotal("Account", 1200);
+        Metrics.SetObjectTotal("Case", 900);
+        Metrics.AddObjectFetched("Account", 500);
+        Metrics.AddObjectFetched("Account", 250);
+
+        var text = Metrics.RenderPrometheus();
+        Assert.Contains("# TYPE salesforce_connector_object_records_total gauge", text, StringComparison.Ordinal);
+        Assert.Contains("salesforce_connector_object_records_total{object_type=\"Account\"} 1200", text, StringComparison.Ordinal);
+        Assert.Contains("salesforce_connector_object_records_total{object_type=\"Case\"} 900", text, StringComparison.Ordinal);
+        Assert.Contains("salesforce_connector_object_records_fetched{object_type=\"Account\"} 750", text, StringComparison.Ordinal);
+
+        Metrics.ResetObjectProgress();
+        var cleared = Metrics.RenderPrometheus();
+        // Empty families are omitted entirely (byte-stable default scrape).
+        Assert.DoesNotContain("object_records_total", cleared, StringComparison.Ordinal);
+        Assert.DoesNotContain("object_records_fetched", cleared, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LabelValuesAreEscaped()
+    {
+        Assert.Equal("Custom__c", Metrics.EscapeLabelValue("Custom__c"));
+        Assert.Equal("a\\\\b", Metrics.EscapeLabelValue("a\\b"));
+        Assert.Equal("say \\\"hi\\\"", Metrics.EscapeLabelValue("say \"hi\""));
+        Assert.Equal("line\\nbreak", Metrics.EscapeLabelValue("line\nbreak"));
+    }
+
     [Fact]
     public void RenderPrometheusUsesInvariantNumberFormatting()
     {

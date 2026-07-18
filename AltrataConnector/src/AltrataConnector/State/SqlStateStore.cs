@@ -10,6 +10,7 @@
 // SQL_MAX_RETRIES wraps every command in a transient-fault retry loop.
 
 using System.Globalization;
+using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using AltrataConnector.Infrastructure;
 
@@ -66,11 +67,19 @@ public sealed class SqlStateStore : IStateStore
             op            NVARCHAR(16)   NOT NULL CONSTRAINT df_altrata_dl_op DEFAULT N'upsert',
             payload_json  NVARCHAR(MAX)  NOT NULL,
             failed_utc    DATETIME2      NOT NULL,
-            attempts      INT            NOT NULL
+            attempts      INT            NOT NULL,
+            redacted        BIT           NOT NULL CONSTRAINT df_altrata_dl_redacted DEFAULT 0,
+            subject_ids     NVARCHAR(MAX) NOT NULL CONSTRAINT df_altrata_dl_subject_ids DEFAULT N'[]',
+            subject_hashes  NVARCHAR(MAX) NOT NULL CONSTRAINT df_altrata_dl_subject_hashes DEFAULT N'[]'
         );
         IF COL_LENGTH(N'dbo.altrata_deadletter', N'op') IS NULL
             ALTER TABLE dbo.altrata_deadletter
                 ADD op NVARCHAR(16) NOT NULL CONSTRAINT df_altrata_dl_op_mig DEFAULT N'upsert';
+        IF COL_LENGTH(N'dbo.altrata_deadletter', N'redacted') IS NULL
+            ALTER TABLE dbo.altrata_deadletter
+                ADD redacted       BIT           NOT NULL CONSTRAINT df_altrata_dl_redacted_mig DEFAULT 0,
+                    subject_ids    NVARCHAR(MAX) NOT NULL CONSTRAINT df_altrata_dl_subject_ids_mig DEFAULT N'[]',
+                    subject_hashes NVARCHAR(MAX) NOT NULL CONSTRAINT df_altrata_dl_subject_hashes_mig DEFAULT N'[]';
         IF OBJECT_ID(N'dbo.altrata_kv', N'U') IS NULL
         CREATE TABLE dbo.altrata_kv (
             connector_id  NVARCHAR(64)  NOT NULL,
@@ -217,8 +226,9 @@ public sealed class SqlStateStore : IStateStore
     {
         using var cmd = new SqlCommand("""
             INSERT INTO dbo.altrata_deadletter
-                (connector_id, item_id, dataset, delivery_id, error, op, payload_json, failed_utc, attempts)
-            VALUES (@cid, @i, @ds, @d, @e, @o, @p, @f, @a);
+                (connector_id, item_id, dataset, delivery_id, error, op, payload_json, failed_utc, attempts,
+                 redacted, subject_ids, subject_hashes)
+            VALUES (@cid, @i, @ds, @d, @e, @o, @p, @f, @a, @r, @sids, @shashes);
             """, conn);
         cmd.Parameters.AddWithValue("@cid", _connectorId);
         cmd.Parameters.AddWithValue("@i", record.ItemId);
@@ -229,15 +239,33 @@ public sealed class SqlStateStore : IStateStore
         cmd.Parameters.AddWithValue("@p", record.PayloadJson);
         cmd.Parameters.AddWithValue("@f", record.FailedUtc);
         cmd.Parameters.AddWithValue("@a", record.Attempts);
+        cmd.Parameters.AddWithValue("@r", record.Redacted);
+        cmd.Parameters.AddWithValue("@sids", JsonSerializer.Serialize(record.SubjectIds));
+        cmd.Parameters.AddWithValue("@shashes", JsonSerializer.Serialize(record.SubjectHashes));
         cmd.ExecuteNonQuery();
         return null;
     });
+
+    private static IReadOnlyList<string> ParseStringList(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return Array.Empty<string>();
+        try
+        {
+            return JsonSerializer.Deserialize<List<string>>(json) ?? new List<string>();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<string>();   // tolerate manual edits, like the file store
+        }
+    }
 
     public IReadOnlyList<DeadLetterRecord> ReadDeadLetters() => Execute(conn =>
     {
         var records = new List<DeadLetterRecord>();
         using var cmd = new SqlCommand(
-            "SELECT item_id, dataset, delivery_id, error, op, payload_json, failed_utc, attempts " +
+            "SELECT item_id, dataset, delivery_id, error, op, payload_json, failed_utc, attempts, " +
+            "redacted, subject_ids, subject_hashes " +
             "FROM dbo.altrata_deadletter WHERE connector_id = @cid ORDER BY id", conn);
         cmd.Parameters.AddWithValue("@cid", _connectorId);
         using var reader = cmd.ExecuteReader();
@@ -253,6 +281,9 @@ public sealed class SqlStateStore : IStateStore
                 PayloadJson = reader.GetString(5),
                 FailedUtc = reader.GetDateTime(6),
                 Attempts = reader.GetInt32(7),
+                Redacted = reader.GetBoolean(8),
+                SubjectIds = ParseStringList(reader.GetString(9)),
+                SubjectHashes = ParseStringList(reader.GetString(10)),
             });
         }
         return (IReadOnlyList<DeadLetterRecord>)records;

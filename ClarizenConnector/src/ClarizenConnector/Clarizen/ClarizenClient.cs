@@ -62,8 +62,10 @@ public class ClarizenClient : IAttachmentDownloader
         _budget = budget ?? new ApiBudget(
             config.ClarizenApiCallsPerDay,
             EnvFlags.GetInt("CLARIZEN_MAX_CALLS_PER_MINUTE", 60));
+        // Injected handlers (tests) bypass the factory; production clients get
+        // PROXY_URL / PROXY_BYPASS / CA_BUNDLE_PATH support (docs/DEPLOYMENT_ENTERPRISE.md).
         _http = handler is null
-            ? new HttpClient { Timeout = TimeSpan.FromSeconds(120) }
+            ? new HttpClient(HttpClientFactory.CreateHandler()) { Timeout = TimeSpan.FromSeconds(120) }
             : new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
     }
 

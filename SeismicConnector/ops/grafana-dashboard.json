@@ -1,0 +1,390 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus datasource scraping the connector /metrics endpoint (HEALTH_PORT)",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "2.0.0" }
+  ],
+  "title": "Seismic Copilot Connector",
+  "uid": "seismic-connector",
+  "description": "Operational dashboard for the Seismic M365 Copilot Graph connector. Every query uses the exact seismic_connector_* metric names served on /metrics; alert rules matching docs/RUNBOOKS.md anchors live in ops/prometheus-alerts.yml.",
+  "tags": ["seismic", "copilot", "graph-connector"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": "label_values(seismic_connector_uptime_seconds, instance)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Ingestion",
+      "id": 100,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Throughput (items/s)",
+      "id": 1,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "rate(seismic_connector_items_ingested_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "ingested/s {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(seismic_connector_items_skipped_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "skipped/s {{instance}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Ingested / failed / withdrawn (per hour)",
+      "id": 2,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "increase(seismic_connector_items_ingested_total{instance=~\"$instance\"}[1h])",
+          "legendFormat": "ingested {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(seismic_connector_items_failed_total{instance=~\"$instance\"}[1h])",
+          "legendFormat": "failed {{instance}}",
+          "refId": "B"
+        },
+        {
+          "expr": "increase(seismic_connector_items_deleted_total{instance=~\"$instance\"}[1h])",
+          "legendFormat": "withdrawn {{instance}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Dead-letter depth",
+      "id": 3,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "graphMode": "area", "colorMode": "background" },
+      "targets": [
+        {
+          "expr": "max(seismic_connector_dead_letter_depth{instance=~\"$instance\"})",
+          "legendFormat": "dead-letter",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Graph 429 throttling (rate)",
+      "id": 4,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 9, "x": 6, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "rate(seismic_connector_throttled_429_total{instance=~\"$instance\"}[15m])",
+          "legendFormat": "429/s {{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Last crawl completed",
+      "id": 5,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 9, "x": 15, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 21600 },
+              { "color": "red", "value": 86400 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "graphMode": "none", "colorMode": "background", "textMode": "value" },
+      "targets": [
+        {
+          "expr": "time() - max(seismic_connector_last_crawl_completed_timestamp_seconds{instance=~\"$instance\"} > 0)",
+          "legendFormat": "age",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Dependencies & resilience",
+      "id": 101,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "state-timeline",
+      "title": "Circuit breaker state (0 closed / 1 open / 2 half-open)",
+      "id": 6,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 70 },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "closed", "color": "green" },
+                "1": { "text": "OPEN", "color": "red" },
+                "2": { "text": "half-open", "color": "yellow" }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "seismic_connector_circuit_breaker_state{instance=~\"$instance\"}",
+          "legendFormat": "{{dependency}} {{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Breaker trips / resets + degraded pauses (per hour)",
+      "id": 7,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "increase(seismic_connector_circuit_breaker_trips_total{instance=~\"$instance\"}[1h])",
+          "legendFormat": "trips {{dependency}}",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(seismic_connector_circuit_breaker_resets_total{instance=~\"$instance\"}[1h])",
+          "legendFormat": "resets {{dependency}}",
+          "refId": "B"
+        },
+        {
+          "expr": "increase(seismic_connector_degraded_pauses_total{instance=~\"$instance\"}[1h])",
+          "legendFormat": "degraded pauses {{instance}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Webhook listener",
+      "id": 102,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Webhook accepted vs rejected (per 15m)",
+      "id": 8,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 23 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": "/rejected/" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "increase(seismic_connector_webhook_accepted_total{instance=~\"$instance\"}[15m])",
+          "legendFormat": "accepted {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(seismic_connector_webhook_rejected_total{instance=~\"$instance\"}[15m])",
+          "legendFormat": "rejected (401) {{instance}}",
+          "refId": "B"
+        },
+        {
+          "expr": "increase(seismic_connector_webhook_dropped_total{instance=~\"$instance\"}[15m])",
+          "legendFormat": "dropped (queue cap) {{instance}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Webhook queue depth (cap 10,000)",
+      "id": 9,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 23 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 20 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 9000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "seismic_connector_webhook_queue_depth{instance=~\"$instance\"}",
+          "legendFormat": "queue depth {{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "ACL & HA",
+      "id": 103,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Re-ACL activity (per hour)",
+      "id": 10,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 31 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "increase(seismic_connector_items_reacled_total{instance=~\"$instance\"}[1h])",
+          "legendFormat": "re-ACLed {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(seismic_connector_acl_drift_detected_total{instance=~\"$instance\"}[1h])",
+          "legendFormat": "drift detected {{instance}}",
+          "refId": "B"
+        },
+        {
+          "expr": "max(seismic_connector_last_drift_findings{instance=~\"$instance\"})",
+          "legendFormat": "last reconcile findings",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "HA lease: claims held per node + claims acquired",
+      "id": 11,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 31 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "seismic_connector_ha_claims_held{instance=~\"$instance\"}",
+          "legendFormat": "claims held {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(seismic_connector_ha_claims_acquired_total{instance=~\"$instance\"}[1h])",
+          "legendFormat": "claims acquired/h (incl. steals) {{instance}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Crawl lifecycle (per day)",
+      "id": 12,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 38 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "increase(seismic_connector_crawls_started_total{instance=~\"$instance\"}[1d])",
+          "legendFormat": "started {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(seismic_connector_crawls_completed_total{instance=~\"$instance\"}[1d])",
+          "legendFormat": "completed {{instance}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Extraction success ratio by format",
+      "id": 13,
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 38 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "custom": { "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (format) (increase(seismic_connector_extraction_success_total{instance=~\"$instance\"}[6h])) / sum by (format) (increase(seismic_connector_extraction_attempts_total{instance=~\"$instance\"}[6h]))",
+          "legendFormat": "{{format}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

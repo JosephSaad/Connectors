@@ -104,6 +104,10 @@ public static class CommandRegistry
         root.AddHandler(fileHandler);
         root.AddHandler(consoleHandler);
 
+        // Windows Event Log mirroring (EVENTLOG_ENABLED=true; no-op elsewhere).
+        // Idempotent, so re-entry from --continuous cycles is safe.
+        EventLogSink.AttachIfEnabled();
+
         // Progress logger — always visible on console for key milestones
         var progress = Logging.GetLoggerObject("progress");
         progress.Propagate = false;  // don't duplicate to root

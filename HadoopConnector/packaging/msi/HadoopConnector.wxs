@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  EXPERIMENTAL Windows Installer package for the BDH Hadoop Copilot Connector
+  (WiX v5). Built by the `msi` job in .github/workflows/release.yml roughly as:
+
+      dotnet publish src/HadoopConnector (Release, win-x64, self-contained,
+          single file) into publish/win-x64
+      wix build packaging/msi/HadoopConnector.wxs
+          -d Version=1.0.0  -d PublishDir=publish/win-x64  -d RepoRoot=.
+          -arch x64  -o HadoopConnector.msi
+
+  (Full commands live in the workflow; XML comments cannot show them verbatim.)
+
+  Scope (deliberate, matching docs/DEPLOYMENT_ENTERPRISE.md):
+    * Lays down the single-file exe, the config templates, the env template
+      and the operator scripts under %ProgramFiles%\HadoopConnector.
+    * Does NOT register the Windows service and does NOT write env\.env.local:
+      service registration (incl. idempotent event-log source creation) stays
+      with scripts\install-windows-service.ps1, and per-node config/secrets are
+      distributed by SCCM/Intune/GPO, never baked into the MSI.
+    * MajorUpgrade gives clean in-place upgrades keyed on the UpgradeCode; the
+      per-build ProductCode is auto-generated.
+    * The recommended runtime home is a data directory (e.g. C:\HadoopConnector)
+      pointed at by HADOOP_CONNECTOR_HOME so logs\, data\ and env\ stay out of
+      Program Files; the ps1 installer sets that up.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="BDH Hadoop Copilot Connector"
+           Manufacturer="Clouds Connected Ltd"
+           Version="$(var.Version)"
+           UpgradeCode="AE28A904-8324-4FBF-8F26-A8CC42F00A68"
+           Language="1033"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <SummaryInformation Description="Microsoft 365 Copilot Graph connector for the BDH Hadoop data mart (Salesforce-shaped, nightly sync)." />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of the BDH Hadoop Copilot Connector is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="HadoopConnector">
+        <Directory Id="ConfigFolder" Name="config" />
+        <Directory Id="EnvFolder" Name="env" />
+        <Directory Id="ScriptsFolder" Name="scripts" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="BDH Hadoop Copilot Connector" Level="1">
+      <ComponentGroupRef Id="AppComponents" />
+      <ComponentGroupRef Id="ConfigComponents" />
+      <ComponentGroupRef Id="ScriptComponents" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="AppComponents" Directory="INSTALLFOLDER">
+      <Component>
+        <File Id="ConnectorExe" Source="$(var.PublishDir)\HadoopConnector.exe" KeyPath="yes" />
+      </Component>
+      <Component>
+        <File Source="$(var.RepoRoot)\README.md" />
+      </Component>
+      <Component>
+        <File Source="$(var.RepoRoot)\LICENSE" Name="LICENSE.txt" />
+      </Component>
+      <Component>
+        <File Source="$(var.RepoRoot)\NOTICE" Name="NOTICE.txt" />
+      </Component>
+      <Component>
+        <File Source="$(var.RepoRoot)\CHANGELOG.md" />
+      </Component>
+      <Component>
+        <File Source="$(var.RepoRoot)\SECURITY.md" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Reference config set. Real deployments override these via change
+         control (filters.json is a SECURITY control — docs/THREAT_MODEL.md);
+         the MSI never carries tenant secrets. -->
+    <ComponentGroup Id="ConfigComponents" Directory="ConfigFolder">
+      <Component>
+        <File Source="$(var.RepoRoot)\config\schema.json" />
+      </Component>
+      <Component>
+        <File Source="$(var.RepoRoot)\config\filters.json" />
+      </Component>
+      <Component>
+        <File Source="$(var.RepoRoot)\config\graph-schema.json" />
+      </Component>
+      <Component>
+        <File Source="$(var.RepoRoot)\config\classification.json" />
+      </Component>
+      <Component Directory="EnvFolder">
+        <File Source="$(var.RepoRoot)\env\.env.local.example" Name="env.local.example" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="ScriptComponents" Directory="ScriptsFolder">
+      <Component>
+        <File Source="$(var.RepoRoot)\scripts\install-windows-service.ps1" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

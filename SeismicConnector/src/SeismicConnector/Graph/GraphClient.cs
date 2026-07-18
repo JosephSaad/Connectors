@@ -80,7 +80,11 @@ public class GraphClient
     public GraphClient(GraphSettings settings, HttpMessageHandler? handler = null, CircuitBreaker? breaker = null)
     {
         _settings = settings;
-        _http = handler is null ? new HttpClient() : new HttpClient(handler);
+        // Production path (no injected handler) routes through the shared
+        // outbound transport policy: PROXY_URL/PROXY_BYPASS + CA_BUNDLE_PATH.
+        _http = handler is null
+            ? new HttpClient(HttpTransport.CreateHandler(), disposeHandler: true)
+            : new HttpClient(handler);
         _http.Timeout = TimeSpan.FromSeconds(120);
         _breaker = breaker ?? CircuitBreakerRegistry.Register(
             new CircuitBreaker(CircuitBreakerRegistry.GraphName, CircuitBreakerOptions.FromEnv(), critical: true));
@@ -135,6 +139,56 @@ public class GraphClient
 
     // ── auth ─────────────────────────────────────────────────────────────────
 
+    // Lazily loaded Graph client certificate (certificate credential mode).
+    // Loaded once per client; a load failure is a ConfigException that fails
+    // the command fast, naming the setting.
+    private System.Security.Cryptography.X509Certificates.X509Certificate2? _clientCertificate;
+    private bool _certificateResolved;
+    private bool _authModeLogged;
+
+    /// <summary>Auth mode actually in use ("certificate" or "client_secret") — logged, never the material.</summary>
+    internal string AuthMode =>
+        CertificateCredential.IsConfigured(_settings) ? "certificate" : "client_secret";
+
+    private System.Security.Cryptography.X509Certificates.X509Certificate2? ResolveCertificate()
+    {
+        if (!_certificateResolved)
+        {
+            _clientCertificate = CertificateCredential.Load(_settings);
+            _certificateResolved = true;
+        }
+        return _clientCertificate;
+    }
+
+    /// <summary>Build the token-request form. Certificate credential WINS over the
+    /// client secret when configured (client_assertion per RFC 7523).</summary>
+    internal Dictionary<string, string> BuildTokenForm(string tokenUrl)
+    {
+        var form = new Dictionary<string, string>
+        {
+            ["grant_type"] = "client_credentials",
+            ["client_id"] = _settings.ClientId,
+            ["scope"] = Scope,
+        };
+        var certificate = ResolveCertificate();
+        if (certificate is not null)
+        {
+            form["client_assertion_type"] = CertificateCredential.AssertionType;
+            form["client_assertion"] = CertificateCredential.BuildAssertion(
+                certificate, _settings.ClientId, tokenUrl);
+        }
+        else
+        {
+            form["client_secret"] = _settings.ClientSecret;
+        }
+        if (!_authModeLogged)
+        {
+            _authModeLogged = true;
+            Logger.Info($"Graph auth mode: {AuthMode}");
+        }
+        return form;
+    }
+
     private async Task<string> GetTokenAsync(CancellationToken ct)
     {
         if (OverrideAccessToken is not null)
@@ -150,13 +204,7 @@ public class GraphClient
             $"{AuthorityHost}/{_settings.TenantId}/oauth2/v2.0/token";
         using var request = new HttpRequestMessage(HttpMethod.Post, tokenUrl)
         {
-            Content = new FormUrlEncodedContent(new Dictionary<string, string>
-            {
-                ["grant_type"] = "client_credentials",
-                ["client_id"] = _settings.ClientId,
-                ["client_secret"] = _settings.ClientSecret,
-                ["scope"] = Scope,
-            }),
+            Content = new FormUrlEncodedContent(BuildTokenForm(tokenUrl)),
         };
         using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
         var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);

@@ -36,6 +36,11 @@ public sealed class HaCoordinator
 
     private readonly ISqlGateway _sql;
 
+    /// <summary>Leases this coordinator currently holds — feeds the
+    /// clarizen_connector_ha_claims_held gauge (ops/grafana-dashboard.json).</summary>
+    private readonly HashSet<(string CrawlKey, string ObjectType)> _held = new();
+    private readonly object _heldLock = new();
+
     public HaCoordinator(ISqlGateway sql, string? nodeId = null)
     {
         _sql = sql;
@@ -93,7 +98,10 @@ public sealed class HaCoordinator
             """,
             ("@key", crawlKey), ("@type", objectType), ("@node", NodeId), ("@timeout", ClaimTimeoutSeconds));
         if (taken > 0)
+        {
+            TrackClaim(crawlKey, objectType, held: true);
             return true;
+        }
 
         var exists = _sql.Scalar(
             "SELECT COUNT(*) FROM dbo.ObjectClaims WHERE CrawlKey = @key AND ObjectType = @type;",
@@ -109,6 +117,8 @@ public sealed class HaCoordinator
                 VALUES (@key, @type, @node, SYSUTCDATETIME(), 'claimed');
                 """,
                 ("@key", crawlKey), ("@type", objectType), ("@node", NodeId));
+            if (inserted > 0)
+                TrackClaim(crawlKey, objectType, held: true);
             return inserted > 0;
         }
         catch (Exception exc)
@@ -158,6 +168,21 @@ public sealed class HaCoordinator
              WHERE CrawlKey = @key AND ObjectType = @type AND NodeId = @node;
             """,
             ("@key", crawlKey), ("@type", objectType), ("@node", NodeId), ("@status", status));
+        TrackClaim(crawlKey, objectType, held: false);
+    }
+
+    /// <summary>Maintain the held-lease set and publish it as the
+    /// ha_claims_held gauge. Idempotent per (crawl, objectType).</summary>
+    private void TrackClaim(string crawlKey, string objectType, bool held)
+    {
+        lock (_heldLock)
+        {
+            if (held)
+                _held.Add((crawlKey, objectType));
+            else
+                _held.Remove((crawlKey, objectType));
+            Metrics.SetHaClaimsHeld(_held.Count);
+        }
     }
 
     /// <summary>

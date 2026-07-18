@@ -88,6 +88,18 @@ else {
 [Environment]::SetEnvironmentVariable("CLARIZEN_CONNECTOR_HOME", $InstallDir, "Machine")
 sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
 
+# Windows Event Log source for the optional EVENTLOG_ENABLED mirror
+# (docs/SIEM.md). Idempotent: creating a source needs elevation (which this
+# script already requires); once it exists the service can write without admin.
+$eventSource = "ClarizenConnector"
+if (-not [System.Diagnostics.EventLog]::SourceExists($eventSource)) {
+    New-EventLog -LogName Application -Source $eventSource
+    Write-Host "Created Event Log source '$eventSource' (log: Application)."
+}
+else {
+    Write-Host "Event Log source '$eventSource' already exists — left as is."
+}
+
 Write-Host "Service '$ServiceName' installed."
 Write-Host "  Binary : $binPath"
 Write-Host "  Home   : $InstallDir  (CLARIZEN_CONNECTOR_HOME)"

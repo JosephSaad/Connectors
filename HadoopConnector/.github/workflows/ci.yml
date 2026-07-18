@@ -74,6 +74,97 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
+  # Coverage gate. Measured on 2026-07-18 at 650 tests: 79.87% line coverage.
+  # The gate is set to measured-minus-5 (74.87%) so ordinary drift never flakes
+  # the build while a real coverage collapse (a big untested subsystem landing)
+  # still fails. Raise the floor when the measured number moves up.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: Coverage gate (line >= 74.87%)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Test with coverage
+        run: >-
+          dotnet test -c Release
+          --collect:"XPlat Code Coverage"
+          --results-directory ./TestResults
+
+      - name: Enforce line-coverage floor
+        run: |
+          set -euo pipefail
+          REPORT="$(find TestResults -name 'coverage.cobertura.xml' | head -1)"
+          if [[ -z "$REPORT" ]]; then
+            echo "::error::No coverage.cobertura.xml produced."
+            exit 1
+          fi
+          python3 - "$REPORT" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          # Threshold policy: actual measured line coverage was 79.87% (650
+          # tests, 2026-07-18); the enforced floor is actual - 5 = 74.87%.
+          FLOOR = 74.87
+          root = ET.parse(sys.argv[1]).getroot()
+          line = float(root.get("line-rate")) * 100
+          branch = float(root.get("branch-rate")) * 100
+          print(f"line coverage   : {line:.2f}% (floor {FLOOR}%)")
+          print(f"branch coverage : {branch:.2f}% (informational)")
+          if line < FLOOR:
+              print(f"::error::Line coverage {line:.2f}% fell below the {FLOOR}% floor.")
+              sys.exit(1)
+          PY
+
+  # ---------------------------------------------------------------------------
+  # Performance smoke: the StressHarness filter-scale scenario drives the REAL
+  # scanner/filter/fetcher at ~1.8M corpus rows. Thresholds are deliberately
+  # GENEROUS versus measured numbers (~720k rows/s, ~94 MB peak RSS on a dev
+  # laptop) so this job catches an order-of-magnitude regression — an
+  # accidental per-row allocation or full-file materialization — not CI noise.
+  # ---------------------------------------------------------------------------
+  perf-smoke:
+    name: Perf smoke (filter-scale >= 100k rows/s, RSS < 500 MB)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Run filter-scale scenario
+        run: >-
+          dotnet run -c Release --project tools/StressHarness --
+          --scenario filter-scale --scale 1
+          | tee harness.out
+
+      - name: Enforce generous thresholds
+        run: |
+          set -euo pipefail
+          grep -q "1/1 scenarios passed" harness.out
+          python3 - harness.out <<'PY'
+          import re, sys
+          out = open(sys.argv[1]).read()
+          rows = float(re.search(r"throughput\s*:\s*([\d,]+) rows/s", out).group(1).replace(",", ""))
+          rss = float(re.search(r"peak RSS ([\d,]+) MB", out).group(1).replace(",", ""))
+          print(f"throughput = {rows:,.0f} rows/s (floor 100,000)")
+          print(f"peak RSS   = {rss:,.0f} MB (ceiling 500)")
+          if rows < 100_000:
+              print(f"::error::filter-scale throughput {rows:,.0f} rows/s below the 100k floor.")
+              sys.exit(1)
+          if rss >= 500:
+              print(f"::error::filter-scale peak RSS {rss:,.0f} MB breached the 500 MB ceiling.")
+              sys.exit(1)
+          PY
+
+  # ---------------------------------------------------------------------------
   # Provision the SQL schema against a real SQL Server 2022 — twice, proving
   # the documented idempotent re-run/upgrade path against a live engine (the
   # static ScriptDom/DacFx suite covers grammar + binding offline).

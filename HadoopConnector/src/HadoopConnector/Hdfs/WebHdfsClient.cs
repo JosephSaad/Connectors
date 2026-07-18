@@ -61,8 +61,11 @@ public class WebHdfsClient : IBdhSource
         _user = user;
         _delegationToken = delegationToken;
         _breaker = breaker ?? CircuitBreaker.Disabled;
+        // No injected test handler → the shared enterprise transport policy
+        // (PROXY_URL/PROXY_BYPASS, CA_BUNDLE_PATH — WebHDFS behind internal TLS
+        // very often chains to a PRIVATE enterprise CA; see the env template).
         _http = handler is null
-            ? new HttpClient { Timeout = TimeSpan.FromSeconds(120) }
+            ? new HttpClient(HttpTransport.CreateHandler()) { Timeout = TimeSpan.FromSeconds(120) }
             : new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
     }
 

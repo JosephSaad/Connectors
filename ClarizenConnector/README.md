@@ -30,7 +30,7 @@ here as an independent, self-contained copy.
 | `env/.env.local.example` | every knob, documented |
 | `docs/` | `HA.md`, `RETRY.md`, `OBSERVABILITY.md`, `SQL_CONTRACT.md`, `SHARDING.md`, `DELETION_SYNC.md`, `ATTACHMENTS.md`, `WEBHOOKS.md`, `TRACING.md`, `RESILIENCE.md` |
 | `scripts/` | `install-windows-service.ps1`, `sql/create-database.sql` |
-| `tests/ClarizenConnector.Tests/` | xUnit suite (516 tests, mock HTTP — no network) |
+| `tests/ClarizenConnector.Tests/` | xUnit suite (575 tests, mock HTTP — no network) |
 | `Dockerfile` / `docker-compose.yml` | container image + local SQL/HA dev topology |
 | `.github/workflows/` | `ci.yml` (ubuntu + windows, SQL provisioning, docker), `codeql.yml`, `release.yml` (test-gated, checksummed bundles + GHCR image) |
 
@@ -258,13 +258,33 @@ heartbeats, a dead node's claims expire and survivors resume from its
 checkpoint, and exactly one node closes the crawl and writes the sync
 timestamp. Details: `docs/HA.md`; schema contract: `docs/SQL_CONTRACT.md`.
 
+## Enterprise operations
+
+The enterprise hardening package: threat analysis, incident runbooks, DR,
+SIEM wiring, managed rollout, and the security policy — plus the operational
+features they document (Windows Event Log sink via `EVENTLOG_ENABLED`,
+`PROXY_URL`/`CA_BUNDLE_PATH` outbound transport control, certificate Graph
+auth via `GRAPH_CLIENT_CERT_PATH`/`_THUMBPRINT`, and
+`DEADLETTER_PAYLOAD_MODE=redacted` payload protection). Ready-made monitoring
+lives in `ops/` (`grafana-dashboard.json`, `prometheus-alerts.yml`,
+`azure-monitor-alerts.kql`); versions are tracked in `CHANGELOG.md`.
+
+| Doc | Covers |
+|---|---|
+| [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | STRIDE per trust boundary, FIPS audit result, least-privilege Graph permissions |
+| [`docs/RUNBOOKS.md`](docs/RUNBOOKS.md) | per alert/failure mode: symptom → diagnose → remediate → escalate |
+| [`docs/DR.md`](docs/DR.md) | RPO/RTO, backup/restore (files + SQL), upgrade/rollback, state-schema versioning |
+| [`docs/SIEM.md`](docs/SIEM.md) | Event Log ids/levels, Sentinel KQL, Splunk sketch, fields to index |
+| [`docs/DEPLOYMENT_ENTERPRISE.md`](docs/DEPLOYMENT_ENTERPRISE.md) | SCCM/Intune MSI rollout, GPO/DSC config, proxy/TLS inspection, FIPS, service-account least privilege |
+| [`SECURITY.md`](SECURITY.md) | supported versions, credential rotation runbooks, vuln reporting, data-at-rest inventory |
+
 ## Tests
 
 ```bash
 dotnet test
 ```
 
-516 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
+575 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
 shape **and concurrency invariants** (16 parallel writers, zero corrupt lines),
 retry/backoff math (numeric Retry-After, 60 s clamp, jitter), Graph client
 throttling/hardening (mock HTTP), adaptive concurrency, connection-sharding

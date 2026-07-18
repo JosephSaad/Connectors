@@ -137,6 +137,7 @@ public sealed class ErasureLedger : IErasureLedger
                     // LOUD refusal: the append is the erasure's compliance
                     // record, so a corrupt chain must be impossible to miss.
                     // Ids only — never the subject email.
+                    Metrics.Set("altrata_erasure_ledger_broken", 1);
                     Logger.Error(
                         $"Erasure ledger '{Path}' line {firstBadLine} is unreadable — REFUSING to append " +
                         $"'{action}' for subject '{subjectId}' to a corrupt chain. Restore the ledger, then re-run.");
@@ -256,6 +257,9 @@ public sealed class ErasureLedger : IErasureLedger
                 if (entry.Seq != expectedSeq || entry.PrevHash != prevHash || entry.Hash != recomputed)
                 {
                     brokenAtSeq = (int)entry.Seq;
+                    // Gauge drives the SIEM ledger-tamper alert (severity:
+                    // security) — docs/SIEM.md, ops/prometheus-alerts.yml.
+                    Metrics.Set("altrata_erasure_ledger_broken", 1);
                     Logger.Error(
                         $"Erasure ledger '{Path}' FAILED verification: chain broken at seq {brokenAtSeq} " +
                         "(sequence/link/hash mismatch — the entry or an earlier one was edited, reordered or deleted).");
@@ -266,12 +270,14 @@ public sealed class ErasureLedger : IErasureLedger
             if (firstBadLine != 0)
             {
                 brokenAtSeq = firstBadLine;   // unreadable line = broken chain link
+                Metrics.Set("altrata_erasure_ledger_broken", 1);
                 Logger.Error(
                     $"Erasure ledger '{Path}' FAILED verification: chain broken at seq {brokenAtSeq} " +
                     "(line does not parse as a ledger entry).");
                 return false;
             }
             brokenAtSeq = 0;
+            Metrics.Set("altrata_erasure_ledger_broken", 0);
             return true;
         }
     }

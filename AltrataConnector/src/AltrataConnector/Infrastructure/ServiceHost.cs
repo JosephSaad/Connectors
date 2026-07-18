@@ -67,10 +67,12 @@ public static class ServiceHost
 
             Logger.Info($"Running as a Windows service: {string.Join(" ", _args)} " +
                         $"(working directory: {Directory.GetCurrentDirectory()})");
+            EventLogSink.Lifecycle($"Service command starting: {string.Join(" ", _args)}");
             try
             {
                 Environment.ExitCode = await _executeCommand(_args);
                 Logger.Info($"Command finished with exit code {Environment.ExitCode}");
+                EventLogSink.Lifecycle($"Service command finished with exit code {Environment.ExitCode}");
             }
             catch (Exception ex)
             {

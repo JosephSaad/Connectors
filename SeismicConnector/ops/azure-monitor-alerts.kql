@@ -1,0 +1,135 @@
+// Azure Monitor scheduled-query alert rules for the Seismic Copilot Connector.
+//
+// Sources (docs/SIEM.md): the Windows Application Event Log collected into the
+// `Event` table (Source == "SeismicConnector", stable event ids
+// 1000/1100/2000/3000), and the JSON run logs ingested as
+// SeismicConnectorLogs_CL (timestamp/level/logger/message/correlation_id).
+// Each query is one alert rule; the runbook comment is the matching anchor in
+// docs/RUNBOOKS.md. Suggested evaluation: every 15 min over the stated window
+// unless noted.
+
+// ── Rule: breaker open / degraded mode ──────────────────────────────────────
+// Runbook: docs/RUNBOOKS.md#breaker-open   Severity: 2 (warning)
+// Fires when degraded-mode pauses appear in the last 30 min.
+Event
+| where TimeGenerated > ago(30m)
+| where Source == "SeismicConnector" and EventID == 2000
+| where RenderedDescription has "DEGRADED MODE"
+| summarize Pauses = count(), Sample = any(RenderedDescription) by Computer
+| where Pauses > 0
+
+// ── Rule: crawl stale (freshness SLO) ───────────────────────────────────────
+// Runbook: docs/RUNBOOKS.md#breaker-open   Severity: 1 (critical)
+// No "run summary" completion in 8h (2x default incremental cadence).
+// Evaluate hourly over 8h.
+SeismicConnectorLogs_CL
+| where TimeGenerated > ago(8h)
+| where message has "run summary"
+| summarize Completions = count() by Computer
+| where Completions == 0
+
+// ── Rule: dead-letter growth ────────────────────────────────────────────────
+// Runbook: docs/RUNBOOKS.md#dead-letter-growth   Severity: 2 (warning)
+// Dead-letter write activity (incl. the write-failure fallback) in the window.
+Event
+| where TimeGenerated > ago(1h)
+| where Source == "SeismicConnector" and EventID == 3000
+| where RenderedDescription has "dead-letter" or RenderedDescription has "UNRECORDED FAILURE"
+| summarize Failures = count(), Sample = any(RenderedDescription) by Computer
+| where Failures > 20
+
+// ── Rule: webhook forgery spike (distinguish from rotation!) ────────────────
+// Runbook: docs/RUNBOOKS.md#webhook-401-spike   Severity: 2 (warning)
+// Sustained invalid-signature rejections. The runbook separates secret-rotation
+// mismatch (ONE known remote, starts exactly at the rotation change) from
+// forgery/probing (unknown or many remotes). This rule surfaces the remotes so
+// the on-call can make that call in one look; escalate forgery to security.
+Event
+| where TimeGenerated > ago(15m)
+| where Source == "SeismicConnector" and EventID == 2000
+| where RenderedDescription has "rejected request with invalid/missing signature"
+| extend Remote = extract(@"remote ([^,\)]+)", 1, RenderedDescription)
+| summarize Rejections = count(), DistinctRemotes = dcount(Remote), Remotes = make_set(Remote, 10)
+    by Computer
+| where Rejections > 20
+// DistinctRemotes == 1 and a rotation just happened → rotation mismatch.
+// DistinctRemotes > 1 (or unknown source) → treat as forgery attempt.
+
+// ── Rule: webhook queue-cap drops ───────────────────────────────────────────
+// Runbook: docs/RUNBOOKS.md#webhook-queue-drops   Severity: 3 (info)
+Event
+| where TimeGenerated > ago(1h)
+| where Source == "SeismicConnector" and EventID == 2000
+| where RenderedDescription has "queue at capacity"
+| summarize Drops = count() by Computer
+| where Drops > 0
+
+// ── Rule: ACL widening refused (never-widen invariant firing) ───────────────
+// Runbook: docs/RUNBOOKS.md#re-acl-storm   Severity: 2 (warning)
+// The connector refused to replace an applied ACL because the identity store
+// could not resolve principals — stale/partial identity data. Frequent firing
+// means run the identity crawl (or investigate tampering, THREAT_MODEL b5).
+SeismicConnectorLogs_CL
+| where TimeGenerated > ago(1h)
+| where level == "WARNING"
+| where message has "not applied" and message has "unresolved"
+| summarize Refusals = count(), Sample = any(message) by Computer, logger
+| where Refusals > 10
+
+// ── Rule: re-ACL storm ──────────────────────────────────────────────────────
+// Runbook: docs/RUNBOOKS.md#re-acl-storm   Severity: 3 (info)
+SeismicConnectorLogs_CL
+| where TimeGenerated > ago(1h)
+| where message has "ACL DRIFT"
+| summarize Drifts = count() by Computer
+| where Drifts > 500
+
+// ── Rule: No-MNE reconciliation drift ───────────────────────────────────────
+// Runbook: docs/RUNBOOKS.md#no-mne-reconciliation-drift   Severity: 2
+// The reconcile sweep exits 1 and raises an index_drift alert when unrepaired
+// drift remains; its report line lands in the run log.
+SeismicConnectorLogs_CL
+| where TimeGenerated > ago(24h)
+| where message has "index_drift" or (message has "drift" and message has "finding")
+| summarize Findings = count(), Sample = any(message) by Computer
+| where Findings > 0
+
+// ── Rule: OAuth failure ─────────────────────────────────────────────────────
+// Runbook: docs/RUNBOOKS.md#oauth-failure   Severity: 1 (critical)
+Event
+| where TimeGenerated > ago(30m)
+| where Source == "SeismicConnector" and EventID == 3000
+| where RenderedDescription has "token request failed"
+| summarize Failures = count(), Sample = any(RenderedDescription) by Computer
+| where Failures > 0
+
+// ── Rule: 429 storm ─────────────────────────────────────────────────────────
+// Runbook: docs/RUNBOOKS.md#graph-429-storm   Severity: 2 (warning)
+SeismicConnectorLogs_CL
+| where TimeGenerated > ago(15m)
+| where level == "WARNING" and message has "transient error 429"
+| summarize Throttles = count() by Computer
+| where Throttles > 150
+
+// ── Rule: service flapping (lifecycle churn) ────────────────────────────────
+// Runbook: docs/RUNBOOKS.md#state-corruption (frequent restarts corrupt nothing
+// but usually indicate a crash loop — read the 3000s around each start)
+// Severity: 2 (warning)
+Event
+| where TimeGenerated > ago(1h)
+| where Source == "SeismicConnector" and EventID == 1000
+| where RenderedDescription has "Service started"
+| summarize Starts = count() by Computer
+| where Starts > 3
+
+// ── Rule: HA lease stuck ────────────────────────────────────────────────────
+// Runbook: docs/RUNBOOKS.md#ha-lease-stuck   Severity: 2 (warning)
+// Claim/steal messages with no crawl close for 2h. Evaluate hourly over 2h.
+SeismicConnectorLogs_CL
+| where TimeGenerated > ago(2h)
+| where logger == "seismic_connector.ha"
+| summarize
+    Claims = countif(message has "claimed"),
+    Closes = countif(message has "closed" or message has "FAILED")
+    by Computer
+| where Claims > 0 and Closes == 0

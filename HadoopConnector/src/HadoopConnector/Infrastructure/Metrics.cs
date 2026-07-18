@@ -33,9 +33,15 @@ public static class Metrics
     private static long _recordsScanned;
     private static long _recordsMatched;
 
+    // Monotonic counters (enterprise ops pack — dashboard/alert anchors).
+    private static long _guardRefusals;
+    private static long _partialObjects;
+    private static long _sweepsSuppressed;
+
     // Gauges.
     private static long _deadLetterDepth;
     private static long _lastCrawlCompletedUnix;
+    private static long _haClaimsHeld;
 
     private static readonly DateTime StartUtc = DateTime.UtcNow;
 
@@ -55,6 +61,19 @@ public static class Metrics
     /// <summary>Record rows removed by a filter stage ("partition" | "predicate" | "rowCap").</summary>
     public static void IncRecordsFiltered(string stage, long count = 1) =>
         RecordsFilteredByStage.AddOrUpdate(stage, count, (_, v) => v + count);
+
+    /// <summary>Record one fail-closed scale-guard refusal (FullScanRefusedException).</summary>
+    public static void IncGuardRefusals(long count = 1) => Interlocked.Add(ref _guardRefusals, count);
+
+    /// <summary>Record one object marked PARTIAL (row cap hit or oversize file skipped).</summary>
+    public static void IncPartialObjects(long count = 1) => Interlocked.Add(ref _partialObjects, count);
+
+    /// <summary>Record one deletion sweep suppressed (incomplete fetch or a mass-deletion guard).</summary>
+    public static void IncSweepsSuppressed(long count = 1) => Interlocked.Add(ref _sweepsSuppressed, count);
+
+    /// <summary>Adjust the HA object-claim leases currently held by THIS node (+1/-1).</summary>
+    public static void AddHaClaimsHeld(long delta) =>
+        Interlocked.Add(ref _haClaimsHeld, delta);
 
     /// <summary>Record one item classified with the given sensitivity label.</summary>
     public static void IncItemsClassified(string label) =>
@@ -84,7 +103,11 @@ public static class Metrics
     public static long PartitionsPruned => Interlocked.Read(ref _partitionsPruned);
     public static long RecordsScanned => Interlocked.Read(ref _recordsScanned);
     public static long RecordsMatched => Interlocked.Read(ref _recordsMatched);
+    public static long GuardRefusals => Interlocked.Read(ref _guardRefusals);
+    public static long PartialObjects => Interlocked.Read(ref _partialObjects);
+    public static long SweepsSuppressed => Interlocked.Read(ref _sweepsSuppressed);
     public static long DeadLetterDepth => Interlocked.Read(ref _deadLetterDepth);
+    public static long HaClaimsHeld => Interlocked.Read(ref _haClaimsHeld);
 
     /// <summary>Read the filtered-record count for a stage (0 when absent).</summary>
     public static long RecordsFilteredFor(string stage) =>
@@ -115,8 +138,12 @@ public static class Metrics
         Interlocked.Exchange(ref _partitionsPruned, 0);
         Interlocked.Exchange(ref _recordsScanned, 0);
         Interlocked.Exchange(ref _recordsMatched, 0);
+        Interlocked.Exchange(ref _guardRefusals, 0);
+        Interlocked.Exchange(ref _partialObjects, 0);
+        Interlocked.Exchange(ref _sweepsSuppressed, 0);
         Interlocked.Exchange(ref _deadLetterDepth, 0);
         Interlocked.Exchange(ref _lastCrawlCompletedUnix, 0);
+        Interlocked.Exchange(ref _haClaimsHeld, 0);
         ItemsClassified.Clear();
         SensitiveDetections.Clear();
         RecordsFilteredByStage.Clear();
@@ -141,10 +168,14 @@ public static class Metrics
         Counter(sb, "partitions_pruned_total", "Total BDH partition directories pruned before any file I/O (dt watermark or partition filters).", PartitionsPruned);
         Counter(sb, "records_scanned_total", "Total BDH rows read from source files.", RecordsScanned);
         Counter(sb, "records_matched_total", "Total BDH rows that passed the filter layer and entered the pipeline.", RecordsMatched);
+        Counter(sb, "guard_refusals_total", "Total fail-closed scale-guard refusals (object with no effective filter refused to crawl).", GuardRefusals);
+        Counter(sb, "partial_objects_total", "Total object crawls marked PARTIAL (row cap hit or an oversize file skipped).", PartialObjects);
+        Counter(sb, "sweeps_suppressed_total", "Total deletion sweeps suppressed (incomplete source fetch or a mass-deletion safety guard).", SweepsSuppressed);
 
         Gauge(sb, "tracing_enabled", "1 when OpenTelemetry OTLP export is registered (OTEL_EXPORTER_OTLP_ENDPOINT set), else 0.", Tracing.Enabled ? 1 : 0);
         Gauge(sb, "dead_letter_depth", "Current number of records in the dead-letter queue.", DeadLetterDepth);
         Gauge(sb, "last_crawl_completed_timestamp_seconds", "Unix timestamp (seconds) of the last completed crawl; 0 if none yet.", LastCrawlCompletedUnix);
+        Gauge(sb, "ha_claims_held", "HA object-claim leases currently held by this node (0 outside HA mode).", HaClaimsHeld);
         GaugeDouble(sb, "uptime_seconds", "Seconds since the connector process started.", UptimeSeconds);
 
         // Per-dependency circuit-breaker state + trip/reset counters.

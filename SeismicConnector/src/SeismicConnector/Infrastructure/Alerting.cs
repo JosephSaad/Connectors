@@ -43,10 +43,22 @@ public static class Alerting
     };
 
     /// <summary>
-    /// HTTP client used for webhook POSTs. Lazily created with a short timeout;
+    /// HTTP client used for webhook POSTs. Lazily created with a short timeout
+    /// through the shared outbound transport (PROXY_URL / CA_BUNDLE_PATH);
     /// tests inject a fake handler by assigning this. Never null once accessed.
+    /// Lazy so a transport misconfiguration surfaces as a loggable failure at
+    /// first use rather than a type-initialization error.
     /// </summary>
-    internal static HttpClient HttpClient { get; set; } = new() { Timeout = TimeSpan.FromSeconds(5) };
+    internal static HttpClient HttpClient
+    {
+        get => _httpClient ??= new HttpClient(HttpTransport.CreateHandler(), disposeHandler: true)
+        {
+            Timeout = TimeSpan.FromSeconds(5),
+        };
+        set => _httpClient = value;
+    }
+
+    private static HttpClient? _httpClient;
 
     /// <summary>
     /// Optional connector id stamped into the alert envelope as <c>connector</c>.

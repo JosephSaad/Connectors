@@ -1,0 +1,121 @@
+// Azure Monitor / Sentinel scheduled-query alert rules for the Salesforce
+// Copilot Connector — the LOG-based failure modes that have no Prometheus
+// metric (auth failures, deletion-sweep guard trips, dead-letter write
+// failures, crashes, corrupt state). Metric-based alerting lives in
+// ops/prometheus-alerts.yml; the ingestion pipeline these queries assume
+// (custom table SfConnector_CL, JSON lines from LOG_FORMAT=json collected by
+// AMA) is documented in docs/SIEM.md. Every rule names its runbook anchor in
+// docs/RUNBOOKS.md.
+//
+// Shared parser — reference it from each rule (or save as a Log Analytics
+// function named SfConnector):
+//
+//   SfConnector_CL
+//   | extend j = parse_json(RawData)
+//   | where isnotempty(j.level)
+//   | project TimeGenerated,
+//             Host = Computer,
+//             Level = tostring(j.level),
+//             Logger = tostring(j.logger),
+//             Message = tostring(j.message),
+//             ExceptionType = tostring(j.exception.type)
+//
+// Windows Event Log alternative (EVENTLOG_ENABLED=true, AMA event collection):
+// filter Event | where Source == "SalesforceConnector"; EventID 3000 = error,
+// 2000 = warning, 1000 = lifecycle/info. Same rules apply on the message text.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule 1: Token / auth failure
+// Severity: Sev1 (page). Frequency: 15m. Threshold: > 0 results.
+// Runbook: docs/RUNBOOKS.md#token--auth-failure
+// ─────────────────────────────────────────────────────────────────────────────
+SfConnector
+| where Message has_any ("AuthenticationFailedException",
+                         "CredentialUnavailableException",
+                         "InvalidAuthenticationToken",
+                         "invalid_client",
+                         "invalid_grant")
+    or ExceptionType has_any ("AuthenticationFailedException", "CredentialUnavailableException")
+| summarize Failures = count(), Sample = any(Message), FirstSeen = min(TimeGenerated)
+    by Host, bin(TimeGenerated, 15m)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule 2: Deletion-sweep guard trip
+// Severity: Sev2 (warn — nothing was deleted; a human must decide).
+// Frequency: 30m. Threshold: > 0 results.
+// Runbook: docs/RUNBOOKS.md#deletion-sweep-guard-trip
+// (Also available without log parsing: webhook alert kind
+//  "deletion_sweep_skipped" via ALERT_WEBHOOK_URL.)
+// ─────────────────────────────────────────────────────────────────────────────
+SfConnector
+| where Message has "deletion sweep SKIPPED"
+| parse Message with ObjectType ": deletion sweep SKIPPED — " Detail
+| project TimeGenerated, Host, ObjectType, Detail
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule 3: Dead-letter write failure (failure records could not be persisted)
+// Severity: Sev1 (page — the only data-loss-adjacent condition: failures are
+// currently only in the log text). Frequency: 15m. Threshold: > 0 results.
+// Runbook: docs/RUNBOOKS.md#dead-letter-growth (write-failure paragraph) and
+//          docs/RUNBOOKS.md#state-db-corruption for the disk/DB cause.
+// ─────────────────────────────────────────────────────────────────────────────
+SfConnector
+| where Message has "UNRECORDED FAILURE"
+    or (Message has "Failed to write" and Message has "dead-letter")
+| summarize Occurrences = count(), Sample = any(Message) by Host, bin(TimeGenerated, 15m)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule 4: Crawl crash / unhandled exception
+// Severity: Sev1 (page). Frequency: 15m. Threshold: > 0 results.
+// Runbook: docs/RUNBOOKS.md#crawl-stalled
+// ─────────────────────────────────────────────────────────────────────────────
+SfConnector
+| where Message has "crashed with an unhandled exception"
+    or Message has "Service command failed with an unhandled exception"
+    or Message has "(CRASHED)"
+| project TimeGenerated, Host, Logger, Message, ExceptionType
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule 5: Corrupt state detected
+// Severity: Sev2 (warn — the error names file and line; usually a one-line fix).
+// Frequency: 1h. Threshold: > 0 results.
+// Runbook: docs/RUNBOOKS.md#state-db-corruption
+// ─────────────────────────────────────────────────────────────────────────────
+SfConnector
+| where Message has "contains a corrupt entry at line"
+    or ExceptionType has "SqliteException"
+| project TimeGenerated, Host, Message, ExceptionType
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule 6: Sustained 429 storm (log-based variant of the Prometheus rule, for
+// estates without a scraper)
+// Severity: Sev3 (info/warn). Frequency: 15m. Threshold: results where
+// Throttles > 100. Runbook: docs/RUNBOOKS.md#429-storm
+// ─────────────────────────────────────────────────────────────────────────────
+SfConnector
+| where Message has "Graph API transient error 429"
+| summarize Throttles = count() by Host, bin(TimeGenerated, 15m)
+| where Throttles > 100
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule 7: HA heartbeat failures (claim at risk of expiry while the node lives)
+// Severity: Sev3 (info — one miss is survivable; sustained misses mean SQL
+// connectivity trouble on that node). Frequency: 30m. Threshold: results where
+// Misses >= 3. Runbook: docs/RUNBOOKS.md#ha-failover
+// ─────────────────────────────────────────────────────────────────────────────
+SfConnector
+| where Message has "[HA] Heartbeat failed for"
+| summarize Misses = count(), Sample = any(Message) by Host, bin(TimeGenerated, 30m)
+| where Misses >= 3
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule 8: Service stop/start audit trail (not an alert — a workbook/hunting
+// query over the Event Log feed for the compliance view of service lifecycle)
+// Runbook: n/a (docs/SIEM.md §1)
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where Source == "SalesforceConnector" and EventID == 1000
+| where RenderedDescription has "Running as a Windows service"
+    or RenderedDescription has "Command finished with exit code"
+| project TimeGenerated, Computer, RenderedDescription
+| order by TimeGenerated desc

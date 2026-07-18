@@ -165,6 +165,13 @@ public sealed record AppConfig
         var connectorId = Require("CONNECTOR_ID");
         ValidateConnectorId(connectorId, errors);
 
+        // Certificate credential (GRAPH_CLIENT_CERT_PATH / _THUMBPRINT) WINS
+        // over the client secret; when configured, the secret becomes optional.
+        var certCredential = Graph.CertificateCredential.Configured;
+        var certPath = Optional(Graph.CertificateCredential.CertPathEnvVar);
+        if (certPath != null && !File.Exists(certPath))
+            errors.Add($"{Graph.CertificateCredential.CertPathEnvVar} '{certPath}' does not exist");
+
         var config = new AppConfig
         {
             ConnectorId = connectorId,
@@ -173,7 +180,9 @@ public sealed record AppConfig
 
             AadClientId = Require("AAD_APP_CLIENT_ID"),
             AadTenantId = Require("AAD_APP_TENANT_ID"),
-            AadClientSecret = RequireSecret("SECRET_AAD_APP_CLIENT_SECRET"),
+            AadClientSecret = certCredential
+                ? secrets.Get("SECRET_AAD_APP_CLIENT_SECRET")?.Trim() ?? string.Empty
+                : RequireSecret("SECRET_AAD_APP_CLIENT_SECRET"),
             GraphApiVersion = Optional("GRAPH_API_VERSION") ?? "v1.0",
             GraphMaxRetries = OptionalInt("GRAPH_MAX_RETRIES", 4),
             GraphRetryBackoffBase = OptionalDouble("GRAPH_RETRY_BACKOFF_BASE", 2),

@@ -1,0 +1,168 @@
+// Azure Monitor / Sentinel scheduled-alert queries — BDH Hadoop Copilot Connector.
+//
+// Two ingestion paths, use whichever your estate collects (docs/SIEM.md):
+//   A) Windows Application event log (EVENTLOG_ENABLED=true, source
+//      "HadoopConnector") via Azure Monitor Agent → the Event table.
+//      Event ids: 1000 start / 1001 stop / 1100 info / 2000 warning / 3000 error.
+//   B) Prometheus metrics scraped into Azure Monitor managed Prometheus →
+//      PromQL rules; those are the same expressions as ops/prometheus-alerts.yml,
+//      so this file carries the LOG-based equivalents only.
+//
+// Each query header names its runbook anchor in docs/RUNBOOKS.md. Suggested
+// evaluation: every 15m over a 1h window unless stated. Severity mapping:
+// Sev1 = critical, Sev3 = warning.
+//
+// Shared base — create this as a Log Analytics function named
+// HadoopConnectorEvents and the queries below stay short:
+//
+//   Event
+//   | where EventLog == "Application" and Source == "HadoopConnector"
+//   | extend Logger = extract(@"^([\w\.]+):", 1, RenderedDescription)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GuardRefusalSpike — Sev3
+// Runbook: docs/RUNBOOKS.md#guard-refusal-unfiltered-object
+// Any refusal usually means a filters.json regression reached production.
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where EventLog == "Application" and Source == "HadoopConnector"
+| where EventID == 3000 and RenderedDescription contains "has no filter configured"
+| extend ObjectName = extract(@"'([^']+)' has no filter", 1, RenderedDescription)
+| summarize Refusals = count(), Objects = make_set(ObjectName, 25)
+          by Computer, bin(TimeGenerated, 1h)
+| where Refusals > 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SweepSuppressed — Sev3
+// Runbook: docs/RUNBOOKS.md#oversize-skip-partial-crawl-sweep-suppressed
+// Covers all three suppression paths: incomplete fetch (row cap / oversize
+// skip) and both mass-deletion guards ("SKIPPED" wording).
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where EventLog == "Application" and Source == "HadoopConnector"
+| where EventID == 2000
+| where RenderedDescription contains "deletion sweep"
+    and (RenderedDescription contains "skipped" or RenderedDescription contains "SKIPPED")
+| project TimeGenerated, Computer, RenderedDescription
+// Alert when count() > 0 over the window.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RowCapPartialCrawl — Sev3
+// Runbook: docs/RUNBOOKS.md#row-cap-hit-crawl-partial
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where EventLog == "Application" and Source == "HadoopConnector"
+| where EventID == 2000 and RenderedDescription contains "row cap hit"
+| extend ObjectName = extract(@"^[\w\.]+: (\w+):", 1, RenderedDescription)
+| summarize Hits = count(), Objects = make_set(ObjectName, 25) by Computer, bin(TimeGenerated, 6h)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WatermarkStale (>26h) — Sev1
+// Runbook: docs/RUNBOOKS.md#dt-watermark-gaps-missing-partitions
+// Log-based equivalent of time() - last_crawl_completed_timestamp_seconds >
+// 26h: no "Saved last sync timestamp" line in 26h from a host that has
+// emitted one before (the where-clause keeps fresh deployments quiet).
+// Requires EVENTLOG_LEVEL=info (the line is Info-level), or point the same
+// query at your ingested connector.log JSON feed.
+// Evaluate hourly over a 30d lookback.
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where EventLog == "Application" and Source == "HadoopConnector"
+| where EventID in (1100, 2000, 3000)
+| where RenderedDescription contains "Saved last sync timestamp"
+| summarize LastStamp = max(TimeGenerated) by Computer
+| where LastStamp < ago(26h)
+| project Computer, LastStamp, StaleFor = now() - LastStamp
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IdentityDirectoryIncomplete — Sev1 (ACL integrity, intentionally loud)
+// Runbook: docs/RUNBOOKS.md#identity-directory-incomplete-sync-fails-loud--intentional
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where EventLog == "Application" and Source == "HadoopConnector"
+| where EventID == 3000 and RenderedDescription contains "Identity directory load"
+    and RenderedDescription contains "INCOMPLETE"
+| project TimeGenerated, Computer, RenderedDescription
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BreakerOpenDegraded — Sev1 after 2 consecutive windows
+// Runbook: docs/RUNBOOKS.md#webhdfs-flapping--breaker-open-degraded-mode
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where EventLog == "Application" and Source == "HadoopConnector"
+| where EventID == 2000 and RenderedDescription contains "Degraded mode"
+| extend Dependency = extract(@"circuit open for ([\w, ]+)", 1, RenderedDescription)
+| summarize Pauses = count(), Dependencies = make_set(Dependency, 5)
+          by Computer, bin(TimeGenerated, 15m)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Throttle429Storm — Sev3
+// Runbook: docs/RUNBOOKS.md#429-storm-graph-throttling
+// The concurrency-reduction warning fires once per downward step; a storm
+// shows repeated steps plus sustained transient-429 retry warnings.
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where EventLog == "Application" and Source == "HadoopConnector"
+| where EventID == 2000
+| where RenderedDescription contains "429"
+    and (RenderedDescription contains "concurrency reduced"
+         or RenderedDescription contains "transient error 429")
+| summarize Throttles = count() by Computer, bin(TimeGenerated, 15m)
+| where Throttles > 30
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TokenFailure — Sev1
+// Runbook: docs/RUNBOOKS.md#token-failure-graph-auth
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where EventLog == "Application" and Source == "HadoopConnector"
+| where EventID == 3000 and RenderedDescription contains "Failed to acquire Graph token"
+| project TimeGenerated, Computer, RenderedDescription
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeadLetterGrowth (webhook-parity) — Sev3
+// Runbook: docs/RUNBOOKS.md#dead-letter-growth
+// Fires on the UNRECORDED-failure error path too (queue file unwritable),
+// which is strictly worse than growth.
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where EventLog == "Application" and Source == "HadoopConnector"
+| where EventID == 3000
+| where RenderedDescription contains "dead-letter"
+    or RenderedDescription contains "UNRECORDED FAILURE"
+| summarize Failures = count() by Computer, bin(TimeGenerated, 1h)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// StateCorruption — Sev3 (fail-safe already applied; investigate the host)
+// Runbook: docs/RUNBOOKS.md#state-corruption
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where EventLog == "Application" and Source == "HadoopConnector"
+| where EventID == 2000 and RenderedDescription contains "is corrupt"
+| project TimeGenerated, Computer, RenderedDescription
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LifecycleCrashWatch — Sev3
+// Runbook: docs/RUNBOOKS.md#ha-failover-node-death
+// A start (1000) without a matching stop (1001) before the next start on the
+// same host = crash/kill in between. Pair with SCM events 7031/7034.
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where EventLog == "Application" and Source == "HadoopConnector"
+| where EventID in (1000, 1001)
+| sort by Computer asc, TimeGenerated asc
+| serialize
+| extend NextId = next(EventID), NextComputer = next(Computer)
+| where EventID == 1000 and NextComputer == Computer and NextId == 1000
+| project CrashSuspectedAfter = TimeGenerated, Computer
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DelegationTokenLeakCanary — SECURITY, Sev1 on ANY hit
+// docs/SIEM.md — this query proves the logs STAY clean; the WebHDFS client
+// never prints query strings (Hdfs/WebHdfsClient.cs). Expected result: zero
+// rows, forever. One row = credential material in telemetry = incident.
+// ─────────────────────────────────────────────────────────────────────────────
+Event
+| where EventLog == "Application" and Source == "HadoopConnector"
+| where RenderedDescription contains "delegation=" or RenderedDescription matches regex @"[?&]delegation="
+| project TimeGenerated, Computer, EventID, RenderedDescription

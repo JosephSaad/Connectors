@@ -221,10 +221,14 @@ internal sealed class ScenarioRunner
         var fetcher = new BdhFetcher(cfg, source, filters, nowUtc: () => now);
         var obj = new ObjectConfig { ObjectName = "Contact", DisplayName = "Contact" };
 
+        // Peak-RSS sampling so the CI perf-smoke job can assert a working-set
+        // bound from this scenario's summary line (see .github/workflows/ci.yml).
+        using var mem = new MemorySampler();
         var sw = Stopwatch.StartNew();
         var result = await fetcher.FetchAsync(obj, fullCrawl: true, sinceUtc: null);
         sw.Stop();
         res.WallSecs = sw.Elapsed.TotalSeconds;
+        res.PeakRssMb = mem.PeakMb;
 
         var s = result.Stats;
         var scannedRegions = 1;                    // only EU survives the partition filter

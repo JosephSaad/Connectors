@@ -152,7 +152,10 @@ public sealed class HaCoordinator
     {
         try
         {
-            return _leases.TryAcquire(unit, NodeId, ttl ?? DefaultLeaseTtl, utcNow ?? DateTime.UtcNow);
+            var won = _leases.TryAcquire(unit, NodeId, ttl ?? DefaultLeaseTtl, utcNow ?? DateTime.UtcNow);
+            if (won)
+                Metrics.Increment("altrata_ha_leases_held", 1);   // best-effort per-process gauge
+            return won;
         }
         catch (Exception exc)
         {
@@ -179,6 +182,7 @@ public sealed class HaCoordinator
         try
         {
             _leases.Release(unit, NodeId);
+            Metrics.Increment("altrata_ha_leases_held", -1);   // paired with TryAcquire above
         }
         catch (Exception exc)
         {
