@@ -9,11 +9,11 @@ lives in its own top-level folder.
 
 | Connector | Source system | Highlights | Tests |
 |---|---|---|---|
-| [SalesforceConnector](SalesforceConnector/) | Salesforce CRM | Sharing-model ACLs, standard + custom objects, sovereign-cloud ready | 917 |
-| [ClarizenConnector](ClarizenConnector/) | Planview AdaptiveWork (Clarizen) | REST v2 + TDW bulk, financial-field governance, webhooks | 593 |
-| [SeismicConnector](SeismicConnector/) | Seismic (sales enablement) | Version-aware, No-MNE exclusion filter, usage ranking | 491 |
-| [AltrataConnector](AltrataConnector/) | Altrata (relationship & wealth intelligence) | Licensed feeds, seat-only entitlement, DSAR erasure | 465 |
-| [HadoopConnector](HadoopConnector/) | BDH Hadoop data mart (nightly Salesforce mirror) | Filter-first at 150M+ scale, partition pruning, 24h-lag aware | 669 |
+| [SalesforceConnector](SalesforceConnector/) | Salesforce CRM | Sharing-model ACLs, standard + custom objects, sovereign-cloud ready, large-group ACL scale guard | 963 |
+| [ClarizenConnector](ClarizenConnector/) | Planview AdaptiveWork (Clarizen) | REST v2 + TDW bulk, financial-field governance (filter by default), webhooks with anti-replay | 640 |
+| [SeismicConnector](SeismicConnector/) | Seismic (sales enablement) | Version-aware, fail-closed No-MNE exclusion filter, usage ranking, webhook anti-replay | 531 |
+| [AltrataConnector](AltrataConnector/) | Altrata (relationship & wealth intelligence) | Licensed feeds, seat-only entitlement, purpose-of-use authz, DSAR erasure | 501 |
+| [HadoopConnector](HadoopConnector/) | BDH Hadoop data mart (nightly Salesforce mirror) | Filter-first at 150M+ scale, partition pruning, 24h-lag aware | 694 |
 
 ## Shared chassis
 
@@ -28,13 +28,19 @@ components:
 - SQLite / SQL Server state, active-active HA leases, Azure Key Vault secrets
 - `/health` `/ready` `/metrics`, structured JSON logs, OpenTelemetry tracing
 - Circuit breakers with degraded-mode fail-safe
-- Unified data classification & sensitivity labeling (Public → Restricted)
+- Unified data classification & sensitivity tagging (Public → Restricted) — an
+  advisory connector-applied tag, with optional ACL enforcement of the top tier
 - SCM-aware Windows service, Docker image, GitHub Actions CI/CodeQL/release
 - Enterprise operations pack: Windows Event Log/SIEM integration, corporate
   proxy + TLS-inspection CA support, certificate-credential Graph auth,
-  dead-letter payload redaction, threat model, runbooks, DR plan, Grafana
-  dashboards + alert rules, SBOM + signed releases, MSI packaging (see each
-  connector's "Enterprise operations" README section)
+  threat model, runbooks, DR plan, Grafana dashboards + alert rules, SBOM +
+  signed releases, MSI packaging (see each connector's "Enterprise operations"
+  README section)
+- Bank-grade hardening — privacy- and compliance-safe defaults out of the box:
+  dead-letter payload redaction by default, entitlement re-sync on incremental
+  crawls, owner-only (0700) state directories, stale-index item TTL
+  (`expirationDateTime`), signed-timestamp webhook anti-replay, purpose-of-use
+  authorization (Altrata), and a tamper-evident hash-chained decision ledger
 
 See each connector's own `README.md` for source-specific features, environment
 variables, deployment and hardware guidance.

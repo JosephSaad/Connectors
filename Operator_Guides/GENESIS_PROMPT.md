@@ -231,7 +231,11 @@ Note/Important/Tip/**Information to request**, glossary layout).
 ---
 
 *Compiled 18-Jul-2026 from the session that produced: 5 connectors,
-3,047+ green tests, 2 stress rounds (19 defects incl. a CRITICAL DSAR
-resurrection window), a 74-fix diagnosability audit, the enterprise pack,
-12 operator documents, the architecture SVG, the FTE model and the
-bank-realistic programme plan.*
+3,329 green tests, 3 stress rounds (incl. a CRITICAL DSAR resurrection
+window), a 74-fix diagnosability audit, the enterprise pack, a bank-grade
+hardening round (12 prioritized fixes: safe-default flips — dead-letter
+redacted, entitlement re-sync on incrementals, Clarizen financial=filter,
+Seismic MNPI fail-closed, webhook signed-timestamp anti-replay — plus opt-in
+classification ACL enforcement, item TTL, purpose-of-use authorization and a
+tamper-evident decision ledger), 12 operator documents, the architecture SVG,
+the FTE model and the bank-realistic programme plan.*
