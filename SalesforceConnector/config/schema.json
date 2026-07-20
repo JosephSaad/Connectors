@@ -1,5 +1,5 @@
 {
-  "_comment": "v5 schema: SOQL field mapping. Keys = SF field names (drive SELECT). Values = Graph property name OR _sf_<name> placeholder if the field is consumed by a computed property (Address JSON, ContactDetails JSON, unified Status/Source/Number/IsClosed/ClosedDate). _sf_* fields are queried but never set as Graph properties; item_transformer.py reads them from raw_item to build OOB-style computed properties.",
+  "_comment": "v6 schema: SOQL field mapping. Keys = SF field names (drive SELECT). Values = Graph property name OR _sf_<name> placeholder if the field is consumed by a computed property (Address JSON, ContactDetails JSON, unified Status/Source/Number/IsClosed/ClosedDate). _sf_* fields are queried but never set as Graph properties. COMPOUND ADDRESS FIELDS ARE NEVER SELECTED: Salesforce publishes FieldPermissions on the COMPONENTS (BillingStreet, BillingCity, ...) and never on the compound (BillingAddress), so a compound value can carry no field-level-security evidence and is not indexable. Each component is selected individually and gated by literal name; the 'addressFields' map declares how the components are reassembled into the displayed address text.",
   "objectList": [
     {
       "objectName": "Account",
@@ -24,8 +24,41 @@
         "Parent.Name": "_sf_ParentName",
         "Phone": "_sf_Phone",
         "Fax": "_sf_Fax",
-        "BillingAddress": "_sf_BillingAddress",
-        "ShippingAddress": "_sf_ShippingAddress"
+        "BillingStreet": "_sf_BillingStreet",
+        "BillingCity": "_sf_BillingCity",
+        "BillingState": "_sf_BillingState",
+        "BillingPostalCode": "_sf_BillingPostalCode",
+        "BillingCountry": "_sf_BillingCountry",
+        "ShippingStreet": "_sf_ShippingStreet",
+        "ShippingCity": "_sf_ShippingCity",
+        "ShippingState": "_sf_ShippingState",
+        "ShippingPostalCode": "_sf_ShippingPostalCode",
+        "ShippingCountry": "_sf_ShippingCountry"
+      },
+      "addressFields": {
+        "BillingAddress": {
+          "property": "_sf_BillingAddress",
+          "components": {
+            "street": "BillingStreet",
+            "city": "BillingCity",
+            "state": "BillingState",
+            "postalCode": "BillingPostalCode",
+            "country": "BillingCountry"
+          }
+        },
+        "ShippingAddress": {
+          "property": "_sf_ShippingAddress",
+          "components": {
+            "street": "ShippingStreet",
+            "city": "ShippingCity",
+            "state": "ShippingState",
+            "postalCode": "ShippingPostalCode",
+            "country": "ShippingCountry"
+          }
+        }
+      },
+      "relationshipObjects": {
+        "Parent": "Account"
       },
       "SfColumnTypes": {
         "AnnualRevenue": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
@@ -61,7 +94,27 @@
         "Phone": "_sf_Phone",
         "MobilePhone": "_sf_MobilePhone",
         "Fax": "_sf_Fax",
-        "Address": "_sf_LeadAddress"
+        "Street": "_sf_Street",
+        "City": "_sf_City",
+        "State": "_sf_State",
+        "PostalCode": "_sf_PostalCode",
+        "Country": "_sf_Country"
+      },
+      "addressFields": {
+        "Address": {
+          "property": "_sf_LeadAddress",
+          "components": {
+            "street": "Street",
+            "city": "City",
+            "state": "State",
+            "postalCode": "PostalCode",
+            "country": "Country"
+          }
+        }
+      },
+      "relationshipObjects": {
+        "ConvertedAccount": "Account",
+        "ConvertedOpportunity": "Opportunity"
       },
       "SfColumnTypes": {
         "IsConverted": "System.Boolean, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
@@ -94,8 +147,42 @@
         "OtherPhone": "_sf_OtherPhone",
         "AssistantPhone": "_sf_AssistantPhone",
         "Fax": "_sf_Fax",
-        "MailingAddress": "_sf_MailingAddress",
-        "OtherAddress": "_sf_OtherAddress"
+        "MailingStreet": "_sf_MailingStreet",
+        "MailingCity": "_sf_MailingCity",
+        "MailingState": "_sf_MailingState",
+        "MailingPostalCode": "_sf_MailingPostalCode",
+        "MailingCountry": "_sf_MailingCountry",
+        "OtherStreet": "_sf_OtherStreet",
+        "OtherCity": "_sf_OtherCity",
+        "OtherState": "_sf_OtherState",
+        "OtherPostalCode": "_sf_OtherPostalCode",
+        "OtherCountry": "_sf_OtherCountry"
+      },
+      "addressFields": {
+        "MailingAddress": {
+          "property": "_sf_MailingAddress",
+          "components": {
+            "street": "MailingStreet",
+            "city": "MailingCity",
+            "state": "MailingState",
+            "postalCode": "MailingPostalCode",
+            "country": "MailingCountry"
+          }
+        },
+        "OtherAddress": {
+          "property": "_sf_OtherAddress",
+          "components": {
+            "street": "OtherStreet",
+            "city": "OtherCity",
+            "state": "OtherState",
+            "postalCode": "OtherPostalCode",
+            "country": "OtherCountry"
+          }
+        }
+      },
+      "relationshipObjects": {
+        "Account": "Account",
+        "ReportsTo": "Contact"
       },
       "SfColumnTypes": {
         "Birthdate": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
@@ -130,6 +217,10 @@
         "ForecastCategory": "ForecastCategory",
         "NextStep": "NextStep",
         "LastActivityDate": "LastActivityDate"
+      },
+      "relationshipObjects": {
+        "Account": "Account",
+        "Contact": "Contact"
       },
       "SfColumnTypes": {
         "Amount": "System.Double, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
@@ -173,6 +264,11 @@
         "PotentialLiability__c": "PotentialLiability",
         "Product__c": "CaseProduct",
         "SLAViolation__c": "SLAViolation"
+      },
+      "relationshipObjects": {
+        "Account": "Account",
+        "Contact": "Contact",
+        "Parent": "Case"
       },
       "SfColumnTypes": {
         "ClosedDate": "System.DateTime, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",

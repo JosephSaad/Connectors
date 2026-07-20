@@ -27,6 +27,9 @@ public static class ReAcl
         try
         {
             using var runtime = Runtime.Create();
+            // ReAclLockedAsync records an acl-restrict decision every time it
+            // re-locks a classification-locked item — those are ledger entries.
+            using var ledger = runtime.OpenLedger();
 
             var runDir = Path.GetDirectoryName(logFile) ?? CommandRegistry.LogsDir;
             var reportPath = Path.Combine(

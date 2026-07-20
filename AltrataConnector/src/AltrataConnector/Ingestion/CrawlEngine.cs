@@ -97,11 +97,16 @@ public sealed class CrawlEngine
     private readonly HaCoordinator? _ha;
     private readonly IDecisionLedger? _decisions;
 
+    /// <summary>Pre-built ContentGate (CS-1). Null in production — the engine
+    /// builds one per crawl from the environment. Injected by tests so a fake
+    /// scanner (e.g. an unavailable one) can drive the fail-mode matrix.</summary>
+    private readonly ContentGate? _contentGate;
+
     public CrawlProgress Progress { get; } = new();
 
     public CrawlEngine(AppConfig config, IGraphClient graph, IStateStore state,
         IIdentityStore identity, SeatService seats, IAlertSink alerts, HaCoordinator? ha = null,
-        IDecisionLedger? decisions = null)
+        IDecisionLedger? decisions = null, ContentGate? contentGate = null)
     {
         _config = config;
         _graph = graph;
@@ -111,6 +116,7 @@ public sealed class CrawlEngine
         _alerts = alerts;
         _ha = ha;
         _decisions = decisions;
+        _contentGate = contentGate;
     }
 
     /// <summary>True when classification-enforcement ACL restrictions should be
@@ -195,6 +201,18 @@ public sealed class CrawlEngine
         var transformer = new ItemTransformer(resolver, pathIndex, BuildClassificationOptions(),
             _config.GraphItemTtlDays);
 
+        // 2c. ContentGate (CS-1): built ONCE per crawl so the pattern table is
+        // compiled once. Null when CONTENT_GATE is off — the ingest loop then
+        // does literally no extra work and the wire output is unchanged.
+        var contentGate = _contentGate ?? ContentGate.FromEnv();
+        if (contentGate != null)
+        {
+            Logger.Info($"Content gate ENABLED (text fail mode: " +
+                        $"{contentGate.Options.TextFailMode.ToString().ToLowerInvariant()}, " +
+                        $"max scan {contentGate.Options.MaxScanMb} MB). No malware scanner: this " +
+                        "connector ingests no binary content; file integrity is the SHA-256 manifest gate.");
+        }
+
         // 3. Deliveries to process.
         var deliveries = kind == CrawlKind.Incremental
             ? allDeliveries.Where(d => !_state.IsDeliveryProcessed(d.Id)).ToList()
@@ -238,7 +256,7 @@ public sealed class CrawlEngine
 
             try
             {
-                var summary = await ProcessDeliveryAsync(delivery, acl, transformer, datasetFilters, ct);
+                var summary = await ProcessDeliveryAsync(delivery, acl, transformer, contentGate, datasetFilters, ct);
                 reconciliations.Add(summary);
                 switch (summary.Status)
                 {
@@ -337,7 +355,7 @@ public sealed class CrawlEngine
     // ---- delivery processing ----------------------------------------------------
 
     private async Task<DeliveryReconciliation> ProcessDeliveryAsync(Delivery delivery,
-        IReadOnlyList<AclEntry> acl, ItemTransformer transformer,
+        IReadOnlyList<AclEntry> acl, ItemTransformer transformer, ContentGate? contentGate,
         IReadOnlyCollection<string>? datasetFilters, CancellationToken ct)
     {
         using var deliverySpan = Telemetry.Span("delivery");
@@ -472,7 +490,7 @@ public sealed class CrawlEngine
             Telemetry.SetTag(datasetSpan, "altrata.records.count", records.Count);
 
             var (ingested, deleted, suppressed, deadLettered, stopped) = await IngestRecordsAsync(
-                delivery, file, dataset, records, startIndex, acl, transformer, seatHash,
+                delivery, file, dataset, records, startIndex, acl, transformer, contentGate, seatHash,
                 classificationEntries, aclRestrictedItemIds, ct);
 
             Telemetry.SetTag(datasetSpan, "altrata.records.ingested", ingested);
@@ -560,7 +578,8 @@ public sealed class CrawlEngine
     /// </summary>
     private async Task<(int Ingested, int Deleted, int Suppressed, int DeadLettered, bool Stopped)> IngestRecordsAsync(
         Delivery delivery, ManifestFile file, string dataset, IReadOnlyList<FeedRecord> records,
-        int startIndex, IReadOnlyList<AclEntry> acl, ItemTransformer transformer, string seatHash,
+        int startIndex, IReadOnlyList<AclEntry> acl, ItemTransformer transformer,
+        ContentGate? contentGate, string seatHash,
         List<ClassificationEntry>? classificationEntries, List<string>? aclRestrictedItemIds,
         CancellationToken ct)
     {
@@ -602,6 +621,11 @@ public sealed class CrawlEngine
             // withdrawal; erasure-suppressed subjects are skipped entirely;
             // transform failures dead-letter here; entitlement violations abort.
             var items = new List<ExternalItem>(end - index);
+            // ContentGate quarantines collected here and audited AFTER the
+            // transform loop: the ledger append and the alert must not run
+            // inside the loop's catch-all, or a ledger fault would be recorded
+            // as a transform failure.
+            var quarantined = new List<ContentScanVerdict>();
             var tombstones = new List<string>();
             // itemId → raw person id, for PersonProfile tombstones so a
             // withdrawn person is also dropped from the path index.
@@ -642,6 +666,39 @@ public sealed class CrawlEngine
                     }
 
                     var item = transformer.Transform(record, acl);
+
+                    // ---- ContentGate (CS-1) ----------------------------------
+                    // Scan the FINAL indexed text before it can become Copilot
+                    // grounding context. QUARANTINE, not drop: a positive
+                    // verdict routes the item to the existing dead-letter queue
+                    // with a PII-safe reason and stays re-drivable.
+                    if (contentGate != null)
+                    {
+                        var gated = contentGate.Inspect(item);
+                        item = gated.Item;                       // carries the scan-status property
+                        if (gated.Verdict.Quarantine)
+                        {
+                            deadLetters.Add(new DeadLetterRecord
+                            {
+                                ItemId = item.Id,
+                                Dataset = dataset,
+                                DeliveryId = delivery.Id,
+                                // PII-safe: category only, never the matched text.
+                                Error = gated.Verdict.Reason,
+                                // Upsert (not 'transform'): the item exists and
+                                // replaying it is meaningful once reviewed, so
+                                // it stays REPLAYABLE for retry-failed.
+                                Op = DeadLetterOps.Upsert,
+                                PayloadJson = redactPayloads ? "" : JsonSerializer.Serialize(item),
+                                Redacted = redactPayloads,
+                                SubjectIds = redactPayloads ? Array.Empty<string>() : subjects,
+                                SubjectHashes = DeadLetterPolicy.HashSubjects(subjects),
+                            });
+                            quarantined.Add(gated.Verdict);
+                            continue;
+                        }
+                    }
+
                     items.Add(item);
                     payloadJson[item.Id] = JsonSerializer.Serialize(item);
                     if (subjects.Count > 0)
@@ -681,6 +738,22 @@ public sealed class CrawlEngine
                     if (Logger.IsDebugEnabled)
                         Logger.Debug($"Transform failed for {dataset} record {record.Id ?? i.ToString()}: {exc}");
                 }
+            }
+
+            // ContentGate audit trail, outside the transform loop's catch-all:
+            // one tamper-evident ledger entry per quarantined item plus the
+            // EXISTING alert path. Both carry the item id and the category only.
+            foreach (var verdict in quarantined)
+            {
+                _decisions?.RecordQuarantine(verdict.ItemId, verdict.Reason);
+                await _alerts.SendAsync("warning", "content_gate_blocked",
+                    $"Content gate quarantined item '{verdict.ItemId}' ({verdict.Reason})",
+                    new Dictionary<string, object?>
+                    {
+                        ["itemId"] = verdict.ItemId,
+                        ["category"] = verdict.Category,
+                        ["deliveryId"] = delivery.Id,
+                    });
             }
 
             // Ship the superchunk through the $batch pipeline: upserts then tombstones.

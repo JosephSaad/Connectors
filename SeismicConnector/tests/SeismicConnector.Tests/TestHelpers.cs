@@ -26,10 +26,29 @@ public static class TestConfig
         int graphItemTtlDays = 0,
         int chunkSize = 10,
         int graphBatchSize = 5,
-        int batchWorkers = 2)
+        int batchWorkers = 2,
+        bool contentGate = false,
+        string? contentGateIcapUrl = null,
+        string contentGateBinaryFailMode = "closed",
+        string contentGateTextFailMode = "open",
+        long contentGateMaxScanBytes = 25L * 1024 * 1024,
+        ClassificationRules? contentGateRules = null)
     {
         return new AppConfig
         {
+            ContentGate = new SeismicConnector.Security.ContentGateSettings
+            {
+                Enabled = contentGate,
+                IcapUrl = contentGateIcapUrl,
+                BinaryFailMode = contentGateBinaryFailMode,
+                TextFailMode = contentGateTextFailMode,
+                MaxScanBytes = contentGateMaxScanBytes,
+            },
+            // Mirrors AppConfig.Load: the ruleset is only populated when the
+            // gate is on, so a gate-off config reads no rules at all.
+            ContentGateRules = contentGate
+                ? contentGateRules ?? SeismicConnector.Security.InjectionRules.Default()
+                : contentGateRules ?? new ClassificationRules(),
             Connector = new ConnectorSettings
             {
                 Id = connectorId,

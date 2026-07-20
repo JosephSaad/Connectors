@@ -111,8 +111,32 @@ property value (the two taxonomy properties themselves are excluded):
   force `Restricted`; a custom category appears in `DetectedCategories` but
   does not raise the label.
 - An **invalid regex is skipped** (the category keeps its valid patterns);
-  a category with no valid patterns is dropped. Config can degrade the scan
-  but never crash the connector.
+  a category with no valid patterns is dropped. A bad *pattern* can degrade the
+  scan but never crashes the connector.
+- A structurally **wrong-typed** value — `"categories"` as an object or a
+  string, a `null` or non-object entry in `categories` or `patterns`, a
+  non-string `name`/`regex`, a non-object document — is a **load error**
+  (`InvalidDataException`) naming this file and the JSON path of the offending
+  value. It is reported by `validate-config` as
+  `classification.json invalid: <message>`.
+- A JSON **`null` is read as that key's empty value**, the same single rule the
+  rest of the config follows ([`CONFIG_NULL_SEMANTICS.md`](CONFIG_NULL_SEMANTICS.md)):
+  `"categories": null` and `"patterns": null` load as *empty*, not as an error.
+- Because empty then means *nothing is ever detected*, `validate-config` raises
+  a **WARNING** when `CLASSIFICATION=true` and the file yields no usable
+  category — classification would otherwise be on in name only.
+- `classification.json` is in the preflight-validated set alongside
+  `schema.json`, `graph-schema.json` and `filters.json`: no config in any of
+  those four files can pass `validate-config --strict` green and then fail when
+  the crawl loads it.
+
+> Caveat, stated plainly: preflight is what closes the gap. If an operator skips
+> `validate-config` entirely, a structurally invalid `classification.json` still
+> ends the run at `IngestPipeline` construction — now with an
+> `InvalidDataException` naming the file and the JSON path, but still via the
+> CLI's generic unhandled-exception backstop, which prints a stack. Routing this
+> file through the `Runtime.LoadConfigFile` clean-exit path (as `schema.json` and
+> `filters.json` are) has not been done.
 
 ## Hardening (`Content/ContentClassifier.cs`)
 
@@ -162,6 +186,13 @@ retrievable **refiners**:
 
 Keep them in the schema even when classification is off (absent properties on
 items are fine; a schema change requires re-provisioning).
+
+Both names are **reserved**: `Classify` writes them on every item it sees, after
+`ItemConverter.Convert` has run, so a `selectedFields` entry mapped onto either
+would be overwritten on every record and a `columnPolicies` entry named after
+either would report a restriction the item does not deliver. `SchemaConfig`
+rejects both directions at load, whatever `CLASSIFICATION` is currently set to —
+see [the always-emitted properties](COLUMN_POLICIES.md#the-seven-always-emitted-properties).
 
 `/metrics` (labelled families appear once something is counted):
 

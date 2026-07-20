@@ -36,6 +36,27 @@ public sealed class SchemaConfig
     public static string DefaultPath =>
         Path.Combine(Directory.GetCurrentDirectory(), "config", "schema.json");
 
+    /// <summary>
+    /// Graph property names the CONNECTOR computes and owns. A selectedFields
+    /// mapping must never claim one: the source value would collide with (or be
+    /// silently replaced by) a connector-derived value, and in the taxonomy cases
+    /// it used to hide the source text from the content gate as well. Rejecting
+    /// the mapping at load is the explicit, operator-visible behaviour — a
+    /// startup error naming the field beats a bypass nobody can see.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> ReservedPropertyNames = new[]
+    {
+        Item.SensitivityClassifier.LabelProperty,            // SensitivityLabel
+        Item.SensitivityClassifier.CategoriesProperty,       // DetectedCategories
+        Item.FinancialFieldClassifier.ClassificationProperty,   // DataClassification
+        Item.FinancialFieldClassifier.ContainsFinancialProperty, // ContainsFinancialData
+        ContentGate.ContentGateStage.StatusProperty,         // ContentGateStatus
+        Item.AttachmentEnricher.StatusProperty,              // AttachmentExtractionStatus
+    };
+
+    private static readonly HashSet<string> ReservedPropertySet =
+        new(ReservedPropertyNames, StringComparer.OrdinalIgnoreCase);
+
     internal void Validate(string path)
     {
         if (ObjectList.Count == 0)
@@ -50,6 +71,32 @@ public sealed class SchemaConfig
             if (obj.SelectedFields.Count == 0)
                 throw new InvalidDataException(
                     $"Schema config '{path}': object '{obj.ObjectName}' has no selectedFields.");
+            foreach (var (field, property) in obj.SelectedFields)
+            {
+                // A blank Graph property name cannot be declared in any Graph
+                // connection schema, so EVERY record of this object would fail to
+                // stamp. Rejecting it at load is the difference between a startup
+                // error naming the field and a crawl that dead-letters 100% of the
+                // data while advancing the sync cursor past it. A config that
+                // cannot possibly work must not start a crawl.
+                if (string.IsNullOrWhiteSpace(property))
+                {
+                    throw new InvalidDataException(
+                        $"Schema config '{path}': object '{obj.ObjectName}' maps field '{field}' "
+                        + "onto a BLANK Graph property name. Microsoft Graph rejects unnamed "
+                        + "properties, so no record of this object could ever be indexed — give "
+                        + "the mapping a property name, or remove the field.");
+                }
+                if (ReservedPropertySet.Contains(property))
+                {
+                    throw new InvalidDataException(
+                        $"Schema config '{path}': object '{obj.ObjectName}' maps field '{field}' "
+                        + $"onto '{property}', which is a RESERVED connector-computed property "
+                        + "name. Source data must not be published under a name the connector "
+                        + $"owns — rename the mapping (reserved: "
+                        + $"{string.Join(", ", ReservedPropertyNames)}).");
+                }
+            }
             foreach (var financial in obj.FinancialFields)
             {
                 if (!obj.SelectedFields.ContainsKey(financial))

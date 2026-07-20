@@ -35,7 +35,7 @@ public static class Deploy
                 await identity.RunAsync(persist: true, ct: ServiceStop.Token);
                 using var report = runtime.OpenReport(logFile);
                 using var manifest = runtime.OpenManifest(logFile);
-                using var ledger = runtime.OpenLedger(logFile);
+                using var ledger = runtime.OpenLedger();
                 var ok = await RunCrawlCycleAsync(runtime, fullCrawl: true);
                 report.Finish();
                 manifest.Finish();
@@ -89,6 +89,12 @@ public static class Deploy
         using var webhook = WebhookReceiver.StartIfConfigured(config.Seismic.WebhookPort);
         using var dashboard = Dashboard.StartIfInteractive(runtime.Pipeline, webhook);
 
+        // Opened ONCE for the whole continuous run, not per cycle: the ledger is
+        // a single chain at a stable path, so re-opening it every cycle would
+        // only re-scan the file to find the same tail. Webhook-driven ingests
+        // between cycles are covered by the same ledger for free.
+        using var ledger = runtime.OpenLedger();
+
         var nextFull = DateTime.UtcNow;                    // first cycle is a full crawl
         var nextIncremental = DateTime.UtcNow.AddHours(incrementalHours);
 
@@ -109,7 +115,6 @@ public static class Deploy
 
                 using (var report = runtime.OpenReport(logFile))
                 using (var manifest = runtime.OpenManifest(logFile))
-                using (var ledger = runtime.OpenLedger(logFile))
                 {
                     var ok = await RunCrawlCycleAsync(runtime, fullCrawl: isFull);
                     report.Finish();

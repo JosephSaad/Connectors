@@ -207,6 +207,18 @@ CREATE TABLE IF NOT EXISTS field_cache (
     cached_at      TEXT NOT NULL,
     PRIMARY KEY (object_type, instance_hash)
 );
+
+-- WP-SF-2: cached Salesforce field-level read permissions, keyed exactly like
+-- field_cache above. Added via the existing idempotent CREATE TABLE IF NOT EXISTS
+-- migration path (InitSchema runs the full DDL on every open, so pre-existing
+-- databases gain the table on first connect without touching any other DDL).
+CREATE TABLE IF NOT EXISTS fls_cache (
+    object_type    TEXT NOT NULL,
+    instance_hash  TEXT NOT NULL,
+    permissions    TEXT NOT NULL,
+    cached_at      TEXT NOT NULL,
+    PRIMARY KEY (object_type, instance_hash)
+);
 ";
 
     private readonly string _dbPath;
@@ -714,6 +726,57 @@ CREATE TABLE IF NOT EXISTS field_cache (
         return Execute("DELETE FROM field_cache");
     }
 
+    // ── FLS cache (WP-SF-2) ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Return the cached field-level-security payload for <paramref name="objectType"/>
+    /// at <paramref name="instanceUrl"/>, or null if no entry exists.
+    /// </summary>
+    public string? GetCachedFls(string instanceUrl, string objectType)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT permissions FROM fls_cache WHERE object_type = @p0 AND instance_hash = @p1";
+        cmd.Parameters.AddWithValue("@p0", objectType);
+        cmd.Parameters.AddWithValue("@p1", InstanceHash(instanceUrl));
+        using var reader = cmd.ExecuteReader();
+        return reader.Read() ? reader.GetString(0) : null;
+    }
+
+    /// <summary>Persist the field-level-security payload for an org/object.</summary>
+    public void SaveCachedFls(string instanceUrl, string objectType, string permissionsJson)
+    {
+        Execute(
+            @"
+            INSERT INTO fls_cache (object_type, instance_hash, permissions, cached_at)
+            VALUES (@p0, @p1, @p2, @p3)
+            ON CONFLICT(object_type, instance_hash) DO UPDATE SET
+                permissions = excluded.permissions,
+                cached_at   = excluded.cached_at
+            ",
+            objectType, InstanceHash(instanceUrl), permissionsJson, NowIso());
+    }
+
+    /// <summary>
+    /// Clear cached FLS entries (all / per-org / per-org+object), returning the
+    /// number deleted. Same argument semantics as <see cref="ClearFieldCache"/>.
+    /// </summary>
+    public int ClearFlsCache(string? instanceUrl = null, string? objectType = null)
+    {
+        if (!string.IsNullOrEmpty(instanceUrl) && !string.IsNullOrEmpty(objectType))
+        {
+            return Execute(
+                "DELETE FROM fls_cache WHERE object_type = @p0 AND instance_hash = @p1",
+                objectType, InstanceHash(instanceUrl));
+        }
+        if (!string.IsNullOrEmpty(instanceUrl))
+        {
+            return Execute(
+                "DELETE FROM fls_cache WHERE instance_hash = @p0",
+                InstanceHash(instanceUrl));
+        }
+        return Execute("DELETE FROM fls_cache");
+    }
+
     // ── Utility ───────────────────────────────────────────────────────────────
 
     public string ConnectionId => _connectionId;
@@ -802,10 +865,25 @@ CREATE TABLE IF NOT EXISTS field_cache (
         return now.ToString(format, CultureInfo.InvariantCulture) + "+00:00";
     }
 
-    /// <summary>Return a short hash of the Salesforce instance URL for cache keying.</summary>
-    private static string InstanceHash(string instanceUrl)
+    /// <summary>
+    /// Return a short hash of the Salesforce instance URL for cache keying.
+    ///
+    /// SHA-256 (WP-SF-5) — was MD5 through 1.0.0, replaced for FIPS 140-3: no
+    /// broken primitive is called even on a FIPS-enforced host. The output shape
+    /// is deliberately unchanged (first 8 chars of lowercase hex), so the
+    /// <c>field_cache</c> primary key and the SQL <c>nvarchar(16)</c> column need
+    /// no DDL change.
+    ///
+    /// Must stay byte-identical to <see cref="SqlServerIdentityStore.InstanceHash"/>.
+    ///
+    /// On upgrade, rows written under the old MD5 key become unreachable: that is
+    /// a benign cache miss (the caller re-runs the INVALID_FIELD discovery loop
+    /// and writes a fresh row). The orphans are left in place on purpose — see
+    /// docs/THREAT_MODEL.md, "FIPS posture".
+    /// </summary>
+    internal static string InstanceHash(string instanceUrl)
     {
-        var digest = MD5.HashData(Encoding.UTF8.GetBytes(instanceUrl));
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(instanceUrl));
         return Convert.ToHexString(digest).ToLowerInvariant()[..8];
     }
 

@@ -56,6 +56,10 @@ public sealed class IngestSummary
     /// opened (degraded mode). The checkpoint is retained and the sync cursor is
     /// not advanced, so the next cycle resumes cleanly.</summary>
     public bool Degraded { get; set; }
+
+    /// <summary>Items withheld from the index by the ContentGate stage and
+    /// dead-lettered for re-drive (0 unless CONTENT_GATE is on).</summary>
+    public int Quarantined { get; set; }
 }
 
 /// <summary>Tracks concurrency level: dials down on 429, dials up on sustained success.</summary>
@@ -122,6 +126,7 @@ public sealed class IngestPipeline
     private readonly Func<string, IItemInventory> _inventoryFactory;
     private readonly Item.AttachmentEnricher? _attachmentEnricher;
     private readonly Item.SensitivityClassifier? _classifier;
+    private readonly ContentGate.ContentGateStage? _contentGate;
     private Item.ClassificationManifest? _manifest;
     private readonly object _statsLock = new();
     private readonly object _inventoryLock = new();
@@ -150,7 +155,8 @@ public sealed class IngestPipeline
         HaCoordinator? ha = null,
         Func<string, IItemInventory>? inventoryFactory = null,
         Item.AttachmentEnricher? attachmentEnricher = null,
-        Item.SensitivityClassifier? sensitivityClassifier = null)
+        Item.SensitivityClassifier? sensitivityClassifier = null,
+        ContentGate.ContentGateStage? contentGate = null)
     {
         _config = config;
         _schema = schema;
@@ -161,11 +167,17 @@ public sealed class IngestPipeline
         _ha = ha;
         _concurrency = new AdaptiveConcurrency(config.GraphBatchWorkers);
         _inventoryFactory = inventoryFactory ?? ItemInventory.Open;
+        // Content gate is off by default: only build it when CONTENT_GATE=true,
+        // so nothing is scanned, no property is added and there is no cost
+        // otherwise. A provided instance wins (tests inject scanners). Built
+        // BEFORE the enricher because the enricher owns the binary seam.
+        _contentGate = contentGate
+            ?? (config.ContentGateEnabled ? ContentGate.ContentGateStage.Create(config) : null);
         // Enrichment is a strict no-op unless ATTACHMENT_INGESTION=true, so
         // constructing the enricher always is harmless (and keeps the default
         // path unchanged when the flag is off).
         _attachmentEnricher = attachmentEnricher
-            ?? new Item.AttachmentEnricher(config, clarizen);
+            ?? new Item.AttachmentEnricher(config, clarizen, extractor: null, contentGate: _contentGate);
         // Classification is off by default: only build the classifier when
         // CLASSIFICATION=true, so no properties are added and behaviour is
         // unchanged otherwise. A provided instance wins (tests inject patterns).
@@ -290,6 +302,100 @@ public sealed class IngestPipeline
         }
     }
 
+    /// <summary>
+    /// CONTENT GATE (CS-1). Returns the quarantine category when the item must
+    /// NOT be indexed, else null. Strict no-op (null) when CONTENT_GATE is off.
+    /// <para>
+    /// The attachment enricher already scanned the downloaded bytes and the
+    /// extracted text and stamped its verdict, so a block there is authoritative
+    /// and is not rescanned here. Everything else is scanned as a fully
+    /// assembled item, which is the string that actually becomes grounding
+    /// context.
+    /// </para>
+    /// </summary>
+    private string? ApplyContentGate(ExternalItem item) => ApplyContentGateTo(_contentGate, item);
+
+    /// <summary>The gate's item-level pass, as a static so it can be exercised
+    /// directly. Behaviour is identical to the instance form — there is one
+    /// implementation, not a test-only copy that could drift from production.</summary>
+    internal static string? ApplyContentGateTo(ContentGate.ContentGateStage? _contentGate, ExternalItem item)
+    {
+        // A DISABLED gate scans nothing: ScanItem is a no-op that returns Pass,
+        // and stamping that Pass would put ContentGateStatus="clean" on an item
+        // nothing ever inspected. Production never constructs a stage here with
+        // the gate off (Runtime.cs passes null), but relying on a caller's
+        // discipline is how the seam gets widened into a false-assurance bug
+        // later — so it is checked, and ContentGateStage.Stamp throws too.
+        if (_contentGate is null || !_contentGate.Enabled)
+            return null;
+
+        if (ContentGate.ContentGateStage.BlockedCategoryOf(item) is { } alreadyBlocked)
+            return alreadyBlocked;
+
+        // An earlier seam may have stamped INCOMPLETE (unscannable attachment
+        // bytes under a fail-open binary mode). The item-level scan below only
+        // sees text, so a Clean verdict from it says nothing about those bytes:
+        // it must not be allowed to overwrite the incomplete stamp with "clean".
+        var carriedIncomplete = ContentGate.ContentGateStage.IncompleteCategoryOf(item);
+
+        var verdict = _contentGate.ScanItem(item);
+        if (carriedIncomplete is not null && verdict.Outcome == ContentGate.GateOutcome.Clean)
+            return null;   // keep the incomplete stamp the earlier seam wrote
+
+        // Two incomplete reasons can apply at once (unscannable BYTES at the
+        // enricher seam, then unscannable/truncated TEXT here). Keep both — the
+        // status stays 'incomplete:' either way, but the operator needs to know
+        // which parts of the item went uninspected, not just the most recent one.
+        if (carriedIncomplete is not null
+            && verdict.Outcome == ContentGate.GateOutcome.Incomplete)
+        {
+            verdict = ContentGate.GateVerdict.Incomplete(
+                ContentGate.ContentGateStage.MergeCategories(carriedIncomplete, verdict.Category),
+                verdict.Detail);
+        }
+
+        _contentGate.StampVerdict(item, verdict);
+        return verdict.IsBlocked ? verdict.Category : null;
+    }
+
+    /// <summary>
+    /// QUARANTINE, not drop. A positive content-gate verdict withholds the item
+    /// from the index but keeps it: it goes to the EXISTING dead-letter queue
+    /// with reason <c>content-gate:&lt;category&gt;</c>, gets its own decision-ledger
+    /// entry, increments the block metric and raises the existing alert path.
+    /// `retry-failed` re-drives it unchanged once the content is fixed or the
+    /// verdict is judged a false positive.
+    /// </summary>
+    private async Task QuarantineAsync(
+        AppConfig cfg, ExternalItem item, string objectType, string category)
+    {
+        var reason = ContentGate.ContentGateStage.ReasonFor(category);
+
+        Metrics.IncContentGateBlocked(category);
+        DecisionLedger.RecordQuarantine(cfg.ConnectorId, item.Id, reason);
+        SyncState.AppendFailedRecords(
+            cfg.ConnectorId,
+            new[] { (item.Id, reason) },
+            objectType,
+            new Dictionary<string, JsonNode?> { [item.Id] = item.ToJson() });
+
+        Logger.Warning(
+            $"CONTENT GATE: quarantined {item.Id} ({objectType}) — {reason}. The item was NOT "
+            + "indexed; it is in the dead-letter queue and re-drivable with `retry-failed`.");
+
+        await Alerting.RaiseAsync(
+                "content_gate",
+                $"Content gate quarantined {item.Id} ({reason})",
+                new Dictionary<string, object?>
+                {
+                    ["item_id"] = item.Id,
+                    ["object_type"] = objectType,
+                    ["category"] = category,
+                    ["connector"] = cfg.ConnectorId,
+                })
+            .ConfigureAwait(false);
+    }
+
     /// <summary>Record an ACL-restriction decision when FINANCIAL_DATA_MODE=acl
     /// locked a financial item down to the finance group (the converter applied
     /// the restriction; this is the audit trail for it).</summary>
@@ -409,6 +515,18 @@ public sealed class IngestPipeline
                     $"[{objectConfig.ObjectName}] cancelled mid-chunk — graceful stop; "
                     + "checkpoint retained, nothing dead-lettered.");
                 break;
+            }
+            catch (GraphSchemaConfigurationException)
+            {
+                // Same reasoning as the per-record catch in TransformChunk: a
+                // Graph-schema configuration fault (an undeclared property name, a
+                // blank one, or a declaration file that cannot be loaded) is a
+                // defect in the connector's configuration, not a fault in this
+                // object's data, so "continue with the next object type" would
+                // just repeat the same total failure per object and close the
+                // crawl with an all-dead-lettered index. Let it out of RunAsync so
+                // the command fails loudly.
+                throw;
             }
             catch (Exception exc)
             {
@@ -874,6 +992,18 @@ public sealed class IngestPipeline
                 }
                 // Classify AFTER enrichment so attachment text is in the scan.
                 ApplyClassification(item, objectConfig, cfg.ConnectorId);
+                // Gate LAST, on the fully assembled item — that is the exact
+                // text that would become grounding context.
+                if (ApplyContentGate(item) is { } gateCategory)
+                {
+                    await QuarantineAsync(cfg, item, objectConfig.ObjectName, gateCategory)
+                        .ConfigureAwait(false);
+                    lock (_statsLock)
+                    {
+                        summary.Quarantined++;
+                    }
+                    continue;   // withheld from the index, retained in dead-letter
+                }
                 if (debugEnabled)
                 {
                     Logger.Debug(
@@ -886,6 +1016,19 @@ public sealed class IngestPipeline
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 throw;  // a real stop request — handled as a graceful stop upstream
+            }
+            catch (GraphSchemaConfigurationException)
+            {
+                // NOT a poisoned source row. Either the connector stamped a Graph
+                // property that config/graph-schema.json does not declare (or a
+                // blank name no schema could declare), or the declaration itself
+                // could not be loaded — code/config defects that hit EVERY record,
+                // from wherever the stamp was written. Per-row isolation would
+                // demote them to "one more bad row" and the crawl would report a
+                // clean finish having dead-lettered 100% of the data, with the
+                // sync cursor advanced past all of it. Escalate so the run aborts
+                // naming the fault. The property is never silently dropped.
+                throw;
             }
             catch (Exception exc)
             {
@@ -1165,6 +1308,16 @@ public sealed class IngestPipeline
         if (_attachmentEnricher is not null && _attachmentEnricher.ShouldEnrich(objectConfig))
             await _attachmentEnricher.EnrichAsync(item, record, objectConfig, ct).ConfigureAwait(false);
         ApplyClassification(item, objectConfig, _config.ConnectorId);
+        // Same gate as the crawl path. The webhook receiver re-fetches by id and
+        // re-ingests through here, so covering this entry point covers webhooks
+        // too — a malicious record delivered by notification is quarantined
+        // exactly like one found by a crawl.
+        if (ApplyContentGate(item) is { } gateCategory)
+        {
+            await QuarantineAsync(_config, item, objectConfig.ObjectName, gateCategory)
+                .ConfigureAwait(false);
+            return (false, ContentGate.ContentGateStage.ReasonFor(gateCategory));
+        }
 
         // Under sharding a single item routes to the connection that owns its
         // object type (state keys and search results stay consistent).

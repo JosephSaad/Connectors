@@ -147,6 +147,9 @@ public class SensitivityClassifierApplyTests
     [Fact]
     public void ScanText_IncludesPropertiesNotTaxonomyProps()
     {
+        // "Tags" models an operator-extended schema property: a string[] that is
+        // NOT one of the classifier's own taxonomy outputs, so it must be scanned.
+        using var schema = new GraphSchemaScope("Tags");
         var item = new ExternalItem { Id = "X" };
         item.Content = "body";
         item.Properties["Title"] = "secret a@b.com";

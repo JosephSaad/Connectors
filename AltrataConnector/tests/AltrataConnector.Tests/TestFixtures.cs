@@ -24,6 +24,18 @@ public static class TestFixtures
         return dir;
     }
 
+    /// <summary>Repository root (the directory holding AltrataConnector.sln),
+    /// found by walking up from the test binary — so tests can assert on
+    /// shipped config files regardless of the working directory.</summary>
+    public static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "AltrataConnector.sln")))
+            dir = dir.Parent;
+        return dir?.FullName
+               ?? throw new InvalidOperationException("AltrataConnector.sln not found above the test binary");
+    }
+
     public static string Sha256Of(string filePath)
     {
         using var stream = File.OpenRead(filePath);
@@ -266,10 +278,16 @@ public sealed class FakeAlertSink : IAlertSink
 {
     public List<(string Severity, string Event, string Message)> Alerts { get; } = new();
 
+    /// <summary>Same alerts including the details payload — so a test can assert
+    /// the whole outgoing webhook body is PII-safe.</summary>
+    public List<(string Severity, string Event, string Message,
+        IReadOnlyDictionary<string, object?>? Details)> Full { get; } = new();
+
     public Task SendAsync(string severity, string @event, string message,
         IReadOnlyDictionary<string, object?>? details = null)
     {
         Alerts.Add((severity, @event, message));
+        Full.Add((severity, @event, message, details));
         return Task.CompletedTask;
     }
 

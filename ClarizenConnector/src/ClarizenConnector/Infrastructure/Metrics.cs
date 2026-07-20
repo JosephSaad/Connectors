@@ -17,6 +17,10 @@ public static class Metrics
     private static readonly ConcurrentDictionary<string, long> SensitiveDetections = new(StringComparer.Ordinal);
     // ACL-restriction decisions, keyed by reason ("financial" | "classification").
     private static readonly ConcurrentDictionary<string, long> ItemsAclRestricted = new(StringComparer.Ordinal);
+    // ContentGate quarantines, keyed by category ("malware", "injection.override", ...).
+    private static readonly ConcurrentDictionary<string, long> ContentGateBlocked = new(StringComparer.Ordinal);
+    // ContentGate scans that could not complete, keyed by kind ("binary" | "text").
+    private static readonly ConcurrentDictionary<string, long> ContentGateScanUnavailable = new(StringComparer.Ordinal);
 
     // Monotonic counters.
     private static long _itemsIngested;
@@ -69,6 +73,17 @@ public static class Metrics
     public static void IncItemsAclRestricted(string reason) =>
         ItemsAclRestricted.AddOrUpdate(reason, 1, (_, v) => v + 1);
 
+    /// <summary>Record one item quarantined by the content gate, by category.</summary>
+    public static void IncContentGateBlocked(string category) =>
+        ContentGateBlocked.AddOrUpdate(category, 1, (_, v) => v + 1);
+
+    /// <summary>Record one content-gate scan that could not complete, by kind
+    /// ("binary" or "text"). This is the metric that must be alerted on when the
+    /// text path is running fail-OPEN — it is the only signal that the heuristic
+    /// silently stopped covering the crawl.</summary>
+    public static void IncContentGateScanUnavailable(string kind) =>
+        ContentGateScanUnavailable.AddOrUpdate(kind, 1, (_, v) => v + 1);
+
     public static void SetDeadLetterDepth(long depth) => Interlocked.Exchange(ref _deadLetterDepth, depth);
     /// <summary>HA object-type leases this node currently holds (0 outside HA mode).</summary>
     public static void SetHaClaimsHeld(long count) => Interlocked.Exchange(ref _haClaimsHeld, count);
@@ -113,6 +128,17 @@ public static class Metrics
     public static long ItemsAclRestrictedFor(string reason) =>
         ItemsAclRestricted.TryGetValue(reason, out var v) ? v : 0;
 
+    /// <summary>Read the content-gate block count for a category (0 when absent).</summary>
+    public static long ContentGateBlockedFor(string category) =>
+        ContentGateBlocked.TryGetValue(category, out var v) ? v : 0;
+
+    /// <summary>Total content-gate blocks across every category.</summary>
+    public static long ContentGateBlockedTotal => ContentGateBlocked.Values.Sum();
+
+    /// <summary>Read the incomplete-scan count for a kind (0 when absent).</summary>
+    public static long ContentGateScanUnavailableFor(string kind) =>
+        ContentGateScanUnavailable.TryGetValue(kind, out var v) ? v : 0;
+
     public static double UptimeSeconds => (DateTime.UtcNow - StartUtc).TotalSeconds;
 
     internal static void ResetForTests()
@@ -138,6 +164,8 @@ public static class Metrics
         ItemsClassified.Clear();
         SensitiveDetections.Clear();
         ItemsAclRestricted.Clear();
+        ContentGateBlocked.Clear();
+        ContentGateScanUnavailable.Clear();
     }
 
     private const string Prefix = "clarizen_connector_";
@@ -180,6 +208,14 @@ public static class Metrics
             "Sensitive-data detections, by category.", "category", SensitiveDetections);
         LabelledCounter(sb, "items_acl_restricted_total",
             "Items whose ACL was restricted by governance, by reason.", "reason", ItemsAclRestricted);
+
+        // ContentGate (CONTENT_GATE). Absent entirely when the gate is off, so
+        // the exposition is byte-identical to before the feature by default.
+        LabelledCounter(sb, "content_gate_blocked_total",
+            "Items quarantined by the content gate, by category.", "category", ContentGateBlocked);
+        LabelledCounter(sb, "content_gate_scan_unavailable_total",
+            "Content-gate scans that could not complete, by kind (binary|text).",
+            "kind", ContentGateScanUnavailable);
 
         return sb.ToString();
     }

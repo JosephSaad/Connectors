@@ -33,6 +33,8 @@ SyncSessions    (SessionId uniqueidentifier PK, ConnectionId, CrawlType nvarchar
                  StatsJson nvarchar(max) NULL)   -- serialized SyncSessionStats, PyJson format
 FieldCache      (InstanceHash nvarchar(16), ObjectType nvarchar(128), FieldsJson nvarchar(max),
                  UpdatedUtc, PK (InstanceHash, ObjectType))
+FlsCache        (InstanceHash nvarchar(16), ObjectType nvarchar(128), PermissionsJson nvarchar(max),
+                 UpdatedUtc, PK (InstanceHash, ObjectType))   -- WP-SF-2 field-level security
 SyncState       (ConnectorId nvarchar(64) PK, LastSyncUtc)
 Checkpoints     (ConnectorId nvarchar(64), ObjectType nvarchar(128), ChunkIndex int,
                  SinceIso nvarchar(64) NULL, UpdatedUtc,
@@ -101,6 +103,10 @@ Identity store (mirror the SQLite semantics exactly):
 - `usp_GetLastSession(@ConnectionId, @CrawlType = NULL)` — latest completed row.
 - `usp_GetLastSuccessfulContentCrawl(@ConnectionId)` — returns CompletedUtc.
 - `usp_GetCachedFields(@InstanceHash, @ObjectType)` / `usp_SaveCachedFields(...)` / `usp_ClearFieldCache(@InstanceHash = NULL, @ObjectType = NULL)`
+- `usp_GetCachedFls(@InstanceHash, @ObjectType)` / `usp_SaveCachedFls(@InstanceHash, @ObjectType, @PermissionsJson)` /
+  `usp_ClearFlsCache(@InstanceHash = NULL, @ObjectType = NULL)` — WP-SF-2 field-level
+  security cache. Same key and same semantics as the field cache above; the payload is
+  `AclEngine.FlsObjectPermissions.ToJson()`.
 
 State (mirror `config/sync_state.py` file semantics):
 - `usp_ReadLastSync(@ConnectorId)` / `usp_WriteLastSync(@ConnectorId, @LastSyncUtc)`

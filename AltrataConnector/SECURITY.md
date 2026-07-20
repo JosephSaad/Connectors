@@ -148,6 +148,59 @@ Both modes stamp subject hashes; both modes keep erasure-completion DELETEs
 replayable; the never-everyone ACL invariant holds on every replay path
 (ACLs are rebuilt from CURRENT seats, never replayed from capture).
 
+## CONTENT_GATE — decision record
+
+**Decision: ship the injection scanner, default it OFF, and fail OPEN on text.**
+
+Ingested content becomes Copilot grounding context, so a poisoned record is an
+attack on every user whose query it grounds — not only on the person it
+describes. The gate (`Altrata/ContentGate.cs`) screens the FINAL indexed text
+and QUARANTINES a hit into the existing dead-letter queue.
+
+1. **Default OFF (`CONTENT_GATE` unset).** The bank's scanner contract is not
+   agreed. With the switch unset the wire output, the item properties and the
+   per-item cost are byte-identical to a build without the gate — no scanner is
+   even constructed (test-enforced).
+2. **Quarantine, not drop.** A blocked item keeps its evidence: dead-letter
+   record with reason `content-gate:<category>`, a `quarantine` decision-ledger
+   entry, `contentScanStatus` stamped, `altrata_content_gate_blocked_total`, and
+   the normal alert webhook. It stays REPLAYABLE — `retry-failed` re-drives it.
+   `retry-failed` re-runs the gate, so draining the queue with the gate still on
+   cannot silently bypass a quarantine; the operator clears the gate (or fixes
+   the source feed) deliberately.
+3. **Text fails OPEN, binary fails CLOSED.** Deliberate asymmetry. The injection
+   scanner is a bounded regex HEURISTIC, not a security boundary: halting a
+   whole crawl because a heuristic could not run is worse than the residual
+   risk, so an incomplete scan proceeds LOUDLY (warning + metric +
+   `contentScanStatus=incomplete`). Malware on binary content is the opposite
+   trade — never index unscanned bytes. Both are configurable
+   (`CONTENT_GATE_FAIL_MODE`, or the per-kind knobs).
+4. **A timeout is never "clean".** A per-pattern regex budget
+   (`CONTENT_GATE_PATTERN_TIMEOUT_MS`, default 250 ms) and a size cap
+   (`CONTENT_GATE_MAX_SCAN_MB`, default 4) both report an INCOMPLETE scan, which
+   the fail mode then adjudicates. "No time to look" is never recorded as
+   "nothing there".
+5. **No malware scanner in THIS connector — deliberately.** Altrata ingests no
+   binary content: `FeedReader.ReadRecords` accepts `.json`/`.jsonl`/`.csv` only
+   and throws `NotSupportedException` otherwise, item content type is always
+   `"text"`, and there is no attachment/blob path anywhere. File integrity is
+   already covered by the SHA-256 manifest gate (`FeedReader.ValidateChecksums`,
+   re-verified on the same open handle). `CONTENT_GATE_ICAP_URL` is parsed for
+   fleet parity and logged as INERT. The binary fail mode still defaults to
+   CLOSED so that if a binary path is ever added it starts safe.
+6. **Known, documented evasion.** To avoid quarantining every compliance memo
+   that *quotes* an injection phrase, a match wrapped in quotation marks or
+   introduced by a citation cue ("the memo says…", "for example…") is treated as
+   a MENTION, not a directive. An attacker can therefore prefix a payload with
+   such a cue and slip past. That is an accepted trade — pinned by an explicit
+   test — and is precisely why this is triage, not a boundary.
+
+**PII contract (hard requirement here).** A verdict carries the item id and a
+fixed-vocabulary category ONLY. Never the matched text, never a snippet, never
+the field value. Enforced by a test that drives a quarantine on a record loaded
+with names/emails/net-worth figures and asserts none of them reach the run log,
+the decision ledger, the dead-letter queue file, or the alert payload.
+
 ## Hard security invariants (regression = vulnerability)
 
 - No `everyone`/`everyoneExceptGuests` ACL can be constructed, transformed,
@@ -170,5 +223,8 @@ replayable; the never-everyone ACL invariant holds on every replay path
   (top-tier items locked to the reviewer group); that ACL restriction can never
   be an everyone-grant and is recorded in the decision ledger.
 - Logs, spans, Event Log mirror, dead-letter file (redacted), review queue,
-  decision ledger, purpose audit: ids/counts/hashes/enums only — never names,
-  emails, wealth figures (test-enforced).
+  decision ledger, purpose audit, **content-gate verdicts**: ids/counts/hashes/
+  enums only — never names, emails, wealth figures (test-enforced).
+- Content-gate verdicts never carry matched text or a snippet; an incomplete
+  scan is never recorded as clean; a quarantine is a `quarantine` ledger kind of
+  its own, never an overloaded `exclude`.

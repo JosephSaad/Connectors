@@ -107,30 +107,78 @@ directory-read floor for ACL mapping; if you run with public ACLs only
 Inbound webhooks: **N/A** (nothing listens; `HEALTH_PORT` serves only
 `/health`, `/ready`, `/metrics` and should be firewalled to the scrape network).
 
-## FIPS audit (2026-07)
+## FIPS posture
 
-Grep of `src/` for MD5 / SHA-1 / DES / RC4 / 3DES:
+**Current state: no broken hash primitive is called anywhere in `src/`.**
 
-- **No** SHA-1, DES, RC4, or TripleDES usage anywhere in `src/`.
-- **MD5 — two hits, retained deliberately**: `Graph/IdentityStore.cs` and
-  `Graph/SqlServerIdentityStore.cs`, method `InstanceHash` — an 8-hex-char MD5
-  prefix of the Salesforce instance URL used as the `instance_hash` **primary
-  key of the field cache** (SQLite `field_cache` table / SQL `@InstanceHash`).
-  This is identity-critical, not security-relevant: it keys persisted cache
-  rows and is byte-compatible with the Python original's state files. Changing
-  the algorithm silently would orphan every existing cache row on upgrade.
-  **Risk**: none — the input (instance URL) is non-secret config; MD5 is used
-  for bucketing, not integrity or authentication. On a FIPS-enforced host,
-  `MD5.HashData` still works in .NET on Windows (maps to a non-FIPS-validated
-  path); if your compliance program forbids the call itself, see the migration
-  note below.
-- Everything added by the hardening package uses **SHA-256**: `x5t#S256`
-  assertion binding (`Graph/GraphAuth.cs`), dead-letter redaction hashes
-  (`Config/DeadLetterRedaction.cs`), CA chain building (X509, SHA-256 certs).
+Grep of `src/` for MD5 / SHA-1 / DES / RC4 / 3DES returns **no hits**. Every
+hash in the connector is SHA-256:
 
-**Migration note (only if MD5 must go):** bump the field-cache schema — add an
-`instance_hash_v2` (first 8 hex of SHA-256) column, dual-read/single-write for
-one release, then drop the MD5 column. The cache is *rebuildable* (it only
-skips the field-retry loop), so the cheap alternative is: clear `field_cache`,
-switch the algorithm, take the one-time field-discovery cost on the next crawl.
-Coordinate with the Python original if both still share state.
+| Use | Location |
+|---|---|
+| Field-cache instance key (`instance_hash` / `@InstanceHash`) | `Graph/IdentityStore.cs`, `Graph/SqlServerIdentityStore.cs` — `InstanceHash` |
+| Client-assertion certificate binding (`x5t#S256`) | `Graph/GraphAuth.cs` |
+| Dead-letter redaction hashes | `Config/DeadLetterRedaction.cs` |
+| Decision-ledger hash chain | `Graph/DecisionLedger.cs` |
+| CA chain building (X509, SHA-256 certs), RSA signing | `Infrastructure/HttpClientFactory.cs`, `Graph/GraphAuth.cs` |
+
+On a FIPS-enforced host (Windows FIPS local-security policy, or
+`DOTNET_SYSTEM_SECURITY_CRYPTOGRAPHY_FIPS`-style enforcement) the connector has
+no call that maps to a non-validated provider.
+
+This posture is enforced by test, not just by review:
+`tests/.../TestGraph/FipsInstanceHashTests.cs` (`FipsSourceContractTests`)
+greps `src/` on every run and fails the build if `MD5.`, `SHA1.`, the legacy
+`*CryptoServiceProvider` types, or `HashAlgorithmName.MD5/SHA1` reappear.
+
+### `InstanceHash` — MD5 → SHA-256 (WP-SF-5)
+
+Through 1.0.0 the field-cache instance key was an 8-hex-char **MD5** prefix of
+the Salesforce instance URL. It was identity-critical (it keys persisted cache
+rows) but never security-relevant — the input is non-secret config and the
+value is used for bucketing, not integrity or authentication. It is now the
+first 8 chars of the lowercase-hex **SHA-256** of the same input.
+
+**The output shape is unchanged — 8 lowercase hex characters — so there is no
+DDL change.** `field_cache PRIMARY KEY (object_type, instance_hash)`,
+`PK_FieldCache`, and `dbo.FieldCache.InstanceHash nvarchar(16)` are all still
+valid; `scripts/sql/create-database.sql` was not touched.
+
+### Upgrade consequence: one-time field-cache rebuild
+
+The field cache is a **pure cache**. It exists only to skip the `INVALID_FIELD`
+field-discovery retry loop (`Salesforce/ApiClient.cs`). A miss re-runs that loop
+and rewrites the row. **No data loss, no manual step required.**
+
+On the first crawl after upgrade:
+
+- every `field_cache` / `dbo.FieldCache` row written under the old MD5 key is
+  unreachable — a benign cache miss;
+- the discovery loop runs once per object type and writes fresh rows under the
+  SHA-256 key;
+- expect one slower crawl (a handful of extra `INVALID_FIELD` round-trips per
+  object type), then steady state.
+
+The old rows are **left in place on purpose**. They are not deleted
+automatically because:
+
+- they are harmless — a few rows (one per object type per instance), a few KB,
+  never read, and inert with respect to correctness; and
+- they cannot be distinguished from another instance's *live* rows without
+  recomputing the retired MD5 key, which would defeat the purpose of removing
+  it. A single database legitimately holds cache rows for more than one
+  Salesforce instance (sandbox + production), so a blanket "delete every row
+  whose hash isn't the current one" would destroy the other instance's live
+  cache.
+
+**Optional one-time operator cleanup.** If you want the orphans gone, clear the
+whole field cache once after upgrading, on a maintenance window of your
+choosing. Use the existing `ClearFieldCache()` entry point with **no arguments**
+(`IIdentityStore.ClearFieldCache` — `IdentityStore` / `SqlServerIdentityStore`;
+SQL backend: `EXEC dbo.usp_ClearFieldCache` with both parameters `NULL`). The
+no-argument form truncates the table, orphans included; that is safe precisely
+because the cache is rebuildable. Note that the per-instance form,
+`ClearFieldCache(instanceUrl)`, keys off the *current* algorithm and therefore
+cannot reach a legacy row.
+
+Doing nothing is a supported outcome.

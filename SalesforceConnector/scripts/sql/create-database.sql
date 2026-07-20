@@ -97,6 +97,20 @@ CREATE TABLE dbo.FieldCache
 );
 GO
 
+-- WP-SF-2: per-org, per-object Salesforce field-level read permissions.
+-- Keyed identically to dbo.FieldCache above (same InstanceHash algorithm) so the
+-- SQLite fls_cache table and this one stay in lockstep.
+IF OBJECT_ID(N'dbo.FlsCache', N'U') IS NULL
+CREATE TABLE dbo.FlsCache
+(
+    InstanceHash    nvarchar(16)  NOT NULL,
+    ObjectType      nvarchar(128) NOT NULL,
+    PermissionsJson nvarchar(max) NOT NULL,
+    UpdatedUtc      datetime2(7)  NOT NULL,
+    CONSTRAINT PK_FlsCache PRIMARY KEY (InstanceHash, ObjectType)
+);
+GO
+
 -- Last successful sync timestamp per connector (mirrors config/sync_state files).
 IF OBJECT_ID(N'dbo.SyncState', N'U') IS NULL
 CREATE TABLE dbo.SyncState
@@ -545,6 +559,59 @@ BEGIN
         DECLARE @Deleted int = @@ROWCOUNT;
     COMMIT TRANSACTION;
     SELECT @Deleted AS Deleted;
+END;
+GO
+
+-- Cached field-level security payload for one org/object, or empty result set.
+CREATE OR ALTER PROCEDURE dbo.usp_GetCachedFls
+    @InstanceHash nvarchar(16),
+    @ObjectType   nvarchar(128)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT PermissionsJson
+    FROM dbo.FlsCache
+    WHERE InstanceHash = @InstanceHash AND ObjectType = @ObjectType;
+END;
+GO
+
+-- Upsert the field-level security payload for one org/object.
+CREATE OR ALTER PROCEDURE dbo.usp_SaveCachedFls
+    @InstanceHash    nvarchar(16),
+    @ObjectType      nvarchar(128),
+    @PermissionsJson nvarchar(max)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRANSACTION;
+        UPDATE dbo.FlsCache WITH (UPDLOCK, SERIALIZABLE)
+           SET PermissionsJson = @PermissionsJson,
+               UpdatedUtc      = SYSUTCDATETIME()
+         WHERE InstanceHash = @InstanceHash AND ObjectType = @ObjectType;
+        IF @@ROWCOUNT = 0
+            INSERT INTO dbo.FlsCache (InstanceHash, ObjectType, PermissionsJson, UpdatedUtc)
+            VALUES (@InstanceHash, @ObjectType, @PermissionsJson, SYSUTCDATETIME());
+    COMMIT TRANSACTION;
+END;
+GO
+
+-- Clear cached FLS entries (all / per-org / per-org+object).
+-- Returns the number of rows deleted as a single-row result set.
+CREATE OR ALTER PROCEDURE dbo.usp_ClearFlsCache
+    @InstanceHash nvarchar(16)  = NULL,
+    @ObjectType   nvarchar(128) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRANSACTION;
+        DELETE FROM dbo.FlsCache
+         WHERE (@InstanceHash IS NULL OR InstanceHash = @InstanceHash)
+           AND (@ObjectType IS NULL OR ObjectType = @ObjectType);
+        DECLARE @FlsDeleted int = @@ROWCOUNT;
+    COMMIT TRANSACTION;
+    SELECT @FlsDeleted AS Deleted;
 END;
 GO
 

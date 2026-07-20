@@ -21,6 +21,27 @@ namespace ClarizenConnector.Item;
 
 public sealed class ItemConverter
 {
+    /// <summary>Clarizen entity type, stamped on every item.</summary>
+    public const string ObjectNameProperty = "ObjectName";
+
+    /// <summary>Deep link into the Clarizen web app, stamped on every item.</summary>
+    public const string UrlProperty = "Url";
+
+    /// <summary>Result-card icon, stamped when the object config supplies one.</summary>
+    public const string IconUrlProperty = "IconUrl";
+
+    /// <summary>Graph property names this converter stamps on every item
+    /// irrespective of schema.json. Declared here (rather than as loose string
+    /// literals) so the schema drift guard can enumerate what the code actually
+    /// publishes — see <see cref="Config.SchemaConfig.ReservedPropertyNames"/>
+    /// for the connector-computed half.</summary>
+    internal static readonly IReadOnlyList<string> StandardPropertyNames = new[]
+    {
+        ObjectNameProperty,
+        UrlProperty,
+        IconUrlProperty,
+    };
+
     private readonly AppConfig _config;
     private readonly string _appBaseUrl;
 
@@ -47,10 +68,10 @@ public sealed class ItemConverter
             Acl = acl,
         };
 
-        item.Properties["ObjectName"] = objectConfig.ObjectName;
-        item.Properties["Url"] = BuildUrl(record);
+        item.Properties[ObjectNameProperty] = objectConfig.ObjectName;
+        item.Properties[UrlProperty] = BuildUrl(record);
         if (!string.IsNullOrEmpty(objectConfig.IconUrl))
-            item.Properties["IconUrl"] = objectConfig.IconUrl;
+            item.Properties[IconUrlProperty] = objectConfig.IconUrl;
 
         foreach (var (field, property) in objectConfig.SelectedFields)
         {

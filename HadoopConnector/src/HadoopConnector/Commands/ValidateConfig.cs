@@ -5,8 +5,12 @@
 //   • required env vars present, CONNECTOR_ID shape valid
 //   • HDFS_MODE consistency (webhdfs needs HDFS_NAMENODE_URL, localpath
 //     needs BDH_EXPORT_PATH)
-//   • config/schema.json, config/graph-schema.json AND config/filters.json
-//     parse and are sane (a malformed filter is an ERROR, never ignored)
+//   • EVERY config file the connector reads — config/schema.json,
+//     config/graph-schema.json, config/filters.json AND config/classification.json
+//     — parses and is sane (a malformed filter is an ERROR, never ignored).
+//     That set is the whole of it: those four files are the only `config/`
+//     paths in the source. The invariant: no config, in any file, may pass
+//     `validate-config --strict` green and then fail at crawl time.
 //   • the fail-closed scale guard: objects with NO filter and no exemption
 //     are a warning — and an ERROR under --strict (deploying an unfiltered
 //     150M-row object is an outage waiting to happen)
@@ -38,12 +42,30 @@ public static class ValidateConfig
         public List<string> Errors { get; } = new();
         public List<string> Warnings { get; } = new();
 
+        /// <summary>Findings a human has explicitly attested to in config (today:
+        /// the coarse-ACL posture via <c>coarseAclAcknowledged</c>). They are
+        /// still REPORTED on every run — the exposure is real and does not go
+        /// away — but they do not gate <c>--strict</c>, because the whole point
+        /// of the attestation is that someone accountable already accepted it.
+        /// Kept apart from <see cref="Warnings"/> so "accepted" can never be
+        /// confused with "clean".</summary>
+        public List<string> AcknowledgedWarnings { get; } = new();
+
+        /// <summary>Purely INFORMATIONAL posture statements — never a finding and
+        /// never gating, under --strict or otherwise. Today: the per-column
+        /// drop/mask policies (WP-HD-3). A configured restriction is good news,
+        /// so it does not belong in <see cref="Warnings"/>; but it must still be
+        /// printed, because an operator has to be able to see which columns are
+        /// restricted — and that NONE are — without reading schema.json.</summary>
+        public List<string> Notices { get; } = new();
+
         public bool Ok(bool strict) => Errors.Count == 0 && (!strict || Warnings.Count == 0);
     }
 
     /// <summary>Offline validation (no network). Testable.</summary>
     internal static Result ValidateCore(
         string? schemaPath = null, string? graphSchemaPath = null, string? filtersPath = null,
+        string? classificationPath = null,
         bool strict = false)
     {
         var result = new Result();
@@ -125,6 +147,7 @@ public static class ValidateConfig
         }
 
         // graph-schema.json
+        var graphPropertyTypes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var graphSchemaFile = graphSchemaPath ?? ConnectionManager.DefaultGraphSchemaPath;
         if (!File.Exists(graphSchemaFile))
         {
@@ -148,6 +171,42 @@ public static class ValidateConfig
                                 "graph-schema.json: every property needs 'name' and 'type'.");
                             break;
                         }
+                        // A non-string 'name' (or 'type') is not a Graph property
+                        // name: JsonNode.ToString() would launder `123` or `true`
+                        // into "123"/"True" and register it, so the registration
+                        // Graph rejects would be discovered at connection setup
+                        // rather than here.
+                        if (property["name"] is not JsonValue nameValue
+                            || !nameValue.TryGetValue<string>(out var propertyName))
+                        {
+                            result.Errors.Add(
+                                $"graph-schema.json: property 'name' must be a string, but "
+                                + $"{property["name"]!.ToJsonString()} is not.");
+                            break;
+                        }
+                        if (property["type"] is not JsonValue typeValue
+                            || !typeValue.TryGetValue<string>(out var propertyType))
+                        {
+                            result.Errors.Add(
+                                $"graph-schema.json: property '{propertyName}' has a non-string "
+                                + $"'type' ({property["type"]!.ToJsonString()}).");
+                            break;
+                        }
+                        // Graph property names are case-insensitive, so two
+                        // entries differing only in case declare the SAME
+                        // property twice with (possibly) different types. The
+                        // later one silently won this lookup, which is what the
+                        // mask-vs-typed-property warning below reads.
+                        if (graphPropertyTypes.TryGetValue(propertyName, out var firstType))
+                        {
+                            result.Errors.Add(
+                                $"graph-schema.json: property '{propertyName}' is declared more "
+                                + $"than once (first as '{firstType}', again as '{propertyType}'). "
+                                + "Graph property names are matched case-insensitively; keep one "
+                                + "declaration so which type applies is not file-order luck.");
+                            break;
+                        }
+                        graphPropertyTypes[propertyName] = propertyType;
                     }
                 }
             }
@@ -181,6 +240,61 @@ public static class ValidateConfig
             }
         }
 
+        // classification.json — THE fourth and last config file this connector
+        // reads (schema.json, graph-schema.json, filters.json, classification.json;
+        // the set is closed by the four `config/` DefaultPath symbols in the
+        // source). It is read by IngestPipeline's constructor whenever
+        // CLASSIFICATION=true, so a file that only fails at LOAD time used to give
+        // preflight-green followed by a crawl-time stack naming neither the file
+        // nor the key. It is validated here by calling the SAME loader the crawl
+        // calls, exactly as schema.json and filters.json are — the invariant being
+        // that no config in any file can pass `validate-config --strict` green and
+        // then fail at crawl time.
+        var classificationFile = classificationPath ?? Content.ContentClassifier.DefaultPath;
+        var classificationEnabled = EnvFlags.IsTrue("CLASSIFICATION");
+        if (!File.Exists(classificationFile))
+        {
+            // Only read when CLASSIFICATION=true; absent is otherwise a non-event.
+            if (classificationEnabled)
+            {
+                result.Errors.Add(
+                    $"Missing config file: {classificationFile} — CLASSIFICATION=true reads it on "
+                    + "every crawl, so the crawl would fail at startup.");
+            }
+        }
+        else
+        {
+            try
+            {
+                // UNCONDITIONAL on purpose — a file that EXISTS is validated
+                // whether or not CLASSIFICATION is currently true. The flag is
+                // what operators flip last, so gating the load on it would bless
+                // a broken file today and turn it into a startup crash the day
+                // classification is switched on, with a green validate-config run
+                // in the change ticket. (Absence is still judged by the flag,
+                // above: an absent file with the feature off is a non-event.)
+                // Pinned by BrokenClassificationConfig_IsReported_EvenWhenClassificationOff.
+                var classifier = Content.ContentClassifier.Load(classificationFile);
+                // Null-is-empty (docs/CONFIG_NULL_SEMANTICS.md) means
+                // `"categories": null` now LOADS, as an empty set. Empty is legal
+                // but it is also a total detection gap, so — exactly as
+                // schema.json's empty objectList is judged after normalisation —
+                // say so rather than let it pass silently.
+                if (classificationEnabled && classifier.Categories.Count == 0)
+                {
+                    result.Warnings.Add(
+                        $"CLASSIFICATION=true but {classificationFile} yields NO usable categories "
+                        + "(categories is null, empty, or every category has no valid pattern). "
+                        + "Nothing will ever be detected and no item will be labelled Restricted — "
+                        + "classification is on in name only.");
+                }
+            }
+            catch (Exception exc)
+            {
+                result.Errors.Add($"classification.json invalid: {exc.Message}");
+            }
+        }
+
         // Fail-closed scale guard preflight: unfiltered objects are warnings,
         // errors under --strict (unless ALLOW_FULL_SCAN=true).
         if (schema is not null && !EnvFlags.IsTrue("ALLOW_FULL_SCAN"))
@@ -203,6 +317,128 @@ public static class ValidateConfig
                       + "fullScanAllowed — the crawl will refuse it (fail-closed scale guard). "
                       + "Add partition/record filters or an explicit exemption.";
                 (strict ? result.Errors : result.Warnings).Add(message);
+            }
+        }
+
+        // Coarse-ACL posture (WP-HD-2) — INTERIM control pending Ranger.
+        //
+        // BDH mirrors the source DATA but not its authorisation model, so
+        // aclMode 'public' (everyoneExceptGuests) and 'group' (ONE flat Entra
+        // group for every row of the object) are the only options above
+        // ownerOnly — and neither can express the row/column restrictions the
+        // source enforces. On a mart mirroring 150M+ Salesforce rows that is a
+        // material over-sharing exposure, so it is surfaced on EVERY run and
+        // must be explicitly attested in schema.json before --strict passes.
+        //
+        // Deliberately independent of ALLOW_FULL_SCAN and fullScanAllowed: those
+        // exempt an object from the SCALE guard, which if anything means MORE
+        // rows are exposed at the coarse grant. Effective-filtering is therefore
+        // read straight off the filter (reusing the guard's own
+        // IsEffectivelyFiltered predicate, which already discounts a dt
+        // isNotNull-only filter and non-dt partition predicates).
+        if (schema is not null)
+        {
+            foreach (var obj in schema.ObjectList.Where(o => o.IsCoarseAcl))
+            {
+                var effectivelyFiltered = filters.For(obj.ObjectName) is { IsEffectivelyFiltered: true };
+                var message = CoarseAclFinding(obj, effectivelyFiltered);
+                if (obj.HasBoundCoarseAclAttestation)
+                {
+                    result.AcknowledgedWarnings.Add(
+                        message + " ACKNOWLEDGED in schema.json (coarseAclAcknowledged=true, "
+                        + $"coarseAclAcknowledgedFor=\"{obj.CoarseAclPostureToken}\"): this exact "
+                        + "posture has been reviewed and accepted, not removed or reduced. The "
+                        + "sign-off is void the moment aclMode or aclGroupId changes.");
+                }
+                else if (obj.CoarseAclAcknowledged)
+                {
+                    // An UNBOUND 'true' — the state that let a group→public
+                    // widening (or a broader aclGroupId) inherit an old sign-off.
+                    // It records that someone signed, not what they signed, so it
+                    // is not treated as an attestation at all.
+                    (strict ? result.Errors : result.Warnings).Add(
+                        message + " An UNBOUND sign-off is recorded (\"coarseAclAcknowledged\": true "
+                        + "with no \"coarseAclAcknowledgedFor\"), which does not say WHICH posture "
+                        + "was reviewed and would therefore carry over unchanged if this object's "
+                        + "aclMode or aclGroupId were later widened. It is not accepted. Re-review "
+                        + "the object and record the posture verbatim: "
+                        + $"\"coarseAclAcknowledgedFor\": \"{obj.CoarseAclPostureToken}\" "
+                        + "(required by --strict; the warning is reported either way).");
+                }
+                else
+                {
+                    (strict ? result.Errors : result.Warnings).Add(
+                        message + " No sign-off recorded: set \"coarseAclAcknowledged\": true and "
+                        + $"\"coarseAclAcknowledgedFor\": \"{obj.CoarseAclPostureToken}\" on this "
+                        + "object in schema.json to attest that THIS posture has been reviewed and "
+                        + "accepted (required by --strict; the warning is reported either way). "
+                        + "Binding the sign-off to the posture is what makes a later widening "
+                        + "require a fresh review instead of inheriting this one.");
+                }
+            }
+        }
+
+        // Per-column policy posture (WP-HD-3) — informational, never gating.
+        //
+        // Sensitivity in this connector is per-OBJECT, so without columnPolicies
+        // a restricted column rides along with the record for everyone the
+        // (coarse) ACL admits. Which columns are dropped/masked is therefore
+        // posture an operator must be able to READ OFF preflight rather than
+        // reconstruct from schema.json — including the all-important zero case,
+        // which is the state this connector shipped in.
+        if (schema is not null)
+        {
+            foreach (var obj in schema.ObjectList.Where(o => o.HasColumnPolicies))
+            {
+                result.Notices.Add(
+                    $"Object '{obj.ObjectName}': per-column policies active — "
+                    + $"{obj.DroppedColumnCount} dropped, {obj.MaskedColumnCount} masked. "
+                    + $"dropped=[{string.Join(", ", obj.DroppedColumns)}] "
+                    + $"masked=[{string.Join(", ", obj.MaskedColumns)}]. Dropped columns are not "
+                    + "emitted at all; masked columns keep their property name and content key "
+                    + $"with the value replaced by '{ColumnPolicy.MaskMarker}'. Neither action "
+                    + "changes the item ACL.");
+            }
+            // The mask marker is a STRING. Masking a column mapped to a typed
+            // Graph property (Int64/Double/DateTime/Boolean) pushes a string
+            // into that property and Graph rejects the whole item — so the
+            // "restriction" would quietly stop the record being indexed at all,
+            // discovered mid-crawl. Drop is unaffected (nothing is emitted).
+            foreach (var obj in schema.ObjectList.Where(o => o.HasColumnPolicies))
+            {
+                foreach (var column in obj.MaskedColumns)
+                {
+                    var property = obj.SelectedFields
+                        .FirstOrDefault(kv => string.Equals(
+                            kv.Key, column, StringComparison.OrdinalIgnoreCase)).Value;
+                    if (string.IsNullOrEmpty(property)
+                        || property.StartsWith("_bdh_", StringComparison.Ordinal))
+                    {
+                        continue;   // content-routed: no typed Graph property involved
+                    }
+                    if (graphPropertyTypes.TryGetValue(property, out var type)
+                        && !type.Equals("String", StringComparison.OrdinalIgnoreCase))
+                    {
+                        result.Warnings.Add(
+                            $"Object '{obj.ObjectName}' masks column '{column}', but its Graph "
+                            + $"property '{property}' is declared '{type}' in graph-schema.json. "
+                            + $"The mask marker '{ColumnPolicy.MaskMarker}' is a string, so Graph "
+                            + "will reject every item for this object and the records will not be "
+                            + $"indexed at all. Use \"{ColumnPolicy.Drop}\" for this column, or "
+                            + "redeclare the property as String.");
+                    }
+                }
+            }
+
+            if (!schema.ObjectList.Any(o => o.HasColumnPolicies))
+            {
+                result.Notices.Add(
+                    "No per-column policies are configured on any object (columnPolicies is empty "
+                    + "everywhere). Every selected column of every crawled record is indexed in "
+                    + "full for whoever that item's ACL admits — this connector has no other "
+                    + "column-level restriction, and its sensitivity labels are per-OBJECT only. "
+                    + "If any object exposes compensation, margin or personal identifiers, add a "
+                    + "\"columnPolicies\" entry (drop | mask) for those columns in schema.json.");
             }
         }
 
@@ -268,6 +504,35 @@ public static class ValidateConfig
                 + "crawls may miss late-arriving partitions.");
 
         return result;
+    }
+
+    /// <summary>
+    /// Describe one object's coarse-ACL exposure. The coarse+UNFILTERED case is
+    /// the worst case — a flat grant over the object's ENTIRE row set — and is
+    /// stated far more strongly than coarse+filtered, where filters.json at
+    /// least bounds how many rows reach that grant.
+    /// </summary>
+    private static string CoarseAclFinding(ObjectConfig obj, bool effectivelyFiltered)
+    {
+        var grant = string.Equals(obj.AclMode, "public", StringComparison.OrdinalIgnoreCase)
+            ? "EVERY ingested record is granted to everyoneExceptGuests — every non-guest user "
+              + "in the tenant"
+            : $"EVERY ingested record is granted to the single flat Entra group '{obj.AclGroupId}', "
+              + "regardless of who could see that row in the source";
+
+        var head =
+            $"Object '{obj.ObjectName}' uses coarse aclMode '{obj.AclMode}': {grant}. BDH mirrors "
+            + "the source data but not its authorisation model, so this grant CANNOT express the "
+            + "row/column restrictions the source enforces — anything indexed is over-shared "
+            + "relative to the system of record.";
+
+        return effectivelyFiltered
+            ? head + " This object is effectively filtered, so filters.json bounds WHICH rows "
+                   + "reach that grant — but every row that is ingested is exposed at it."
+            : head + " WORST CASE: this object is ALSO NOT effectively filtered, so there is no "
+                   + "bound on either side — the ENTIRE object (150M+ rows at BDH scale) is "
+                   + "indexed and exposed at that coarse grant. Narrow the aclMode, or add a "
+                   + "pruning filter in filters.json, before this reaches a production tenant.";
     }
 
     public static async Task<object?> RunAsync(ParsedArgs args)
@@ -354,15 +619,26 @@ public static class ValidateConfig
             }
         }
 
+        // Posture first, so it frames the findings that follow.
+        foreach (var notice in result.Notices)
+            Dashboard.Line($"POSTURE: {notice}");
         foreach (var warning in result.Warnings)
             Dashboard.Line($"WARNING: {warning}");
+        // Attested findings are printed with the SAME severity word — an accepted
+        // over-sharing exposure is still an exposure and must stay on screen.
+        foreach (var acknowledged in result.AcknowledgedWarnings)
+            Dashboard.Line($"WARNING (acknowledged): {acknowledged}");
         foreach (var error in result.Errors)
             Console.Error.WriteLine($"ERROR: {error}");
 
         var ok = result.Ok(strict);
-        Dashboard.Line(ok
+        var acknowledgedNote = result.AcknowledgedWarnings.Count == 0
+            ? string.Empty
+            : $" {result.AcknowledgedWarnings.Count} acknowledged warning(s) not gating.";
+        Dashboard.Line((ok
             ? "Configuration looks good."
-            : $"Configuration is NOT valid ({result.Errors.Count} error(s), {result.Warnings.Count} warning(s)).");
+            : $"Configuration is NOT valid ({result.Errors.Count} error(s), {result.Warnings.Count} warning(s)).")
+            + acknowledgedNote);
         return ok;
     }
 }

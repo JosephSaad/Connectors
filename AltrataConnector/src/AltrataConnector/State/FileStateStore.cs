@@ -6,8 +6,10 @@
 //   logs/failed_records_{CONNECTOR_ID}.jsonl  dead-letter queue (append-only JSONL)
 //   data/{CONNECTOR_ID}_state.json            sync timestamps, delivery ledger, KV
 //
-// Writes are atomic (temp file + File.Move with overwrite) and guarded by a
-// process-wide lock; multi-node writers require the SQL backend instead.
+// Writes are atomic (a UNIQUE temp file + File.Move with overwrite) and guarded
+// by a genuinely process-wide lock keyed by the resolved file path, so two
+// FileStateStore instances over one file mutually exclude. Multi-node writers
+// still require the SQL backend instead — this lock is process-scoped only.
 
 using System.Collections.Concurrent;
 using System.Text;
@@ -45,7 +47,20 @@ public sealed class FileStateStore : IStateStore
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
-    private readonly object _sync = new();
+    /// <summary>Process-wide state-file locks, keyed by RESOLVED path — the same
+    /// pattern as <see cref="DeadLetterLocks"/> below.
+    ///
+    /// This used to be a per-INSTANCE object while the file header and
+    /// MutateValue's contract both described it as process-wide. That claim was
+    /// simply false: two FileStateStore instances over one file (Runtime.Create
+    /// builds one per command, shard runtimes build their own, the health
+    /// endpoint holds another) excluded nothing. The guarantee is made REAL
+    /// rather than documented away because MutateValue's atomicity is
+    /// load-bearing — it is the whole reason the usage ceiling is a ceiling, and
+    /// a false claim there silently overshoots a billable limit.</summary>
+    private static readonly ConcurrentDictionary<string, object> StateLocks =
+        new(StringComparer.Ordinal);
+
     private readonly string _connectorId;
     private readonly string _logsDir;
     private readonly string _dataDir;
@@ -67,14 +82,64 @@ public sealed class FileStateStore : IStateStore
 
     // ---- persistent doc ------------------------------------------------------
 
-    private sealed class StateDoc
+    internal sealed class StateDoc
     {
         public Dictionary<string, DateTime> LastSync { get; set; } = new();
         public Dictionary<string, DateTime> ProcessedDeliveries { get; set; } = new();
         public Dictionary<string, string?> Values { get; set; } = new();
         public long BillableLookups { get; set; }
-        /// <summary>Erased subject altrata ids — durable across re-delivery.</summary>
-        public SortedSet<string> SuppressedSubjects { get; set; } = new(StringComparer.Ordinal);
+
+        /// <summary>WIRE shape of the erasure suppression list. Deliberately a
+        /// plain List, NOT the SortedSet the rest of the class works with.
+        ///
+        /// System.Text.Json discards a collection property's initializer: it
+        /// constructs a fresh instance with that collection type's DEFAULT
+        /// comparer and assigns it. For SortedSet&lt;string&gt; the default is
+        /// the CULTURE-sensitive Comparer&lt;string&gt;.Default, so a
+        /// `= new(StringComparer.Ordinal)` initializer survived only until the
+        /// first reload. Two things then went wrong, and the second is why the
+        /// wire type had to change rather than merely re-imposing the comparer
+        /// after deserialization:
+        ///
+        ///   1. EQUALITY changed. Culture collation ignores characters ordinal
+        ///      comparison does not — U+00AD, U+200B, U+200D, U+FEFF and so on.
+        ///      "ALT-9001" and "ALT-9001­" are distinct subjects ordinally
+        ///      and the SAME key culturally. An id nobody erased could answer
+        ///      "suppressed"; and because CrawlEngine rebuilds an Ordinal
+        ///      HashSet from ListSuppressedSubjects, an id that WAS erased could
+        ///      go missing from that set and be re-ingested.
+        ///   2. Ids were LOST AT PARSE TIME. Deserialization Adds each array
+        ///      element into the default-comparer set, so two ordinally-distinct
+        ///      erasures collapsed into one before any repair code could run.
+        ///      Un-suppressing the survivor then silently un-suppressed the
+        ///      other — an erased subject becoming ingestible again. On the DSAR
+        ///      suppression list, which the DR plan classes RPO-0, that is data
+        ///      loss with a regulatory edge.
+        ///
+        /// Reading into a List keeps every byte exactly as written;
+        /// <see cref="SuppressedSubjects"/> re-imposes ordinal semantics on
+        /// load and <see cref="FlushSuppressed"/> writes them back. The JSON on
+        /// disk is unchanged — still an array of strings under this name — so
+        /// existing state files and the SQL backend stay compatible.</summary>
+        [JsonPropertyName("SuppressedSubjects")]
+        public List<string> SuppressedSubjectsRaw { get; set; } = new();
+
+        /// <summary>Erased subject altrata ids — durable across re-delivery.
+        /// ORDINAL by construction, on every load, forever.</summary>
+        [JsonIgnore]
+        public SortedSet<string> SuppressedSubjects { get; private set; } =
+            new(StringComparer.Ordinal);
+
+        /// <summary>Rebuild the ordinal working set from the wire list (load).</summary>
+        public void RebuildSuppressed() =>
+            SuppressedSubjects = new SortedSet<string>(SuppressedSubjectsRaw, StringComparer.Ordinal);
+
+        /// <summary>Project the ordinal working set back onto the wire list
+        /// (save). Enumeration is ordinal-ordered, so the persisted array is
+        /// reproducible across hosts and locales — which is what makes two
+        /// nodes' suppression lists diffable during a DR comparison.</summary>
+        public void FlushSuppressed() =>
+            SuppressedSubjectsRaw = SuppressedSubjects.ToList();
     }
 
     private StateDoc LoadDoc()
@@ -83,7 +148,13 @@ public sealed class FileStateStore : IStateStore
             return new StateDoc();
         try
         {
-            return JsonSerializer.Deserialize<StateDoc>(File.ReadAllText(StatePath)) ?? new StateDoc();
+            var doc = JsonSerializer.Deserialize<StateDoc>(File.ReadAllText(StatePath)) ?? new StateDoc();
+            // Re-impose the semantics the TYPE declares but the wire cannot
+            // carry (see StateDoc.SuppressedSubjectsRaw). Every load goes
+            // through here, so there is no path that yields a doc whose
+            // suppression set is not ordinal.
+            doc.RebuildSuppressed();
+            return doc;
         }
         catch (Exception exc)
         {
@@ -99,28 +170,87 @@ public sealed class FileStateStore : IStateStore
         }
     }
 
-    private void SaveDoc(StateDoc doc) =>
+    private void SaveDoc(StateDoc doc)
+    {
+        doc.FlushSuppressed();
         AtomicWrite(StatePath, JsonSerializer.Serialize(doc, JsonOptions));
+    }
 
-    private static void AtomicWrite(string path, string content)
+    private static void AtomicWrite(string path, string content, bool failBeforeMove = false)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var tmp = path + ".tmp";
-        File.WriteAllText(tmp, content, new UTF8Encoding(false));
-        File.Move(tmp, path, overwrite: true);
+        // UNIQUE per write. A shared "<path>.tmp" made every writer over a given
+        // file collide: an operator running `ingest-item` while a crawl runs
+        // under the same CONNECTOR_ID would have one writer's WriteAllText
+        // truncate the other's half-finished temp, so File.Move could publish a
+        // TRUNCATED state document — or, as the probe showed, the second Move
+        // would throw FileNotFoundException on a background thread because the
+        // first had already renamed the shared temp away. The process id keeps
+        // the name diagnosable; the guid makes it unique within the process.
+        var tmp = $"{path}.{Environment.ProcessId:x}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(tmp, content, new UTF8Encoding(false));
+            if (failBeforeMove)
+                throw new IOException("injected mid-write failure (test seam)");
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch
+        {
+            // Never leave litter beside the state file. A stray temp is
+            // confusing during an incident and, when the write failed because
+            // the volume filled, is part of what is keeping it full.
+            try
+            {
+                if (File.Exists(tmp))
+                    File.Delete(tmp);
+            }
+            catch
+            {
+                // Best effort only — the original failure is the one that matters.
+            }
+            throw;
+        }
     }
+
+    /// <summary>Test seam: drive AtomicWrite directly, optionally failing after
+    /// the temp file is written but before it is published, so the crash-safety
+    /// contract (no litter, previous state intact) is assertable.</summary>
+    internal static void AtomicWriteForTests(string path, string content, bool failBeforeMove = false) =>
+        AtomicWrite(path, content, failBeforeMove);
+
+    /// <summary>Test seam: the loaded state document, so the round-trip tests can
+    /// assert the suppression set's COMPARER and not merely a symptom of it.</summary>
+    internal StateDoc LoadStateDocument()
+    {
+        lock (StateLock)
+            return LoadDoc();
+    }
+
+    /// <summary>Test seam: the object that serialises state-file mutations, so
+    /// the "process-wide" claim can be asserted as lock identity.</summary>
+    internal object StateLockForTests => StateLock;
+
+    private object StateLock =>
+        StateLocks.GetOrAdd(Path.GetFullPath(StatePath), _ => new object());
 
     // ---- checkpoint ------------------------------------------------------------
 
     public CrawlCheckpoint? GetCheckpoint()
     {
-        lock (_sync)
+        lock (StateLock)
         {
             if (!File.Exists(CheckpointPath))
                 return null;
             try
             {
-                return JsonSerializer.Deserialize<CrawlCheckpoint>(File.ReadAllText(CheckpointPath));
+                var checkpoint = JsonSerializer.Deserialize<CrawlCheckpoint>(File.ReadAllText(CheckpointPath));
+                // Kind, not value: DATETIME2 carries no Kind, so the SQL
+                // backend stamps Utc on read. Do the same here so the two
+                // return EQUAL DateTimes and not merely equal ticks.
+                return checkpoint == null
+                    ? null
+                    : checkpoint with { UpdatedUtc = StateContract.Utc(checkpoint.UpdatedUtc) };
             }
             catch (Exception exc)
             {
@@ -137,13 +267,14 @@ public sealed class FileStateStore : IStateStore
 
     public void SaveCheckpoint(CrawlCheckpoint checkpoint)
     {
-        lock (_sync)
-            AtomicWrite(CheckpointPath, JsonSerializer.Serialize(checkpoint, JsonOptions));
+        var storable = StateContract.Storable(checkpoint);
+        lock (StateLock)
+            AtomicWrite(CheckpointPath, JsonSerializer.Serialize(storable, JsonOptions));
     }
 
     public void ClearCheckpoint()
     {
-        lock (_sync)
+        lock (StateLock)
         {
             if (File.Exists(CheckpointPath))
                 File.Delete(CheckpointPath);
@@ -154,16 +285,19 @@ public sealed class FileStateStore : IStateStore
 
     public DateTime? GetLastSync(string kind)
     {
-        lock (_sync)
-            return LoadDoc().LastSync.TryGetValue(kind, out var when) ? when : null;
+        lock (StateLock)
+            return LoadDoc().LastSync.TryGetValue(kind, out var when)
+                ? StateContract.Utc(when)
+                : null;
     }
 
     public void SetLastSync(string kind, DateTime utc)
     {
-        lock (_sync)
+        var when = StateContract.Utc(utc);
+        lock (StateLock)
         {
             var doc = LoadDoc();
-            doc.LastSync[kind] = utc;
+            doc.LastSync[kind] = when;
             SaveDoc(doc);
         }
     }
@@ -192,15 +326,31 @@ public sealed class FileStateStore : IStateStore
     {
         if (records.Count == 0)
             return;
+        // Normalise the WHOLE batch before opening the file, so the bytes
+        // written are decided before any I/O starts. Normalisation cannot fail,
+        // so this is not a rejection point.
+        var storable = Storable(records);
         lock (DeadLetterLock)
         {
             Directory.CreateDirectory(_logsDir);
             using var stream = new FileStream(
                 DeadLetterPath, FileMode.Append, FileAccess.Write, FileShare.Read);
             using var writer = new StreamWriter(stream, new UTF8Encoding(false));
-            foreach (var record in records)
+            foreach (var record in storable)
                 writer.WriteLine(JsonSerializer.Serialize(record, JsonlOptions));
         }
+    }
+
+    /// <summary>Normalise a whole batch up front (see
+    /// <see cref="StateContract.Storable(DeadLetterRecord)"/>). Normalisation
+    /// only — no record is ever refused, so a batch read from a legacy queue
+    /// file can always be written back.</summary>
+    private static List<DeadLetterRecord> Storable(IEnumerable<DeadLetterRecord> records)
+    {
+        var result = new List<DeadLetterRecord>();
+        foreach (var record in records)
+            result.Add(StateContract.Storable(record));
+        return result;
     }
 
     public IReadOnlyList<DeadLetterRecord> ReadDeadLetters()
@@ -222,7 +372,11 @@ public sealed class FileStateStore : IStateStore
                 {
                     var record = JsonSerializer.Deserialize<DeadLetterRecord>(line);
                     if (record != null)
-                        records.Add(record);
+                        // Kind only — the value is NOT re-validated on read.
+                        // A queue file written before this contract existed may
+                        // hold an out-of-domain record, and refusing to read it
+                        // would turn a legacy value into a LOST failure record.
+                        records.Add(record with { FailedUtc = StateContract.Utc(record.FailedUtc) });
                 }
                 catch
                 {
@@ -245,10 +399,11 @@ public sealed class FileStateStore : IStateStore
 
     public void ReplaceDeadLetters(IEnumerable<DeadLetterRecord> records)
     {
+        var storable = Storable(records);
         lock (DeadLetterLock)
         {
             var sb = new StringBuilder();
-            foreach (var record in records)
+            foreach (var record in storable)
                 sb.AppendLine(JsonSerializer.Serialize(record, JsonlOptions));
             AtomicWrite(DeadLetterPath, sb.ToString());
         }
@@ -285,23 +440,25 @@ public sealed class FileStateStore : IStateStore
 
     public bool IsDeliveryProcessed(string deliveryId)
     {
-        lock (_sync)
+        lock (StateLock)
             return LoadDoc().ProcessedDeliveries.ContainsKey(deliveryId);
     }
 
     public void MarkDeliveryProcessed(string deliveryId, DateTime utc)
     {
-        lock (_sync)
+        var key = deliveryId;
+        var when = StateContract.Utc(utc);
+        lock (StateLock)
         {
             var doc = LoadDoc();
-            doc.ProcessedDeliveries[deliveryId] = utc;
+            doc.ProcessedDeliveries[key] = when;
             SaveDoc(doc);
         }
     }
 
     public IReadOnlyList<string> ListProcessedDeliveries()
     {
-        lock (_sync)
+        lock (StateLock)
             return LoadDoc().ProcessedDeliveries.Keys.OrderBy(k => k, StringComparer.Ordinal).ToList();
     }
 
@@ -309,20 +466,51 @@ public sealed class FileStateStore : IStateStore
 
     public string? GetValue(string key)
     {
-        lock (_sync)
+        lock (StateLock)
             return LoadDoc().Values.TryGetValue(key, out var value) ? value : null;
     }
 
     public void SetValue(string key, string? value)
     {
-        lock (_sync)
+        var validKey = key;
+        // null still DELETES; a non-null value is normalized (not rejected) —
+        // it lands in NVARCHAR(MAX) and is not an identity.
+        var storable = value == null ? null : StateContract.Text(value);
+        lock (StateLock)
         {
             var doc = LoadDoc();
-            if (value == null)
-                doc.Values.Remove(key);
+            if (storable == null)
+                doc.Values.Remove(validKey);
             else
-                doc.Values[key] = value;
+                doc.Values[validKey] = storable;
             SaveDoc(doc);
+        }
+    }
+
+    /// <summary>Atomic read-modify-write: the load, the transform and the save
+    /// all happen inside ONE acquisition of the process-wide, per-file lock
+    /// (<see cref="StateLocks"/>), so two concurrent usage-ceiling reservations
+    /// cannot both observe the same pre-increment count and both conclude there
+    /// was room — and that now holds however many FileStateStore INSTANCES the
+    /// process has over the file, which is what the claim previously asserted
+    /// without delivering. (Cross-PROCESS atomicity still needs the SQL
+    /// backend — see the scope note in Altrata/UsageBudget.cs.)</summary>
+    public string? MutateValue(string key, Func<string?, string?> transform)
+    {
+        var validKey = key;
+        lock (StateLock)
+        {
+            var doc = LoadDoc();
+            doc.Values.TryGetValue(validKey, out var current);
+            var updated = transform(current);
+            if (updated != null)
+                updated = StateContract.Text(updated);
+            if (updated == null)
+                doc.Values.Remove(validKey);
+            else
+                doc.Values[validKey] = updated;
+            SaveDoc(doc);
+            return updated;
         }
     }
 
@@ -330,13 +518,13 @@ public sealed class FileStateStore : IStateStore
 
     public long GetBillableLookupCount()
     {
-        lock (_sync)
+        lock (StateLock)
             return LoadDoc().BillableLookups;
     }
 
     public long IncrementBillableLookups(long delta = 1)
     {
-        lock (_sync)
+        lock (StateLock)
         {
             var doc = LoadDoc();
             doc.BillableLookups += delta;
@@ -349,33 +537,41 @@ public sealed class FileStateStore : IStateStore
 
     public void AddSuppressedSubject(string subjectId)
     {
-        lock (_sync)
+        // The DSAR filing point. NOTE, OPEN DEFECT: an id containing an
+        // unpaired UTF-16 surrogate is silently rewritten to U+FFFD by
+        // System.Text.Json on save, so the erasure is filed under a DIFFERENT
+        // id and IsSubjectSuppressed(the same string) returns false — the
+        // subject stays ingestible. See StateContract.cs (a) and
+        // docs/SQL_CONTRACT.md.
+        var id = subjectId;
+        lock (StateLock)
         {
             var doc = LoadDoc();
-            if (doc.SuppressedSubjects.Add(subjectId))
+            if (doc.SuppressedSubjects.Add(id))
                 SaveDoc(doc);
         }
     }
 
     public void RemoveSuppressedSubject(string subjectId)
     {
-        lock (_sync)
+        var id = subjectId;
+        lock (StateLock)
         {
             var doc = LoadDoc();
-            if (doc.SuppressedSubjects.Remove(subjectId))
+            if (doc.SuppressedSubjects.Remove(id))
                 SaveDoc(doc);
         }
     }
 
     public bool IsSubjectSuppressed(string subjectId)
     {
-        lock (_sync)
+        lock (StateLock)
             return LoadDoc().SuppressedSubjects.Contains(subjectId);
     }
 
     public IReadOnlyList<string> ListSuppressedSubjects()
     {
-        lock (_sync)
+        lock (StateLock)
             return LoadDoc().SuppressedSubjects.ToList();
     }
 
@@ -383,13 +579,28 @@ public sealed class FileStateStore : IStateStore
 
     public void WipeAll()
     {
-        lock (_sync)
+        // Each file is deleted under the lock that guards IT. The dead-letter
+        // queue has its own lock, so deleting it under the state lock (as this
+        // did) raced a concurrent AddDeadLetters append.
+        //
+        // The two locks are taken SEQUENTIALLY, never nested: MutateDeadLetters
+        // hands control to a caller-supplied transform while holding the
+        // dead-letter lock, and that transform may legitimately touch state —
+        // dead-letter-then-state is therefore a live acquisition order, and
+        // nesting the reverse order here would be a lock-order inversion.
+        // WipeAll is not atomic across the three files either way.
+        lock (StateLock)
         {
-            foreach (var path in new[] { CheckpointPath, DeadLetterPath, StatePath })
+            foreach (var path in new[] { CheckpointPath, StatePath })
             {
                 if (File.Exists(path))
                     File.Delete(path);
             }
+        }
+        lock (DeadLetterLock)
+        {
+            if (File.Exists(DeadLetterPath))
+                File.Delete(DeadLetterPath);
         }
     }
 }

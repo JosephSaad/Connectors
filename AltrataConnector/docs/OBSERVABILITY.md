@@ -37,6 +37,16 @@ every structured **JSON log line** (`correlationId`), **dead-letter records**,
 and **span tags** (`altrata.correlation_id`) — so one cycle is followable
 end-to-end by correlation id even with OTLP export off.
 
+The correlation id on a dead-letter record is persisted by **both** state
+backends. It was previously written by the file backend and silently discarded
+by SQL Server — no `correlation_id` column, no binding, no read — so switching
+to `USE_SQL_SERVER=true` lost the trace link on every queued failure, and
+collapsed that component of the identity key `retry-failed` uses to finalise
+its snapshot (`CommandRegistry.DeadLetterIdentityKey`) to the empty string. The
+column now exists, carries a guarded `ALTER` for already-deployed tables, and
+is read back; a test compares the table's column list against the INSERT's and
+the SELECT's, all three read off the parsed SQL AST.
+
 ### PII CAUTION — no personal data in traces
 
 Trace exhaust is a leakage surface for a licensed-PII connector, so spans and
@@ -88,6 +98,9 @@ on Windows it falls back to localhost-only and logs a warning.
 | `altrata_breaker_trips_total{dependency="…"}` / `…_resets_total{…}` | counter | per-dependency opens / recoveries |
 | `altrata_crawl_in_progress` | gauge | 1 during a crawl |
 | `altrata_last_full_crawl_timestamp_seconds` / `..._incremental_...` | gauge | unix time of last completed crawl |
+| `altrata_content_gate_blocked_total` | counter | items QUARANTINED by the content gate (fleet-canonical name: `content_gate_blocked_total`; every metric here carries the connector's `altrata_` prefix) |
+| `altrata_content_gate_scanned_total` | counter | items submitted to the content gate |
+| `altrata_content_gate_incomplete_total` | counter | scans that did not complete (scanner unavailable / regex timeout / over `CONTENT_GATE_MAX_SCAN_MB`) — with the shipped text fail-mode `open` these items were indexed UNSCANNED, so a non-zero rate is a real gap |
 
 ## Logging
 
@@ -117,6 +130,7 @@ JSON POST: `{connector, severity, event, message, timestamp, details}`.
 | `entitlement_violation` | critical | empty seat list / forbidden ACL attempt |
 | `reacl_incomplete` | warning | a seat-change re-ACL pass left items on the previous ACL (hash not committed; re-runs next crawl) |
 | `deadletter_threshold` | warning | depth ≥ `ALERT_DEADLETTER_THRESHOLD` |
+| `content_gate_blocked` | warning | an item was quarantined by the content gate. `details` = `{itemId, category, deliveryId}` — ids and a fixed category only, never matched text |
 
 Alert delivery failures are logged and swallowed — alerting never breaks
 ingestion.

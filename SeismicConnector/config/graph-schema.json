@@ -143,6 +143,13 @@
       "isQueryable": true,
       "isRetrievable": true,
       "isRefinable": true
+    },
+    {
+      "name": "contentGateStatus",
+      "type": "String",
+      "isQueryable": true,
+      "isRetrievable": true,
+      "isRefinable": true
     }
   ]
 }

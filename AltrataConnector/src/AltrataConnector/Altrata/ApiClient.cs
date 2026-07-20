@@ -74,6 +74,7 @@ public sealed class AltrataApiClient
     private readonly IStateStore _state;
     private readonly IAuditLog _audit;
     private readonly IPurposePolicy _purpose;
+    private readonly IUsageBudget _usage;
     private readonly RateLimiter _rateLimiter;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly Func<DateTime> _clock;
@@ -90,7 +91,8 @@ public sealed class AltrataApiClient
         Func<TimeSpan, CancellationToken, Task>? delay = null,
         Func<DateTime>? clock = null,
         CircuitBreaker? breaker = null,
-        IPurposePolicy? purpose = null)
+        IPurposePolicy? purpose = null,
+        IUsageBudget? usage = null)
     {
         _config = config;
         _state = state;
@@ -98,6 +100,9 @@ public sealed class AltrataApiClient
         // Purpose-based authorization (#7). Null → read PURPOSE_ALLOWLIST from
         // the environment (unset = record-only, enforcement off).
         _purpose = purpose ?? PurposePolicy.FromEnv();
+        // Enforceable usage ceilings (WP-AL-4). Null → whatever AppConfig parsed
+        // from ALTRATA_MAX_LOOKUPS_PER_DAY / _PER_WINDOW; both unset = no ceiling.
+        _usage = usage ?? new UsageMeter(state, UsageBudgetOptions.FromConfig(config));
         // Injected handler = tests; otherwise the enterprise connectivity
         // handler (PROXY_URL / PROXY_BYPASS / CA_BUNDLE_PATH).
         _http = handler == null
@@ -189,62 +194,155 @@ public sealed class AltrataApiClient
         if (!_purpose.Enforcing)
             Logger.Info("Purpose enforcement OFF (PURPOSE_ALLOWLIST unset) — recording purpose only.");
 
-        // Span the billable enrichment lookup. PII CAUTION: tag only the opaque
-        // subject id — never the profile response (name/email/wealth).
-        using var span = Telemetry.Span("api.lookup", ActivityKind.Client);
-        Telemetry.SetTag(span, "altrata.subject.id", altrataId);
-
-        var wait = _rateLimiter.ReserveDelay(_clock());
-        if (wait > TimeSpan.Zero)
+        // Enforceable usage ceiling (WP-AL-4) — AFTER the purpose veto and BEFORE
+        // the rate limiter, the token fetch, the HTTP call and the billable
+        // counter. The order is load-bearing in BOTH directions:
+        //   * after the veto, so a disallowed purpose never consumes budget —
+        //     otherwise anyone who can invoke the connector could exhaust the
+        //     day's ceiling with calls that were never going to be permitted,
+        //     denying service to the legitimate workload;
+        //   * before everything else, so a refusal costs nothing at all: no
+        //     token, no request, no bill.
+        // The rate limiter only makes a caller WAIT; this is the thing that
+        // actually DECLINES. Modelled on the purpose deny above: PII-safe audit
+        // entry, dedicated metric, typed exception, fail-closed.
+        var budget = _usage.TryReserve(_clock());
+        if (!budget.Allowed)
         {
-            Logger.Info($"Rate limit: waiting {wait.TotalSeconds:0.#}s before Altrata API call " +
-                        $"({_config.AltrataApiCallsPerMinute}/min)");
-            await _delay(wait, ct);
-        }
-
-        var url = $"{_config.AltrataApiBaseUrl!.TrimEnd('/')}/persons/{Uri.EscapeDataString(altrataId)}";
-        var token = await GetTokenAsync(ct);
-        using var response = await BreakeredSendAsync(() =>
-        {
-            var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            Telemetry.InjectTraceContext(request);
-            return request;
-        }, ct);
-        var body = await response.Content.ReadAsStringAsync(ct);
-        if (!response.IsSuccessStatusCode)
-            throw new AltrataApiException((int)response.StatusCode,
-                $"Altrata person lookup for '{altrataId}' failed ({(int)response.StatusCode})");
-
-        // Successful lookup ⇒ billable: bump the persisted counter and audit it.
-        var total = _state.IncrementBillableLookups();
-        Metrics.Set("altrata_api_billable_lookups_total", total);
-        Telemetry.SetTag(span, "altrata.api.billable_total", total);
-        _audit.Append(new AuditEntry
-        {
-            Actor = actor,
-            Action = "api_lookup",
-            AltrataId = altrataId,
-            Purpose = purpose,
-            Billable = true,
-            Decision = "allow",
-        });
-        Logger.Info($"Billable Altrata lookup #{total}: person {altrataId} (purpose: {purpose})");
-
-        using var doc = JsonDocument.Parse(body);
-        var fields = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        foreach (var property in doc.RootElement.EnumerateObject())
-        {
-            fields[property.Name] = property.Value.ValueKind switch
+            _audit.Append(new AuditEntry
             {
-                JsonValueKind.Null or JsonValueKind.Undefined => null,
-                JsonValueKind.String => property.Value.GetString(),
-                _ => property.Value.GetRawText(),
-            };
+                Actor = actor,
+                Action = "api_lookup",
+                AltrataId = altrataId,
+                Purpose = purpose,
+                Billable = false,
+                Decision = "deny",
+            });
+            Metrics.Increment("altrata_usage_denied_total");
+            Logger.Warning(
+                $"Usage ceiling reached ({budget.Reason}: {budget.Used}/{budget.Limit}) — lookup " +
+                $"{altrataId} REFUSED fail-closed; no billable call made, no request sent.");
+            throw new UsageBudgetExceededException(
+                $"Altrata usage ceiling reached ({budget.Reason}): {budget.Used} of {budget.Limit} " +
+                $"billable lookup(s) already used. The lookup was refused and nothing was billed. " +
+                $"Raise {UsageBudgetOptions.MaxPerDayEnvVar} / {UsageBudgetOptions.MaxPerWindowEnvVar}, " +
+                "or wait for the window to roll over.");
         }
-        if (!fields.ContainsKey("id"))
-            fields["id"] = altrataId;
-        return new FeedRecord { Dataset = Datasets.PersonProfile, Fields = fields };
+        if (!_usage.Enforcing)
+            Logger.Info(
+                $"Usage ceilings OFF ({UsageBudgetOptions.MaxPerDayEnvVar} / " +
+                $"{UsageBudgetOptions.MaxPerWindowEnvVar} unset) — billable lookups are counted but never refused.");
+
+        // From here on the reservation is held. Anything that prevents the lookup
+        // from becoming BILLABLE must give it back, or a flapping upstream would
+        // burn the allowance without producing a single usable result.
+        var billed = false;
+        try
+        {
+            // Span the billable enrichment lookup. PII CAUTION: tag only the opaque
+            // subject id — never the profile response (name/email/wealth).
+            using var span = Telemetry.Span("api.lookup", ActivityKind.Client);
+            Telemetry.SetTag(span, "altrata.subject.id", altrataId);
+
+            var wait = _rateLimiter.ReserveDelay(_clock());
+            if (wait > TimeSpan.Zero)
+            {
+                Logger.Info($"Rate limit: waiting {wait.TotalSeconds:0.#}s before Altrata API call " +
+                            $"({_config.AltrataApiCallsPerMinute}/min)");
+                await _delay(wait, ct);
+            }
+
+            var url = $"{_config.AltrataApiBaseUrl!.TrimEnd('/')}/persons/{Uri.EscapeDataString(altrataId)}";
+            var token = await GetTokenAsync(ct);
+            using var response = await BreakeredSendAsync(() =>
+            {
+                var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                Telemetry.InjectTraceContext(request);
+                return request;
+            }, ct);
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (!response.IsSuccessStatusCode)
+                throw new AltrataApiException((int)response.StatusCode,
+                    $"Altrata person lookup for '{altrataId}' failed ({(int)response.StatusCode})");
+
+            // Successful lookup ⇒ billable. The flag is set HERE — the instant
+            // the 2xx is in hand — and deliberately BEFORE the bookkeeping that
+            // records it.
+            //
+            // It used to be set after IncrementBillableLookups returned, which
+            // made the accounting optimistic in the one direction that must
+            // never be optimistic: if that state write failed (read-only state
+            // file, full volume) on an otherwise successful call, 'billed' was
+            // still false, so the exception filter below handed the reservation
+            // BACK. The vendor had served the lookup and would invoice it, yet
+            // the ceiling forgot it — and a host whose state file had gone
+            // read-only could walk straight past its limit, one uncounted
+            // billable call at a time.
+            //
+            // Reserved-and-kept is the conservative side of that trade: at
+            // worst the ceiling counts a call that somehow was not billed and
+            // refuses marginally early, which is recoverable. Over-spending
+            // against a licensed source is not.
+            billed = true;
+            var total = _state.IncrementBillableLookups();
+            Metrics.Set("altrata_api_billable_lookups_total", total);
+            Telemetry.SetTag(span, "altrata.api.billable_total", total);
+            _audit.Append(new AuditEntry
+            {
+                Actor = actor,
+                Action = "api_lookup",
+                AltrataId = altrataId,
+                Purpose = purpose,
+                Billable = true,
+                Decision = "allow",
+            });
+            Logger.Info($"Billable Altrata lookup #{total}: person {altrataId} (purpose: {purpose})");
+
+            using var doc = JsonDocument.Parse(body);
+            var fields = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in doc.RootElement.EnumerateObject())
+            {
+                fields[property.Name] = property.Value.ValueKind switch
+                {
+                    JsonValueKind.Null or JsonValueKind.Undefined => null,
+                    JsonValueKind.String => property.Value.GetString(),
+                    _ => property.Value.GetRawText(),
+                };
+            }
+            if (!fields.ContainsKey("id"))
+                fields["id"] = altrataId;
+            return new FeedRecord { Dataset = Datasets.PersonProfile, Fields = fields };
+        }
+        catch when (ReleaseUnlessBilled(billed, budget.Reservation))
+        {
+            // ReleaseUnlessBilled always returns false, so this filter never
+            // catches — it only runs the release as a side effect, leaving the
+            // original exception and its stack trace completely untouched.
+            throw;
+        }
+    }
+
+    /// <summary>Exception-filter side effect: hand a reservation back when the
+    /// lookup did not become billable. ALWAYS returns false so the filter never
+    /// matches and no exception is ever swallowed or re-thrown.</summary>
+    private bool ReleaseUnlessBilled(bool billed, UsageReservation? reservation)
+    {
+        if (!billed && reservation != null)
+        {
+            try
+            {
+                _usage.Release(reservation);
+            }
+            catch (Exception exc)
+            {
+                // Never let bookkeeping mask the real failure. A lost release is
+                // conservative (the reservation stays consumed until the window
+                // rolls) and must not become the exception the caller sees.
+                Logger.Warning($"Could not release the usage reservation after a failed lookup: {exc.Message}");
+            }
+        }
+        return false;
     }
 
     /// <summary>Best-effort token check for validate-config.</summary>

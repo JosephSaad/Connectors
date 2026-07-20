@@ -48,6 +48,12 @@ public static class Metrics
         new("altrata_purpose_denied_total", "Enrichment lookups DENIED by the purpose allowlist (fail-closed veto).", "counter"),
         new("altrata_items_acl_restricted_total", "Items whose ACL was tightened to the reviewer group by classification enforcement.", "counter"),
         new("altrata_items_expiring_total", "Ingested items stamped with an expirationDateTime (GRAPH_ITEM_TTL_DAYS).", "counter"),
+        // ContentGate (CS-1). Fleet-canonical name of the first one is
+        // content_gate_blocked_total; every metric here carries the connector's
+        // 'altrata_' prefix (see ops/grafana-dashboard.json).
+        new("altrata_content_gate_blocked_total", "Items quarantined by the content gate (prompt-injection screening).", "counter"),
+        new("altrata_content_gate_scanned_total", "Items submitted to the content gate for scanning.", "counter"),
+        new("altrata_content_gate_incomplete_total", "Content scans that did not complete (scanner unavailable, match timeout, or oversize) — the fail mode decided what happened next.", "counter"),
     };
 
     public static void Increment(string name, double delta = 1) =>

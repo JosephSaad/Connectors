@@ -7,6 +7,332 @@ All notable changes to the Altrata Copilot Connector. Format follows
 `packaging/msi/Package.wxs` (`Package/@Version` — drift is test-enforced),
 and this file.
 
+## [Unreleased]
+
+### Reverted — the state-backend boundary validation (it was a regression)
+
+The previous round added write-side validation in `State/StateContract.cs`: an
+identifier or key outside the SQL columns' accepted domain (bounded length, no
+unpaired UTF-16 surrogates, no blank padding) was REJECTED with a thrown
+`StateContractViolation` at the boundary of both backends, before any I/O.
+**That has been withdrawn in full.** It made DSAR erasure worse than the defects
+it closed.
+
+Reads were deliberately unfiltered, so legacy state still read back — but every
+WRITE canonicalised the whole batch all-or-nothing. A dead-letter queue holding
+a single legacy out-of-domain record (which the file backend, having no length
+bound, had accepted) could be READ but not WRITTEN BACK UNCHANGED, so every
+read-modify-write over it was wedged:
+
+* `forget-subject`'s dead-letter scrub threw before writing anything, leaving
+  the erased subject's payload **on disk** — while `AddSuppressedSubject` had
+  already run, so the erasure was left **HALF-APPLIED**: subject marked
+  suppressed, payload still at rest.
+* No file under `src/` caught `StateContractViolation`, so this surfaced as an
+  unhandled throw.
+* `retry-failed`'s finalize and attempt-bump wedged the same way.
+
+Withdrawn rather than replaced: a DSAR erasure that cannot complete is worse
+than a silent divergence. `StateContractViolation`, `StateContractReasons` and
+every rejecting entry point are gone. What remains in `StateContract.cs` cannot
+throw — the column-width constants (documentation of the schema, still pinned to
+the DDL by test), free-text U+FFFD normalisation for the `NVARCHAR(MAX)`
+columns, and `DateTimeKind` stamping.
+
+### Known — issues this revert RE-OPENS. Not closed. Not guarded.
+
+Documented at length in `docs/SQL_CONTRACT.md`; an operator must not read these
+as fixed.
+
+* **(a) An unpaired UTF-16 surrogate in a subject id is silently rewritten to
+  U+FFFD by the FILE backend** (`System.Text.Json` on save), so a DSAR erasure
+  is filed under a different id and **the subject stays ingestible**:
+  `AddSuppressedSubject` then `IsSubjectSuppressed` with the SAME string returns
+  **false** on the same store instance. SQL stores the code unit verbatim and
+  answers **true**.
+* **(b) `subject_id` and `item_id` are `NVARCHAR(256)` on SQL with no bound on
+  file**, so an over-long id erases successfully on file and raises **SQL error
+  8152** on SQL. 8152 is not in `TransientErrorNumbers`, so it is rethrown
+  without retry and **the erasure FAILS**.
+* **(c) Blank padding.** SQL's `=` folds trailing spaces; ordinal comparison
+  does not. `ALT-1` / `ALT-1 ` and `''` / `' '` may be one key on SQL and are
+  two on file.
+
+Mitigation is operational: normalise subject ids upstream of the connector, and
+verify an erasure with `list-suppressed-subjects` — under (a) the id listed is
+not the id submitted.
+
+Covered by test: the regression itself, per rejected clause and per write path
+(`LegacyStateReadModifyWriteTests`), and (a) and (b) pinned as tests asserting
+the defective behaviour they currently have, so this entry stays checkable
+(`SuppressionSurrogateTests.OPEN_DEFECT_A` / `OPEN_DEFECT_B`).
+
+### Fixed — kept from the previous round (NOT reverted)
+
+**`DeadLetterRecord.CorrelationId` is no longer discarded by SQL Server.** It
+was persisted by the file backend and dropped by SQL — no column, no binding,
+no read. `CrawlEngine.StampCorrelation` stamps every dead letter with it and
+`CommandRegistry.DeadLetterIdentityKey` feeds it into the identity key
+`retry-failed` uses to finalise its snapshot, so switching backends lost the
+trace link and collapsed that key component to the empty string. Added
+`correlation_id NVARCHAR(128) NULL` with a guarded `ALTER` for deployed tables,
+bound on insert, read on select. A test compares the table's column list
+against the INSERT's and the SELECT's — all three read off the SQL AST — so a
+member persisted by one backend and not the other fails rather than shipping.
+
+**The fenced dead-letter paths no longer mask the fault they were fenced
+against.** `AddDeadLetters` and `MutateDeadLetters` ran
+`catch { txn.Rollback(); throw; }`, citing `MutateValue` as the model —
+`MutateValue` has no such catch, and the catch made them **strictly less safe**:
+`SqlTransaction.Rollback` is documented to throw `InvalidOperationException` on
+a completed or broken transaction, so a fault raised *by* `Commit()` had its
+`SqlException` replaced. `Execute`'s two handlers both filter on
+`catch (SqlException)`, so the masked exception matched neither — `ShouldRetry`
+was never consulted (a genuinely uncommitted batch was **not** retried, so the
+dead letters were **lost**, not duplicated) and the "SQL state operation
+FAILED" diagnostic never fired. Both now use `using var txn` with no catch:
+`Dispose` rolls back an uncommitted transaction and is a no-op on a completed
+one.
+
+*Correction — the guard this entry previously claimed did not exist.* It said
+"a test asserts **no** explicit `Rollback()` anywhere in the class, so a third
+path added later cannot reintroduce it". That was **false**. The only guard was
+a regex over the source text, `@"^\s*\w+\.Rollback\(\)"` with
+`RegexOptions.Multiline`, which matches a `Rollback` call only where it *begins
+a line*. Reinstating the exact defect with the catch collapsed onto one line —
+`} catch { txn.Rollback(); throw; }` — left the full suite green (measured on
+the pre-fix tree: Failed: 0, Passed: 724, Total: 724). The guard tested layout, not behaviour.
+
+What is guaranteed now, stated precisely:
+
+* `RollbackMaskingIlGuardTests` asserts on the **compiled IL** of
+  `SqlStateStore`, which carries no whitespace or line breaks, so no formatting
+  of the defect can evade it. Two detectors: an exhaustive scan of every IL byte
+  offset of every method (including compiler-generated lambda bodies) for a
+  `call`/`callvirt` to a method named `Rollback`; and, per write path, an
+  assertion that the compiled transactional body carries zero catch clauses and
+  zero exception filters. Verified by reinstating the defect in three
+  formattings — the one-line catch in `MutateDeadLetters`, the one-line catch in
+  `AddDeadLetters`, and a fully collapsed single-line `catch when (…)` filter —
+  each of which turned the guard red.
+* **Not** guaranteed: no test executes `SqlStateStore.AddDeadLetters` or
+  `MutateDeadLetters`. Both go through `Execute`, which opens a real
+  `Microsoft.Data.SqlClient` connection; there is no SQL Server on the build
+  host and no container runtime to start one, and `SqlException` cannot be
+  constructed by a test. The runtime *mechanism* — that `Rollback` after
+  `Commit` throws and that the throw replaces the original exception — is
+  demonstrated separately against a real ADO.NET provider
+  (`Microsoft.Data.Sqlite`) in `TransactionRollbackMaskingTests`, not against
+  `SqlClient`.
+* The old regex test is kept, renamed to
+  `TheSqlStoreSourceHasNoRollbackCallAtTheStartOfALine`, so its name no longer
+  claims more than it checks.
+
+**Binary collation swept across the class.** `docs/SQL_CONTRACT.md` recorded
+`altrata_kv.[key]` and `altrata_deliveries.delivery_id` inheriting the
+database default (case-insensitive on a stock install) as a known-but-unfixed
+residual — the same divergence as the suppression list, one table over. Every
+column compared by equality now declares `Latin1_General_100_BIN2`, including
+`connector_id` (in the `WHERE` of nearly every statement, so two connector ids
+differing only by case shared state on SQL and not on file). Guarded migrations
+carry over the four tables whose primary keys are named;
+`altrata_checkpoint.connector_id` and `altrata_leases.lease_name` have inline
+UNNAMED primary keys and are **not** migrated on existing deployments — that
+needs dynamic SQL to discover the auto-generated constraint name, which cannot
+be tested here. Recorded in `docs/SQL_CONTRACT.md` residuals rather than left
+silent.
+
+**`DateTimeKind` normalised.** The file backend returned `Kind=Utc` and
+`SqlDataReader.GetDateTime` on `DATETIME2` returns `Unspecified`; both now
+stamp `Utc` on write and on read, including for checkpoint/dead-letter files
+written by earlier builds whose timestamps have no `Z`. Latent — no
+Kind-sensitive consumer was found — but the same class.
+
+### Removed — a test that could not fail
+
+`BothBackendsAgreeOnConfusableSubjectIds` was the suite's only claim of
+cross-backend agreement and was not one: it compared the file backend against
+`ComparerForCollation()`, a hand-written twenty-line **model** of SQL Server
+collation semantics authored alongside the fix it asserted. A model can only
+detect divergences it already encodes, and it stayed green through the entire
+unpaired-surrogate defect — in which the two backends stored *different values*
+and collation was not involved. Removed along with the model rather than
+renamed.
+
+It has not been replaced by an equivalent claim. The rejection tests that
+briefly stood in its place went with the validation they asserted (see
+*Reverted*, above), and the cross-backend agreement it purported to show is
+**open**, not proven — the divergences are enumerated under *Known* and in
+`docs/SQL_CONTRACT.md`. What executes today is the file backend on disk (the
+read-modify-write regression per clause, and the two open defects pinned to
+their current behaviour) plus the SQL half of every SCHEMA claim, read off the
+`TSql150Parser` AST of the shipped DDL and the shipped statements.
+
+**Stated limit:** there is no SQL Server on the build host and no container
+runtime to start one, so nothing here executes a query against a live server.
+That a live server behaves as its declared collation and declared widths say is
+**not proven**, and neither is the SQL half of open issues (a), (b) and (c) —
+verbatim surrogate storage, the 8152 rethrow and blank padding are stated from
+SQL Server semantics and the declared DDL, not executed. Needs an integration
+environment. `docs/SQL_CONTRACT.md`
+says the same under *What is NOT verified here*.
+
+### Fixed — SQL/file backend divergence on the DSAR suppression list
+
+- **`dbo.altrata_suppressed.subject_id` now carries an explicit binary
+  collation** (`Latin1_General_100_BIN2`). It inherited the database default,
+  which on a stock SQL Server install (`SQL_Latin1_General_CP1_CI_AS`) is
+  **case-insensitive**, while the file backend compares suppressed subject ids
+  with `StringComparer.Ordinal`. The two backends therefore disagreed about
+  whether a subject had been erased — on the erasure list, where disagreement
+  means an erased subject is re-ingested on one backend and not the other.
+  Filing `alt-9001` after `ALT-9001` hit the case-insensitive `IF NOT EXISTS`
+  guard and was **dropped with no error**, leaving that subject ingestible.
+- Binary collation rather than normalised key storage: the suppression list is
+  DSAR evidence and `ListSuppressedSubjects` must return the id exactly as the
+  erasure was filed. BIN2 is equality-identical to `StringComparer.Ordinal`
+  while leaving the stored value byte-exact.
+- **Every comparison names the collation at the comparison site**
+  (`subject_id = @s COLLATE …`), pinned on the parameter so the primary key
+  stays seekable, and correct even against a table not yet migrated.
+- **A guarded `ALTER COLUMN` migrates existing deployments** — changing the
+  `CREATE TABLE` alone would have left every deployed table silently on the
+  insensitive collation, since the schema is only applied when the table is
+  absent. Safe in this direction and a no-op on re-run. It does **not** recover
+  erasures the insensitive key already swallowed; re-file those from the
+  erasure ledger after upgrading (`docs/SQL_CONTRACT.md`).
+- `ListSuppressedSubjects` re-sorts ordinally client-side: BIN2 orders by code
+  point, the file backend by UTF-16 code unit.
+
+### Fixed — residual retry-after-commit on the dead-letter write paths
+
+- **`AddDeadLetter` is commit-fenced**, like `MutateValue` before it. The
+  executor retries the WHOLE operation on a transient `SqlException`, so a
+  fault raised *after* the row committed appended a **second copy** of the same
+  failed item — inflating the queue an operator triages and letting one item
+  consume two of the queue's bounded slots.
+- **`ReplaceDeadLetters` now routes through the atomic, fenced
+  `MutateDeadLetters`.** It was `ClearDeadLetters()` plus a loop of
+  `AddDeadLetter()` — N+1 *independent* `Execute` calls, so not atomic at all: a
+  transient fault partway through left the queue holding a **prefix** of the
+  replacement, silently dropping every record after the failure point. That is
+  how a drain/requeue writes surviving records back, so the tail was lost
+  outright.
+- **`AddDeadLetters` is overridden rather than inherited.** `IStateStore`'s
+  default loops `AddDeadLetter`, which on SQL is N lock acquisitions and N
+  transactions, breaking the contiguity the interface documents. Now one
+  transaction, one commit, fenced once.
+- **Audited every write path in `SqlStateStore`** and recorded the result in the
+  `CommitGuard` doc comment: five paths are relative/caller-supplied and need
+  the fence; the other eight (`SaveCheckpoint`, `ClearCheckpoint`, `SetValue`,
+  `MarkDeliveryProcessed`, `ClearDeadLetters`, `AddSuppressedSubject`,
+  `RemoveSuppressedSubject`, `WipeAll`) are absolute writes whose replay
+  reproduces the same state and are safe unguarded.
+- Residual, unchanged and now documented: if the commit call *itself* throws,
+  the outcome is genuinely ambiguous and no client-side flag can resolve it.
+  That needs a transactional idempotency key — a schema change, deferred.
+
+### Added — usage metering with enforceable ceilings (WP-AL-4)
+
+- **A ceiling that can REFUSE a billable lookup** (`ALTRATA_MAX_LOOKUPS_PER_DAY`,
+  and `ALTRATA_MAX_LOOKUPS_PER_WINDOW` + `ALTRATA_USAGE_WINDOW_HOURS` for a
+  rolling window; all default **unset = no ceiling = byte-identical behaviour**).
+  The connector already counted billable lookups and already paced them
+  (`ALTRATA_API_CALLS_PER_MINUTE`), but neither can decline — the counter is a
+  post-hoc tally and the rate limiter only makes the caller *wait*, so a runaway
+  or abusive workload was billable without bound. This is the part that says no.
+- **Fail-closed refusal, modelled on the purpose veto**: PII-safe audit entry
+  (`Decision="deny"`, `Billable=false`), the dedicated metric
+  `altrata_usage_denied_total`, and a typed `UsageBudgetExceededException` that
+  names the knob to change. Nothing billed, and **no HTTP request enqueued** —
+  not even the OAuth token fetch.
+- **Order is load-bearing**: the check sits AFTER the purpose veto and BEFORE the
+  rate limiter, token fetch, HTTP call and billable counter. After the veto, so a
+  disallowed purpose can never *consume* budget — otherwise refused requests
+  alone could exhaust the day's ceiling and deny service to the legitimate
+  workload. Pinned by `PurposeVetoPrecedesTheBudgetCheck`.
+- **Durable, atomic counters** in the existing key/value state facility (state key
+  `usage_budget`, keyed by TIME only — never by subject). New
+  `IStateStore.MutateValue` does a read-modify-write inside ONE lock acquisition:
+  `FileStateStore` under its process lock, `SqlStateStore` under
+  `UPDLOCK, HOLDLOCK` in a transaction. Without it, N concurrent lookups would
+  each read the same "used" figure and overshoot the limit by up to N−1.
+- **Reserve/release**: the reservation is taken before the call and given back if
+  the lookup never became billable (breaker open, 5xx, timeout, graceful stop),
+  so a flapping upstream cannot burn the allowance without producing a result. A
+  crash between the two leaves it consumed — conservative by design.
+- **Scope is documented, including where it bites**: the ceiling is per state
+  store. On the default file backend that means **per host** (M hosts sharing a
+  `CONNECTOR_ID` enforce M × the number); `USE_SQL_SERVER=true` makes it genuinely
+  fleet-wide. Connection sharding does NOT multiply it today because
+  `ingest-item` is not shard-aware — flagged in-code for whoever adds a
+  shard-aware caller. See **docs/USAGE_CONTROLS.md**.
+
+### Added — entitlement-freshness cadence (WP-AL-4 part 2)
+
+- **`--incremental-minutes <1–10080>`** on the continuous commands, making
+  sub-hour re-ACL cadence expressible (`--incremental-hours` is an int with a
+  floor of 1 and cannot go below 60 minutes). Wins over `--incremental-hours`
+  when both are given; unused, nothing changes. The scheduler's 30 s wake cap
+  never sleeps past a due crawl, so the interval is honoured to within one loop
+  iteration; the cadence log line now formats minutes instead of printing "0h".
+- **Documented honestly** (docs/ENTITLEMENT.md): a Graph connector cannot
+  re-evaluate entitlement per grounding call — Graph trims against the ACL stored
+  on the item, with no callback into Altrata — so the sweep cadence is the *only*
+  connector-side lever, and a 5-minute cadence costs 12× the sweeps (source API
+  calls + Graph ACL writes) of an hourly one. `seat-sync` under an external
+  scheduler is documented as the right tool for minute-level freshness.
+- **Deferred, deliberately not built**: agent-layer / retrieval-time entitlement
+  checks (Copilot Studio / MCP middleware, not connector code) and a
+  redistribution marker from the feed manifest (unconfirmed that the vendor's
+  manifest carries one — reading it would invent provenance).
+
+### Added — ContentGate (chassis component CS-1)
+
+- **Prompt-injection screening of the indexed text** (`CONTENT_GATE`, default
+  **off**). Ingested content becomes Copilot grounding context, so a poisoned
+  record is an attack on every user whose query it grounds. `ContentGate` +
+  `InjectionScanner` scan the FINAL indexed text — the assembled body AND every
+  string property — for imperative overrides, role reassignment, exfiltration
+  directives, hidden-character obfuscation (zero-width / bidi, with a normalized
+  second pass) and long base64-dense blobs.
+- **Quarantine, not drop.** A hit routes the item to the EXISTING dead-letter
+  queue with reason `content-gate:<category>`, appends a **new `quarantine`
+  decision-ledger kind** (alongside `exclude` / `acl-restrict` — not overloaded),
+  stamps `contentScanStatus` on the item, increments
+  `altrata_content_gate_blocked_total` and raises the existing alert path
+  (`content_gate_blocked`). The record stays replayable; `retry-failed`
+  re-drives it and **re-runs the gate**, so draining the queue cannot silently
+  bypass a quarantine.
+- **Config-driven patterns**, compiled once, with a per-pattern match timeout
+  (`CONTENT_GATE_PATTERN_TIMEOUT_MS`, default 250 ms). A timeout **fails safe**
+  as an INCOMPLETE scan, never as "no match". `CONTENT_GATE_PATTERNS_PATH`
+  replaces the table; `config/content-gate-patterns.example.json` ships as a
+  byte-for-byte copy of the built-ins (drift pinned by a test).
+- **Deliberately asymmetric fail modes** (`CONTENT_GATE_FAIL_MODE`, or the
+  per-kind `CONTENT_GATE_TEXT_FAIL_MODE` / `CONTENT_GATE_BINARY_FAIL_MODE`):
+  text/injection fails **OPEN** (a heuristic outage must not halt a crawl — the
+  item proceeds loudly with a warning, `altrata_content_gate_incomplete_total`
+  and `contentScanStatus=incomplete`); binary/malware fails **CLOSED**.
+- **No malware scanner in this connector, deliberately.** Altrata ingests no
+  binary content: `FeedReader` accepts `.json`/`.jsonl`/`.csv` only, item content
+  type is always `text`, and there is no attachment/blob path. File integrity is
+  already the SHA-256 manifest gate (`FeedReader.ValidateChecksums`).
+  `CONTENT_GATE_ICAP_URL` is parsed for fleet parity and logged as INERT; the
+  binary fail mode still defaults to CLOSED so a future binary path starts safe.
+- **PII contract extended to verdicts**: a verdict carries the item id and a
+  fixed-vocabulary category ONLY — never matched text, a snippet or a field
+  value. A test drives a quarantine on a record loaded with names/emails/
+  net-worth figures and asserts the run log, the decision ledger, the
+  dead-letter queue file and the alert payload are all clean. The dead-letter
+  default stays `redacted`.
+- `CONTENT_GATE_MAX_SCAN_MB` (default 4) bounds per-item scan cost; beyond it the
+  scan is INCOMPLETE (never clean).
+- New schema property `contentScanStatus` (`config/graph-schema.json`), stamped
+  only when the gate is on. With `CONTENT_GATE` unset the wire output, item
+  properties and per-item cost are byte-identical to before (test-enforced).
+- 60 new tests (517 → 577).
+
 ## [1.0.0] - 2026-07-18
 
 First GA release: the full connector chassis plus the enterprise hardening

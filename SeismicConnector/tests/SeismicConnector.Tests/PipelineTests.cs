@@ -37,7 +37,12 @@ public sealed class PipelineHarness : IDisposable
         string? classificationEnforceGroup = null, int graphItemTtlDays = 0,
         IEnumerable<string>? objects = null,
         int chunkSize = 10, int graphBatchSize = 5, int batchWorkers = 2,
-        HaCoordinator? ha = null)
+        HaCoordinator? ha = null,
+        bool contentGate = false, string? contentGateIcapUrl = null,
+        string contentGateBinaryFailMode = "closed", string contentGateTextFailMode = "open",
+        long contentGateMaxScanBytes = 25L * 1024 * 1024,
+        SeismicConnector.Seismic.ClassificationRules? contentGateRules = null,
+        SeismicConnector.Security.IMalwareScanner? malwareScanner = null)
     {
         Config = TestConfig.Build(
             exclusions: exclusions, fallbackAcl: fallbackAcl, enrichUsage: enrichUsage,
@@ -45,7 +50,12 @@ public sealed class PipelineHarness : IDisposable
             classification: classification, classificationEnforceAcl: classificationEnforceAcl,
             classificationEnforceGroup: classificationEnforceGroup, graphItemTtlDays: graphItemTtlDays,
             objects: objects, chunkSize: chunkSize, graphBatchSize: graphBatchSize,
-            batchWorkers: batchWorkers);
+            batchWorkers: batchWorkers,
+            contentGate: contentGate, contentGateIcapUrl: contentGateIcapUrl,
+            contentGateBinaryFailMode: contentGateBinaryFailMode,
+            contentGateTextFailMode: contentGateTextFailMode,
+            contentGateMaxScanBytes: contentGateMaxScanBytes,
+            contentGateRules: contentGateRules);
         _ha = ha;
         _dbPath = Path.Combine(Path.GetTempPath(), "seismic-pipe-" + Guid.NewGuid().ToString("N") + ".db");
         Store = new SqliteIdentityStore(_dbPath);
@@ -75,7 +85,7 @@ public sealed class PipelineHarness : IDisposable
             OverrideAccessToken = "token",
             DelayAsync = (_, _) => Task.CompletedTask,
         };
-        Pipeline = new IngestPipeline(Config, Seismic, Graph, Store, ha: _ha);
+        Pipeline = new IngestPipeline(Config, Seismic, Graph, Store, ha: _ha, malwareScanner: malwareScanner);
     }
 
     private readonly HaCoordinator? _ha;

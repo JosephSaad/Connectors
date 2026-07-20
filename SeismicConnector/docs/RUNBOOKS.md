@@ -238,6 +238,60 @@ corruption recurs — indicates disk trouble, not app trouble.
 
 ---
 
+## decision-ledger-damaged
+
+**Symptom** `Decision ledger ...: N region(s) of DESTROYED bytes` or
+`... trailing byte(s) are DAMAGED` at startup; or `ReadFile` refusing the ledger
+with `malformed interior record` / `the final line ends in DAMAGED bytes`.
+
+**Diagnose** The ledger is deliberately *noisy* about physical damage, so first
+establish whether anything was actually lost — damage and loss are different
+things here.
+
+* Read it with `ReadFile(path, out var damage)`. `damage.GluedLines` and
+  `damage.ResyncedRegions` mean the file is mangled but every record was
+  recovered; `Verify()` on the returned chain then tells you whether the chain
+  itself is intact.
+* `Verify()` reporting a **seq gap** means damage landed inside a record and
+  destroyed it. That record is not recoverable — it is gone from the evidence,
+  and the gap is the record of its going.
+* `ReadFile` **throwing** means damage the chain could not have shown you: an
+  unparseable interior line, or a final line that is not a record — either
+  invalid bytes, or complete JSON the record contract rejects. A seq gap cannot
+  exist behind the *last* record, so for that one the refusal is the only
+  signal there is. The bytes are still on disk, which is the point.
+* **Known blind spot.** Damage confined to a record's *final* byte — the
+  closing brace — overwritten by whitespace or deleted outright is byte-for-byte
+  identical to a partially flushed write, so it is truncated as a crash-tail and
+  the record is dropped *quietly* — no gap, no refusal, no damage flag. Measured
+  post-fix over a real 265-byte final record: 4 of 67,840 single-byte
+  replacements (all 256 values at all 265 offsets), all at that one offset, plus
+  deleting that same byte; 0 of 68,096 single-byte insertions and 0 of 265
+  truncations. If a record count is one short of what you expect and every
+  signal is clean, this is the shape; reconcile against the off-box / WORM copy.
+  (A previous release put this at "2 of 265 offsets" and included the closing
+  quote of `Hash`; that figure came from a five-value replacement alphabet and
+  missed a backslash case. See CHANGELOG.)
+
+**Remediate**
+* **Copy the file before doing anything.** It is audit evidence, damaged or not,
+  and the connector will never delete it for you.
+* The connector keeps appending to a damaged ledger rather than starting a new
+  chain — a fork would be worse. New entries chain onto the last *readable*
+  record, so the file stays usable going forward.
+* Reconcile against your off-box / WORM copy to establish what the destroyed
+  records said. This is the situation that copy exists for.
+* `GluedLines` on a file with **no** crash in its history is not a crash shape:
+  it is the signature of an append-time forgery glued onto an existing line
+  (docs/THREAT_MODEL.md). Treat as a security event, not a disk event.
+
+**Escalate** L2 immediately if `Verify()` shows a seq gap or a broken link
+(evidence was destroyed), or if `GluedLines` appears without a corresponding
+crash. Recurring damage with a clean chain is disk trouble — escalate per
+state-corruption above.
+
+---
+
 ## graph-429-storm
 
 **Symptom** `throttled_429_total` climbing fast; crawls slow; logs full of

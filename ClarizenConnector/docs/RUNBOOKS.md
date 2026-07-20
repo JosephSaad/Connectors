@@ -59,6 +59,52 @@ L3 vendor support (Planview for Clarizen-side, Microsoft for Graph-side).
 - **Escalate**: repeated flapping (trip/recover cycles over hours) → L2 with
   the trip/reset counters (`circuit_breaker_trips_total`).
 
+## Crawl aborts with a Graph-schema configuration error
+
+Three symptom shapes, raised by the two subclasses of
+`GraphSchemaConfigurationException` (`UndeclaredGraphPropertyException` covers
+the first two). All three mean **connector/config defect, not bad source data**,
+and all three abort
+on purpose: they hit every record, so dead-lettering them one at a time would
+report a completed run with an empty index *and advance the sync cursor past
+data that was never indexed*. Nothing is PUT for the object in progress, and no
+property is ever silently dropped from an item that ships anyway.
+
+### `UndeclaredGraphPropertyException` — undeclared name
+
+- **Symptom**:
+  `Graph property 'X' is not declared in the connection schema ('...graph-schema.json')`.
+- **Meaning**: the code stamped a property `config/graph-schema.json` does not
+  declare; Graph would reject every item carrying it.
+- **Remediate**: add the named property to `config/graph-schema.json` (name,
+  type, `is*` flags), re-`deploy` the connection schema, and re-run. Or, if the
+  stamp was unintended, remove it. `validate-config` may not have flagged this —
+  its stamped-side enumeration is best effort (see above).
+- **Escalate**: if the property name is one nobody recognises, treat it as an
+  unreviewed code change to a stamper and go to L2.
+
+### `UndeclaredGraphPropertyException` — blank name
+
+- **Symptom**: `Graph property name '' is blank or whitespace-only.`
+- **Meaning**: almost always a `selectedFields` entry in `config/schema.json`
+  mapping a field onto an empty Graph property name. No connection schema can
+  declare it, so every record of that object type would fail.
+- **Remediate**: give the mapping a property name, or remove the field.
+  `SchemaConfig.Load` rejects this shape at startup, so reaching it at crawl time
+  means the blank name came from somewhere other than `selectedFields` — go to
+  L2 with the object type in the message.
+
+### `GraphSchemaUnavailableException` — declaration unusable
+
+- **Symptom**: `The Graph connection schema '...' could not be read` or
+  `Could not locate config/graph-schema.json`.
+- **Meaning**: the declaration is missing, is not a JSON array, is unparseable,
+  or declares no usable names. Without it the connector cannot know whether
+  *any* item is deployable.
+- **Remediate**: restore/repair `config/graph-schema.json` and run
+  `validate-config` before re-running the crawl. Check the working directory —
+  the file is probed relative to it and to the install directory.
+
 ## Dead-letter growth
 
 - **Symptom**: alert `dead_letter` (`Dead-letter depth N exceeded threshold
@@ -66,7 +112,11 @@ L3 vendor support (Planview for Clarizen-side, Microsoft for Graph-side).
   `items_failed_total` advancing.
 - **Diagnose**: `logs/failed_records_<CONNECTOR_ID>.jsonl` (or
   `dbo.DeadLetter`) — group by `error`. Typical buckets: schema mismatch
-  (`HTTP 400` naming a property → fix `config/graph-schema.json`), transform
+  (`HTTP 400` naming a property → fix `config/graph-schema.json`; run
+  `validate-config` first — it reports most such drift offline before a crawl,
+  though its stamped-side enumeration covers a fixed set of stamper call sites,
+  so a clean preflight is not proof of no drift),
+  transform
   crashes (`[transform chunk N]` → source data issue), auth (`HTTP 401/403` →
   [token / auth failure](#token--auth-failure)). `correlation_id` ties each
   record to its crawl cycle in the logs. In `DEADLETTER_PAYLOAD_MODE=redacted`

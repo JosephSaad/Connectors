@@ -137,14 +137,32 @@ public sealed class SensitivityClassifier
             ? null
             : Enum.TryParse<SensitivityLabel>(raw.Trim(), ignoreCase: true, out var v) ? v : null;
 
-    /// <summary>The text a classifier scans: content body + all string / string[]
-    /// property values (excluding the taxonomy properties themselves).</summary>
-    internal static string ScanText(ExternalItem item)
+    /// <summary>
+    /// The text a scanner sees: content body + all string / string[] property
+    /// values.
+    /// <para>
+    /// <paramref name="includeTaxonomyProperties"/> is the ONE place the two
+    /// scanners legitimately differ, and it is a difference in what they are
+    /// asking, not a drift:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>The CLASSIFIER (default, false) excludes <see cref="LabelProperty"/>
+    /// and <see cref="CategoriesProperty"/> because those are its OWN outputs.
+    /// Feeding them back in would let the string "PII" in DetectedCategories
+    /// re-detect as PII on the next pass.</item>
+    /// <item>The CONTENT GATE (true) includes them, because it is not asking
+    /// "what did I derive?" but "what text reaches the index?". A schema can map
+    /// a source field onto one of those reserved names, and the value then lands
+    /// in Copilot grounding context like any other property — excluding it would
+    /// be a gate bypass, which is exactly what it was.</item>
+    /// </list>
+    /// </summary>
+    internal static string ScanText(ExternalItem item, bool includeTaxonomyProperties = false)
     {
         var sb = new StringBuilder(item.Content);
         foreach (var (name, value) in item.Properties)
         {
-            if (name is LabelProperty or CategoriesProperty)
+            if (!includeTaxonomyProperties && name is LabelProperty or CategoriesProperty)
                 continue;
             switch (value)
             {

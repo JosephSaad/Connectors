@@ -45,6 +45,20 @@ public sealed class SensitivityClassifier
     public const string LabelProperty = "SensitivityLabel";
     public const string CategoriesProperty = "DetectedCategories";
 
+    /// <summary>
+    /// This emitter's contribution to <see cref="AlwaysEmittedProperties"/>:
+    /// the property names <see cref="Classify"/> writes onto every item it sees,
+    /// independently of <c>selectedFields</c>. Classify runs AFTER
+    /// <c>ItemConverter.Convert</c>, so a selectedFields column mapped onto one
+    /// of these has its value silently replaced on every record; the config
+    /// validation rejects both directions off this list.
+    /// </summary>
+    public static readonly IReadOnlyList<string> AlwaysEmittedPropertyNames = new[]
+    {
+        LabelProperty,
+        CategoriesProperty,
+    };
+
     /// <summary>Categories that force the top (Restricted) label.</summary>
     internal static readonly HashSet<string> RestrictedCategories =
         new(StringComparer.Ordinal) { "PII", "PCI", "Secret" };

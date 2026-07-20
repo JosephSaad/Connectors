@@ -45,6 +45,18 @@ namespace SalesforceCopilotConnector.Commands;
 
 public static class ValidateConfig
 {
+    /// <summary>
+    /// The standard Salesforce COMPOUND address fields. None of them carries
+    /// <c>FieldPermissions</c> rows — FLS lives on the components — so selecting one
+    /// means the connector can never field-level-security check its value and will
+    /// index nothing for it. See docs/FLS.md.
+    /// </summary>
+    internal static readonly HashSet<string> KnownCompoundFields = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "BillingAddress", "ShippingAddress", "MailingAddress", "OtherAddress", "Address",
+        "PersonMailingAddress", "PersonOtherAddress",
+    };
+
     // ── Test hooks ───────────────────────────────────────────────────────────
     // Mirror the monkeypatch-style seams the other commands expose so tests can
     // run this command hermetically (no real network, no real Salesforce/Graph).
@@ -336,18 +348,61 @@ public static class ValidateConfig
             {
                 var objectsWithoutFields = 0;
                 var totalSelectedFields = 0;
+                var selectedCompounds = new List<string>();
+                var missingComponents = new List<string>();
                 foreach (var entry in objectList)
                 {
                     if (entry is not JsonObject obj)
                         continue;
+                    var objectName = obj["objectName"]?.GetValue<string>() ?? "(unnamed)";
                     if (obj["selectedFields"] is JsonObject fields && fields.Count > 0)
+                    {
                         totalSelectedFields += fields.Count;
+
+                        // A COMPOUND carries no FieldPermissions rows of its own, so its
+                        // value can never be FLS-checked. Selecting one is a config error:
+                        // the connector fails closed and indexes nothing for it. Name the
+                        // components in selectedFields and declare an addressFields group.
+                        foreach (var field in fields.Select(f => f.Key))
+                        {
+                            if (KnownCompoundFields.Contains(field))
+                                selectedCompounds.Add($"{objectName}.{field}");
+                        }
+
+                        // Every component an addressFields group names must actually be
+                        // selected, or that slot is silently absent from every address.
+                        if (obj["addressFields"] is JsonObject groups)
+                        {
+                            foreach (var group in groups)
+                            {
+                                if (group.Value?["components"] is not JsonObject components)
+                                    continue;
+                                foreach (var component in components)
+                                {
+                                    var sfField = component.Value?.GetValue<string>();
+                                    if (!string.IsNullOrEmpty(sfField) && !fields.ContainsKey(sfField))
+                                        missingComponents.Add($"{objectName}.{group.Key}.{component.Key} → {sfField}");
+                                }
+                            }
+                        }
+                    }
                     else
+                    {
                         objectsWithoutFields++;
+                    }
                 }
                 report.Pass($"schema.json parsed — {objectList.Count} object(s), {totalSelectedFields} total selected field(s)");
                 if (objectsWithoutFields > 0)
                     report.WarnOrFail($"schema.json: {objectsWithoutFields} object(s) declare no selectedFields");
+                if (selectedCompounds.Count > 0)
+                    report.WarnOrFail(
+                        "schema.json selects compound field(s) that carry no FieldPermissions and are "
+                        + "therefore not indexable — select their components and declare an addressFields "
+                        + $"group instead: {string.Join(", ", selectedCompounds)}");
+                if (missingComponents.Count > 0)
+                    report.WarnOrFail(
+                        "schema.json: addressFields names component(s) that are not in selectedFields, so "
+                        + $"they will be absent from every assembled address: {string.Join(", ", missingComponents)}");
             }
         }
         catch (FileNotFoundException)

@@ -148,6 +148,65 @@ withdrawn person drops from everyone's counts). Path properties are metadata
 only and never widen ACLs; items stay seat-only. See
 **docs/RELATIONSHIP_PATHS.md**.
 
+## Usage controls — enforceable ceilings (`ALTRATA_MAX_LOOKUPS_PER_DAY`)
+
+Altrata lookups are billable per call. The connector already *counted* them
+(`altrata_api_billable_lookups_total`) and already *paced* them
+(`ALTRATA_API_CALLS_PER_MINUTE`) — but neither can decline: the counter is a
+tally, and the rate limiter only makes the caller wait. A runaway workload was
+billable without bound.
+
+`ALTRATA_MAX_LOOKUPS_PER_DAY` (calendar UTC day) and
+`ALTRATA_MAX_LOOKUPS_PER_WINDOW` + `ALTRATA_USAGE_WINDOW_HOURS` (rolling window)
+add the ceiling that **refuses**. A refused lookup is fail-closed: no OAuth
+token, no HTTP request, nothing billed, and a PII-safe `deny` entry in the audit
+log plus `altrata_usage_denied_total`. The check runs **after** the purpose veto
+(so a disallowed purpose cannot burn budget it was never entitled to spend) and
+**before** the rate limiter, token fetch and HTTP call.
+
+**Default OFF.** Both unset = no ceiling = byte-identical to the previous
+behaviour; no ledger key is even written.
+
+**Scope matters before you pick a number**: the counter lives in the state store,
+so on the default file backend the ceiling is enforced **per host** — *M* hosts
+sharing a `CONNECTOR_ID` enforce *M* × the number. `USE_SQL_SERVER=true` makes it
+genuinely fleet-wide (shared `dbo.altrata_kv`, reserved under `UPDLOCK/HOLDLOCK`).
+Connection sharding does not multiply it today, because `ingest-item` is not
+shard-aware. Full details in **docs/USAGE_CONTROLS.md**.
+
+## Content gate — prompt-injection screening (`CONTENT_GATE`)
+
+Indexed content becomes Copilot grounding context, so a poisoned record attacks
+every user whose query it grounds. `CONTENT_GATE=true` screens the FINAL indexed
+text (assembled body + string properties) for imperative overrides, role
+reassignment, exfiltration directives, hidden-character obfuscation and encoded
+blobs, then **quarantines** — never silently drops — a hit: the item goes to the
+existing dead-letter queue with reason `content-gate:<category>`, a `quarantine`
+entry lands in the decision ledger, `contentScanStatus` is stamped,
+`altrata_content_gate_blocked_total` increments and the `content_gate_blocked`
+alert fires. Quarantined items stay replayable through `retry-failed` (which
+re-runs the gate, so draining the queue cannot silently bypass a quarantine).
+
+**Default OFF.** With `CONTENT_GATE` unset the wire output and per-item cost are
+byte-identical to a build without the gate — no scanner is constructed.
+
+**Fail modes are deliberately asymmetric**: text/injection fails **open** (a
+regex heuristic outage must not stop a crawl — the item proceeds loudly with
+`contentScanStatus=incomplete`), binary/malware fails **closed**. A regex
+timeout or an oversize field is reported as an INCOMPLETE scan, never as clean.
+
+**No malware scanner here, by design**: this connector ingests no binary content
+(`FeedReader` accepts `.json`/`.jsonl`/`.csv` only; content type is always
+`text`; no attachment path). File integrity is the SHA-256 manifest gate.
+`CONTENT_GATE_ICAP_URL` is accepted for fleet parity and logged as inert.
+
+Patterns are data: `config/content-gate-patterns.example.json` is a
+byte-for-byte copy of the built-in table; point `CONTENT_GATE_PATTERNS_PATH` at
+an edited copy to replace it. Verdicts carry the item id and a fixed category
+ONLY — never matched text — so no personal data reaches logs, metrics, the
+dead-letter reason or the ledger. Details in **SECURITY.md** and
+**docs/THREAT_MODEL.md**; operator procedures in **docs/RUNBOOKS.md**.
+
 ## Running as a Windows service
 
 ```powershell
@@ -276,7 +335,7 @@ perf-smoked CI.
 ## Tests
 
 ```bash
-dotnet test        # 465 tests: CLI parsing, checkpoint resume, dead-letter
+dotnet test        # 730 tests: CLI parsing, checkpoint resume, dead-letter
                    # (incl. 16-writer concurrency corruption stress),
                    # retry/backoff math (Retry-After honoured exactly + 60s clamp,
                    # ±20% jitter), $batch pipeline (429 ladder, adaptive
@@ -287,7 +346,10 @@ dotnet test        # 465 tests: CLI parsing, checkpoint resume, dead-letter
                    # failure leaves hash uncommitted), HA close-with-failed-claims,
                    # purge dry-run, billable-cost persistence, SQLite identity
                    # store, rate limiter, offline SQL DDL validation
-                   # (ScriptDom + DacFx), crawl engine end-to-end (no network)
+                   # (ScriptDom + DacFx), crawl engine end-to-end (no network),
+                   # content gate (injection corpus + benign controls, quarantine
+                   # round-trip, decision-ledger kind, fail-mode matrix,
+                   # timeout-fails-safe, no-PII-in-verdict, defaults-off parity)
 ```
 
 CI (`.github/workflows/ci.yml`) runs the suite on ubuntu **and windows**

@@ -52,32 +52,105 @@ public sealed class ContentClassifier
         Path.Combine(Directory.GetCurrentDirectory(), "config", "classification.json");
 
     /// <summary>Load categories from config/classification.json. Invalid patterns
-    /// are skipped with the offending category still usable for its valid ones.</summary>
+    /// are skipped with the offending category still usable for its valid ones.
+    /// <para>
+    /// Throws <see cref="InvalidDataException"/> — never a raw
+    /// <c>InvalidOperationException</c>/<c>JsonException</c> — for a file this
+    /// loader cannot honour, naming the file and the offending JSON path, so
+    /// <c>validate-config</c> can report it in preflight instead of the crawl
+    /// dying on a stack that names neither.
+    /// </para></summary>
     public static ContentClassifier Load(string? path = null)
     {
-        var json = File.ReadAllText(path ?? DefaultPath);
-        return FromJson(json);
+        var file = path ?? DefaultPath;
+        string json;
+        try
+        {
+            json = File.ReadAllText(file);
+        }
+        catch (Exception exc) when (exc is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidDataException(
+                $"Classification config '{file}' could not be read: {exc.Message}. This file is "
+                + "required whenever CLASSIFICATION=true.");
+        }
+        return FromJson(json, file);
     }
 
-    internal static ContentClassifier FromJson(string json)
+    internal static ContentClassifier FromJson(string json, string path = "classification.json")
     {
-        using var doc = JsonDocument.Parse(json);
-        var categories = new List<ClassificationCategory>();
-        if (doc.RootElement.TryGetProperty("categories", out var cats))
+        JsonDocument doc;
+        try
         {
+            doc = JsonDocument.Parse(json);
+        }
+        catch (JsonException exc)
+        {
+            throw new InvalidDataException(
+                $"Classification config '{path}' could not be read"
+                + (string.IsNullOrEmpty(exc.Path) ? string.Empty : $" at {exc.Path}")
+                + $": {exc.Message}",
+                exc);
+        }
+
+        using (doc)
+        {
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                throw WrongType(path, "$", "an object with a \"categories\" array",
+                    doc.RootElement.ValueKind);
+            }
+
+            var categories = new List<ClassificationCategory>();
+            // Absent, or an explicit null: the house null-is-empty semantics
+            // (docs/CONFIG_NULL_SEMANTICS.md) — no categories. Whether an EMPTY
+            // category set is acceptable is then judged exactly where schema.json's
+            // empty objectList is judged: by the validator, not by a crash here.
+            if (!doc.RootElement.TryGetProperty("categories", out var cats)
+                || cats.ValueKind == JsonValueKind.Null)
+            {
+                return new ContentClassifier(categories);
+            }
+            if (cats.ValueKind != JsonValueKind.Array)
+                throw WrongType(path, "$.categories", "an array of category objects", cats.ValueKind);
+
+            var index = -1;
             foreach (var cat in cats.EnumerateArray())
             {
-                var name = cat.TryGetProperty("name", out var n) ? n.GetString() : null;
+                index++;
+                var catPath = $"$.categories[{index}]";
+                // A null ENTRY of a list of objects has no meaningful empty form —
+                // same rule, and the same reasoning, as ConfigNullNormalizer's.
+                if (cat.ValueKind == JsonValueKind.Null)
+                    throw NullElement(path, catPath);
+                if (cat.ValueKind != JsonValueKind.Object)
+                    throw WrongType(path, catPath, "a category object", cat.ValueKind);
+
+                var name = StringOrNull(path, catPath, "name", cat);
                 if (string.IsNullOrWhiteSpace(name))
                     continue;
                 var luhn = cat.TryGetProperty("luhn", out var l) && l.ValueKind == JsonValueKind.True;
                 var patterns = new List<(string, Regex)>();
-                if (cat.TryGetProperty("patterns", out var pats))
+                if (cat.TryGetProperty("patterns", out var pats)
+                    && pats.ValueKind != JsonValueKind.Null)
                 {
+                    if (pats.ValueKind != JsonValueKind.Array)
+                    {
+                        throw WrongType(path, $"{catPath}.patterns",
+                            "an array of pattern objects", pats.ValueKind);
+                    }
+                    var pIndex = -1;
                     foreach (var p in pats.EnumerateArray())
                     {
-                        var pName = p.TryGetProperty("name", out var pn) ? pn.GetString() : null;
-                        var regex = p.TryGetProperty("regex", out var pr) ? pr.GetString() : null;
+                        pIndex++;
+                        var pPath = $"{catPath}.patterns[{pIndex}]";
+                        if (p.ValueKind == JsonValueKind.Null)
+                            throw NullElement(path, pPath);
+                        if (p.ValueKind != JsonValueKind.Object)
+                            throw WrongType(path, pPath, "a pattern object", p.ValueKind);
+
+                        var pName = StringOrNull(path, pPath, "name", p);
+                        var regex = StringOrNull(path, pPath, "regex", p);
                         if (string.IsNullOrWhiteSpace(regex))
                             continue;
                         try
@@ -100,9 +173,32 @@ public sealed class ContentClassifier
                 if (patterns.Count > 0)
                     categories.Add(new ClassificationCategory { Name = name!, Luhn = luhn, Patterns = patterns });
             }
+            return new ContentClassifier(categories);
         }
-        return new ContentClassifier(categories);
     }
+
+    /// <summary>Read a string member. Absent or null reads as absent (null-is-empty);
+    /// a member of any OTHER non-string kind is a load error naming the path,
+    /// because silently ignoring it would drop a pattern the operator wrote.</summary>
+    private static string? StringOrNull(string path, string jsonPath, string member, JsonElement owner)
+    {
+        if (!owner.TryGetProperty(member, out var value) || value.ValueKind == JsonValueKind.Null)
+            return null;
+        if (value.ValueKind != JsonValueKind.String)
+            throw WrongType(path, $"{jsonPath}.{member}", "a string", value.ValueKind);
+        return value.GetString();
+    }
+
+    private static InvalidDataException WrongType(
+        string path, string jsonPath, string expected, JsonValueKind actual) =>
+        new($"Classification config '{path}': {jsonPath} must be {expected}, but it is "
+            + $"{actual.ToString().ToLowerInvariant()}. Fix the file and re-run; "
+            + "'validate-config --strict' reports every problem in one pass.");
+
+    private static InvalidDataException NullElement(string path, string jsonPath) =>
+        new($"Classification config '{path}': {jsonPath} is null. Elsewhere in this file a JSON "
+            + "null is read as that key's EMPTY value, but a null entry in a list of objects has no "
+            + "meaningful empty form. Remove the entry, or fill it in.");
 
     /// <summary>Return the set of category names detected in <paramref name="text"/>.
     /// A Luhn category only matches when a candidate digit run passes the Luhn

@@ -49,6 +49,26 @@ public sealed record AppConfig
     public string? AltrataClientSecret { get; init; }
     public int AltrataApiCallsPerMinute { get; init; } = 60;
 
+    /// <summary>ALTRATA_MAX_LOOKUPS_PER_DAY (default unset = 0 = NO CEILING,
+    /// behaviour byte-identical to before WP-AL-4): maximum billable enrichment
+    /// lookups per calendar UTC day. Unlike ALTRATA_API_CALLS_PER_MINUTE — which
+    /// only makes a caller WAIT — this REFUSES the lookup fail-closed once
+    /// reached. See Altrata/UsageBudget.cs, including the scope note: on the file
+    /// backend the ceiling is per host, and only USE_SQL_SERVER=true makes it
+    /// fleet-wide.</summary>
+    public int AltrataMaxLookupsPerDay { get; init; }
+
+    /// <summary>ALTRATA_MAX_LOOKUPS_PER_WINDOW (default unset = 0 = no ceiling):
+    /// maximum billable lookups in the trailing
+    /// <see cref="AltrataUsageWindowHours"/>-hour ROLLING window. Complements the
+    /// calendar-day ceiling by capping bursts that would otherwise all land just
+    /// after a midnight reset. Both may be set; a lookup must clear both.</summary>
+    public int AltrataMaxLookupsPerWindow { get; init; }
+
+    /// <summary>ALTRATA_USAGE_WINDOW_HOURS (default 24, range 1-168): length of
+    /// the rolling window. Inert unless ALTRATA_MAX_LOOKUPS_PER_WINDOW is set.</summary>
+    public int AltrataUsageWindowHours { get; init; } = 24;
+
     // ---- Entity resolution ------------------------------------------------------
     /// <summary>ENTITY_FUZZY_MATCHING (default false): enable the scored fuzzy
     /// tier beneath the deterministic email / name+employer rules.</summary>
@@ -224,6 +244,13 @@ public sealed record AppConfig
             AltrataClientId = Optional("ALTRATA_CLIENT_ID"),
             AltrataClientSecret = secrets.Get("SECRET_ALTRATA_CLIENT_SECRET"),
             AltrataApiCallsPerMinute = Math.Max(1, OptionalInt("ALTRATA_API_CALLS_PER_MINUTE", 60)),
+            // WP-AL-4 usage ceilings. NOT clamped with Math.Max: 0/unset must mean
+            // "no ceiling" and a NEGATIVE value must be an error, not silently
+            // rounded into one — an operator who typed -1 has not configured a
+            // ceiling and must be told so rather than left unprotected.
+            AltrataMaxLookupsPerDay = OptionalInt(Altrata.UsageBudgetOptions.MaxPerDayEnvVar, 0),
+            AltrataMaxLookupsPerWindow = OptionalInt(Altrata.UsageBudgetOptions.MaxPerWindowEnvVar, 0),
+            AltrataUsageWindowHours = OptionalInt(Altrata.UsageBudgetOptions.WindowHoursEnvVar, 24),
 
             EntityFuzzyMatching = EnvFlags.IsTrue("ENTITY_FUZZY_MATCHING"),
             EntityMatchThreshold = OptionalDouble("ENTITY_MATCH_THRESHOLD", 0.85),
@@ -282,6 +309,12 @@ public sealed record AppConfig
             errors.Add("CIRCUIT_BREAKER_HALFOPEN_TRIALS must be >= 1");
         if (config.GraphItemTtlDays < 0)
             errors.Add("GRAPH_ITEM_TTL_DAYS must be >= 0 (0 = disabled)");
+        if (config.AltrataMaxLookupsPerDay < 0)
+            errors.Add($"{Altrata.UsageBudgetOptions.MaxPerDayEnvVar} must be >= 0 (0 = unset = no ceiling)");
+        if (config.AltrataMaxLookupsPerWindow < 0)
+            errors.Add($"{Altrata.UsageBudgetOptions.MaxPerWindowEnvVar} must be >= 0 (0 = unset = no ceiling)");
+        if (config.AltrataUsageWindowHours is < 1 or > 168)
+            errors.Add($"{Altrata.UsageBudgetOptions.WindowHoursEnvVar} must be between 1 and 168 (default 24)");
         if (config.ClassificationEnforceAcl && string.IsNullOrWhiteSpace(config.ClassificationEnforceGroupId))
             errors.Add("CLASSIFICATION_ENFORCE_ACL=true requires CLASSIFICATION_ENFORCE_GROUP_ID (the Entra group Restricted items are locked to)");
         if (config.ClassificationEnforceAcl && !config.Classification)
@@ -290,6 +323,26 @@ public sealed record AppConfig
         // fails validate-config / startup, not mid-crawl. DeadLetterPolicy.Mode
         // throws a ConfigurationError naming the setting for any unknown value.
         try { _ = State.DeadLetterPolicy.Mode; }
+        catch (ConfigurationError exc) { errors.Add(exc.Message); }
+
+        // ContentGate (CS-1): same discipline. The gate itself is read live from
+        // the environment (Altrata.ContentGateOptions.FromEnv), but a bad fail
+        // mode / size / pattern file must fail validate-config, not mid-crawl.
+        // Validated even when CONTENT_GATE is off so a typo cannot lie dormant.
+        try
+        {
+            var gate = Altrata.ContentGateOptions.FromEnv();
+            if (gate.Enabled && gate.PatternsPath != null)
+                _ = Altrata.InjectionScanner.FromFile(gate.PatternsPath, gate.PatternTimeout);
+            if (gate.Enabled && gate.IcapUrl != null)
+            {
+                // Honest about the scope reduction rather than silently ignoring it.
+                Infrastructure.Logging.GetLogger("altrata_connector.config").Info(
+                    $"{Altrata.ContentGateOptions.IcapUrlEnvVar} is set but INERT in this connector: " +
+                    "Altrata ingests no binary content (FeedReader accepts .json/.jsonl/.csv only), " +
+                    "so there is no malware scanner. File integrity is the SHA-256 manifest gate.");
+            }
+        }
         catch (ConfigurationError exc) { errors.Add(exc.Message); }
 
         if (errors.Count > 0)

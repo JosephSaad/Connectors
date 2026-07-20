@@ -117,7 +117,52 @@ internal static class Runtime
         return new WebHdfsClient(config, breaker: breaker ?? Breakers.Hdfs);
     }
 
-    /// <summary>Standard command bootstrap. Throws ArgumentException on bad config.</summary>
+    /// <summary>
+    /// Load one config FILE on the crawl path, turning any config-shaped failure
+    /// into a clean, actionable CLI error instead of a raw stack trace.
+    /// <para>
+    /// Program's final backstop prints the whole exception, stack included. That
+    /// is right for a bug and wrong for a typo in schema.json: the operator's
+    /// mistake is in a file they can edit, the loaders already produce a sentence
+    /// that says exactly what and where, and burying it under a stack trains
+    /// people to ignore it. Config-shaped failures therefore become a
+    /// <see cref="CliExit"/> (message only, exit 2 — the same code the CLI uses
+    /// for every other bad-input error), logged first so the run log keeps the
+    /// full record. Anything NOT config-shaped still escapes to the backstop with
+    /// its stack, because that IS a bug.
+    /// </para>
+    /// </summary>
+    private static T LoadConfigFile<T>(string label, string path, Func<string, T> load)
+    {
+        try
+        {
+            return load(path);
+        }
+        catch (Exception exc) when (
+            exc is InvalidDataException
+                or System.Text.Json.JsonException
+                or ArgumentException
+                or FormatException
+                or IOException
+                or UnauthorizedAccessException)
+        {
+            // Message only, deliberately no stack: the loaders' messages ARE the
+            // diagnosis (they name the object, the key and the fix), and the
+            // frames would only point at the validator that threw. Error-level
+            // console output is mirrored to stderr, so a stack here would put
+            // back exactly the noise this guard exists to remove.
+            Logger.Error($"Config file '{path}' ({label}) could not be loaded: {exc.Message}");
+            throw new CliExit(
+                2,
+                $"error: {label} is invalid ({path}):{Environment.NewLine}  {exc.Message}"
+                + $"{Environment.NewLine}Fix the file and re-run; "
+                + "'validate-config --strict' reports every problem in one pass.");
+        }
+    }
+
+    /// <summary>Standard command bootstrap. Throws ArgumentException on bad
+    /// AppConfig/env, and <see cref="CliExit"/> (code 2) on an invalid config
+    /// FILE.</summary>
     public static RuntimeContext Create(ParsedArgs args, string runPrefix)
     {
         EnvLoader.LoadLayered();
@@ -141,9 +186,11 @@ internal static class Runtime
 
         var config = AppConfig.Load();
         Alerting.ConnectorId = config.ConnectorId;
-        var schema = SchemaConfig.Load(SchemaConfig.DefaultPath);
-        var filters = FilterSet.Load(
-            Environment.GetEnvironmentVariable("BDH_FILTERS_PATH") ?? FilterSet.DefaultPath);
+        var schema = LoadConfigFile("schema.json", SchemaConfig.DefaultPath, SchemaConfig.Load);
+        var filters = LoadConfigFile(
+            "filters.json",
+            Environment.GetEnvironmentVariable("BDH_FILTERS_PATH") ?? FilterSet.DefaultPath,
+            FilterSet.Load);
 
         // Distributed tracing: registers an OTLP exporter only when
         // OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise a cheap no-op.

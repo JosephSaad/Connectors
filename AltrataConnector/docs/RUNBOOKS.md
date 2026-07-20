@@ -63,6 +63,8 @@ webhook alert; crawl summaries show `dead-lettered N`.
 2. Read the queue (file mode: `logs/failed_records_{CONNECTOR_ID}.jsonl`; SQL:
    `dbo.altrata_deadletter`). Group by `Error`:
    - `HTTP 429 … after all retries` → throughput, see [429 storm](#429-storm)
+   - `content-gate:<category>` → the [content gate](#content-gate-quarantine)
+     quarantined the item; it is NOT a Graph failure
    - `HTTP 4xx` schema/property errors → schema drift; fix `config/graph-schema.json`
    - `erasure-race withdrawal` / `DeliveryId == "erasure"` → DELETEs completing
      an erasure — replay these FIRST (they finish a DSAR)
@@ -94,6 +96,70 @@ the Graph schema; repeated 5xx on specific items → Microsoft support with the
 item ids and correlation ids from the records.
 
 ---
+
+## Content-gate quarantine
+
+**Symptom** — `content_gate_blocked` webhook alerts;
+`altrata_content_gate_blocked_total` rising; dead-letter records whose `Error`
+is `content-gate:<category>`; crawl log lines `item '<id>' QUARANTINED`.
+
+**What it means** — `CONTENT_GATE=true` and the injection scanner matched the
+item's indexed text. The item was NOT indexed. It is a heuristic triage signal,
+not proof of an attack. Categories: `injection.imperative-override`,
+`injection.role-reassignment`, `injection.exfiltration`,
+`injection.hidden-text`, `injection.encoded-blob`, `scan-incomplete`.
+
+**Diagnose**
+
+1. Get the item ids from the alerts, the dead-letter queue, or the decision
+   ledger (`logs/decision_ledger_{CONNECTOR_ID}.jsonl`, `Decision=quarantine`).
+   The verdict deliberately does NOT tell you what matched — it carries a
+   category only, because the matched text would be PII.
+2. Read the SOURCE record in the feed delivery (`FEED_PATH/<deliveryId>/`) to
+   see the actual content. That file is the only place the text lives.
+3. Decide: genuine injection (or vendor data poisoning) vs false positive.
+
+**Act — genuine injection**
+
+- Raise it with the vendor; the record stays quarantined and out of the index.
+- Leave it queued (it is the evidence) or retire it with
+  `retry-failed --retire-unreplayable` once it is recorded elsewhere.
+
+**Act — false positive**
+
+- Preferred: narrow the pattern. Copy
+  `config/content-gate-patterns.example.json`, edit, point
+  `CONTENT_GATE_PATTERNS_PATH` at it, re-run `validate-config`, then
+  `retry-failed` — the gate re-runs and the item now passes.
+- Blunt option: `CONTENT_GATE=false`, `retry-failed`, re-enable. Note this
+  re-drives EVERY quarantined item in the queue, not just this one.
+- `retry-failed` deliberately re-runs the gate, so simply draining the queue
+  cannot silently bypass a quarantine.
+
+## Content scan incomplete (fail-open gap)
+
+**Symptom** — `altrata_content_gate_incomplete_total` rising; warnings
+`scan INCOMPLETE ... fail-open`; items in the index carrying
+`contentScanStatus=incomplete`.
+
+**What it means** — the scan could not COMPLETE (scanner unavailable, a regex
+match exceeded `CONTENT_GATE_PATTERN_TIMEOUT_MS`, or the text exceeded
+`CONTENT_GATE_MAX_SCAN_MB`) and the shipped text fail mode is `open`, so the
+item was indexed UNSCANNED. This is a real screening gap, on purpose: halting a
+crawl on a heuristic outage is worse. It is never silent.
+
+**Act**
+
+1. Find the cause in the log: `detail: scanner-unavailable` /
+   `detail: scan-timeout` / `detail: scan-truncated`.
+2. `scan-truncated` → raise `CONTENT_GATE_MAX_SCAN_MB` (the feed has unusually
+   large free-text fields) and re-crawl.
+3. `scan-timeout` → a custom pattern is backtracking; simplify it or raise
+   `CONTENT_GATE_PATTERN_TIMEOUT_MS`. Built-in patterns are bounded.
+4. To close the gap while you fix it: `CONTENT_GATE_FAIL_MODE=closed`
+   quarantines every incomplete scan instead. Expect dead-letter growth — you
+   have traded availability for coverage.
+5. Re-crawl (PUTs are idempotent) to re-screen items stamped `incomplete`.
 
 ## Feed manifest mismatch
 

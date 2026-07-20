@@ -96,6 +96,7 @@
         <File Id="SchemaJsonFile" Source="$(var.ProjectRoot)\config\schema.json" KeyPath="yes" />
         <File Id="GraphSchemaJsonFile" Source="$(var.ProjectRoot)\config\graph-schema.json" />
         <File Id="ClassificationJsonFile" Source="$(var.ProjectRoot)\config\classification.json" />
+        <File Id="ContentGateJsonFile" Source="$(var.ProjectRoot)\config\content-gate.json" />
       </Component>
       <Component Id="EnvExample" Directory="EnvFolder" Guid="A6067C9F-DBCD-4B2D-B5C2-09A9BF4E3A87">
         <!-- Template only — real env files (and secrets) are never packaged. -->

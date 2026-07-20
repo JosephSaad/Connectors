@@ -56,6 +56,44 @@ public class ValidateConfigTests : IDisposable
         return path;
     }
 
+    private const string AclSchemaGroupId = "11111111-2222-3333-4444-555555555555";
+
+    /// <summary>A one-object schema with a chosen aclMode / attestation, for the
+    /// coarse-ACL posture checks (WP-HD-2).
+    /// <para>
+    /// <paramref name="acknowledged"/>=true emits a BOUND attestation — the
+    /// sign-off plus the posture token it covers (coarseAclAcknowledgedFor).
+    /// That binding is what an attestation IS: an unbound bool records only that
+    /// someone signed, so it survives a later widening of the very exposure it
+    /// was meant to cover and is no longer accepted (see
+    /// RestrictionBypassProbeTests).
+    /// </para></summary>
+    private string AclSchema(string aclMode, bool? acknowledged = null, string name = "acl-schema")
+    {
+        var group = aclMode == "group"
+            ? $"\"aclGroupId\": \"{AclSchemaGroupId}\", "
+            : string.Empty;
+        var postureToken = aclMode == "group" ? $"group:{AclSchemaGroupId}" : aclMode;
+        var ack = acknowledged is null
+            ? string.Empty
+            : $"\"coarseAclAcknowledged\": {(acknowledged.Value ? "true" : "false")}, "
+              + (acknowledged.Value ? $"\"coarseAclAcknowledgedFor\": \"{postureToken}\", " : string.Empty);
+        return Write($"{name}-{aclMode}-{acknowledged?.ToString() ?? "unset"}.json", $$"""
+            {"objectList": [{
+                "objectName": "Contact",
+                "displayName": "Contact",
+                "aclMode": "{{aclMode}}", {{group}}{{ack}}
+                "selectedFields": {"Name": "Title", "Description": "_bdh_Description"}
+            }]}
+            """);
+    }
+
+    /// <summary>filters.json in which Contact is NOT effectively filtered but is
+    /// exempt from the fail-closed scale guard — isolates the coarse-ACL finding
+    /// from the unrelated full-scan finding.</summary>
+    private string UnfilteredExemptFiltersPath => Write("unfiltered-exempt-filters.json",
+        """{"objects": {}, "fullScanAllowed": ["Contact"]}""");
+
     private static string RepoConfig(string file) =>
         Path.Combine(AppContext.BaseDirectory, "config", file);
 
@@ -266,6 +304,184 @@ public class ValidateConfigTests : IDisposable
         Assert.Empty(result.Warnings);
     }
 
+    // ── coarse-ACL posture (WP-HD-2, INTERIM control pending Ranger) ─────────
+    //
+    // aclMode 'public' grants everyoneExceptGuests and 'group' grants ONE flat
+    // Entra group — neither can express the row/column restrictions the source
+    // enforces. The posture must be VISIBLE (always warned) and explicitly
+    // ATTESTED (coarseAclAcknowledged) before --strict will pass.
+
+    [Theory]
+    [InlineData("group")]
+    [InlineData("public")]
+    public void CoarseAclMode_Warns(string aclMode)
+    {
+        using var scope = GoodEnv();
+        var result = ValidateConfig.ValidateCore(
+            AclSchema(aclMode), GraphSchemaPath, FiltersPath);
+
+        Assert.Contains(result.Warnings,
+            w => w.Contains("Contact") && w.Contains($"coarse aclMode '{aclMode}'"));
+    }
+
+    [Fact]
+    public void CoarseAclWarning_NamesTheEffectiveFilteredState()
+    {
+        using var scope = GoodEnv();
+        // FiltersPath gives Contact a pruning dt predicate → effectively filtered.
+        var filtered = ValidateConfig.ValidateCore(
+            AclSchema("public"), GraphSchemaPath, FiltersPath);
+        Assert.Contains(filtered.Warnings, w => w.Contains("is effectively filtered"));
+
+        var unfiltered = ValidateConfig.ValidateCore(
+            AclSchema("public"), GraphSchemaPath, UnfilteredExemptFiltersPath);
+        Assert.Contains(unfiltered.Warnings, w => w.Contains("is ALSO NOT effectively filtered"));
+    }
+
+    // The coarse+unfiltered case is the worst case: the whole object (150M+ rows)
+    // is exposed at a coarse grant. Its message must be materially stronger than
+    // the coarse+filtered one, not merely a flipped adjective.
+    [Fact]
+    public void CoarseAclUnfiltered_MessageIsMateriallyStronger()
+    {
+        using var scope = GoodEnv();
+        var filtered = ValidateConfig.ValidateCore(
+            AclSchema("public"), GraphSchemaPath, FiltersPath)
+            .Warnings.Single(w => w.Contains("coarse aclMode"));
+        var unfiltered = ValidateConfig.ValidateCore(
+            AclSchema("public"), GraphSchemaPath, UnfilteredExemptFiltersPath)
+            .Warnings.Single(w => w.Contains("coarse aclMode"));
+
+        Assert.Contains("WORST CASE", unfiltered);
+        Assert.DoesNotContain("WORST CASE", filtered);
+        Assert.Contains("ENTIRE object", unfiltered);
+        Assert.True(unfiltered.Length > filtered.Length,
+            "the coarse+unfiltered message must say strictly more than coarse+filtered");
+    }
+
+    [Theory]
+    [InlineData("group")]
+    [InlineData("public")]
+    public void CoarseAcl_WithoutAttestation_FailsStrict(string aclMode)
+    {
+        using var scope = GoodEnv();
+        var result = ValidateConfig.ValidateCore(
+            AclSchema(aclMode), GraphSchemaPath, FiltersPath, strict: true);
+
+        Assert.Contains(result.Errors,
+            e => e.Contains("Contact") && e.Contains($"coarse aclMode '{aclMode}'"));
+        Assert.False(result.Ok(strict: true));
+    }
+
+    // An explicit false is not an attestation — it must behave exactly like an
+    // absent property, so "we looked and said no" cannot be mistaken for sign-off.
+    [Fact]
+    public void CoarseAcl_AttestationExplicitlyFalse_FailsStrict()
+    {
+        using var scope = GoodEnv();
+        var result = ValidateConfig.ValidateCore(
+            AclSchema("group", acknowledged: false), GraphSchemaPath, FiltersPath, strict: true);
+        Assert.Contains(result.Errors, e => e.Contains("coarse aclMode 'group'"));
+    }
+
+    [Theory]
+    [InlineData("group")]
+    [InlineData("public")]
+    public void CoarseAcl_WithAttestation_PassesStrict_ButStillWarns(string aclMode)
+    {
+        using var scope = GoodEnv();
+        var result = ValidateConfig.ValidateCore(
+            AclSchema(aclMode, acknowledged: true), GraphSchemaPath, FiltersPath, strict: true);
+
+        // The exposure does NOT disappear: it is still reported, every run.
+        Assert.Contains(result.AcknowledgedWarnings,
+            w => w.Contains("Contact") && w.Contains($"coarse aclMode '{aclMode}'"));
+        Assert.Contains(result.AcknowledgedWarnings,
+            w => w.Contains("ACKNOWLEDGED in schema.json") && w.Contains("not removed or reduced"));
+        // …it just no longer blocks the gate.
+        Assert.DoesNotContain(result.Errors, e => e.Contains("coarse aclMode"));
+        Assert.DoesNotContain(result.Warnings, w => w.Contains("coarse aclMode"));
+        Assert.True(result.Ok(strict: true));
+    }
+
+    // Attesting the coarse posture says nothing about the scale guard: an
+    // attested-but-unfiltered object must still trip the full-scan guard.
+    [Fact]
+    public void CoarseAclAttestation_DoesNotSuppressTheFullScanGuard()
+    {
+        using var scope = GoodEnv();
+        var noFilters = Write("coarse-nofilters.json", """{"objects": {}, "fullScanAllowed": []}""");
+        var result = ValidateConfig.ValidateCore(
+            AclSchema("public", acknowledged: true), GraphSchemaPath, noFilters, strict: true);
+
+        Assert.Contains(result.Errors, e => e.Contains("Contact") && e.Contains("NO filter"));
+        Assert.False(result.Ok(strict: true));
+    }
+
+    [Fact]
+    public void OwnerOnlyObject_ProducesNoCoarseAclFinding()
+    {
+        using var scope = GoodEnv();
+        var result = ValidateConfig.ValidateCore(
+            AclSchema("ownerOnly"), GraphSchemaPath, FiltersPath, strict: true);
+
+        Assert.DoesNotContain(result.Warnings, w => w.Contains("coarse aclMode"));
+        Assert.DoesNotContain(result.Errors, e => e.Contains("coarse aclMode"));
+        Assert.Empty(result.AcknowledgedWarnings);
+        Assert.True(result.Ok(strict: true));
+    }
+
+    // ── coarseAclAcknowledged in SchemaConfig ────────────────────────────────
+
+    [Fact]
+    public void CoarseAclAcknowledged_RoundTripsThroughLoad()
+    {
+        var path = Write("ack-roundtrip.json", """
+            {"objectList": [
+                {"objectName": "A", "aclMode": "public", "coarseAclAcknowledged": true,
+                 "selectedFields": {"Name": "Title"}},
+                {"objectName": "B", "aclMode": "group", "aclGroupId": "g-1",
+                 "coarseAclAcknowledged": false, "selectedFields": {"Name": "Title"}},
+                {"objectName": "C", "aclMode": "group", "aclGroupId": "g-2",
+                 "selectedFields": {"Name": "Title"}}]}
+            """);
+        var schema = SchemaConfig.Load(path);
+
+        Assert.True(schema.FindObject("A")!.CoarseAclAcknowledged);
+        Assert.False(schema.FindObject("B")!.CoarseAclAcknowledged);
+        Assert.False(schema.FindObject("C")!.CoarseAclAcknowledged);   // absent → false
+        Assert.True(schema.FindObject("A")!.IsCoarseAcl);
+        Assert.True(schema.FindObject("C")!.IsCoarseAcl);
+    }
+
+    // An attestation on an ownerOnly object attests to nothing today, and
+    // silently PRE-APPROVES the exposure if someone later flips that object to
+    // group/public — the exact review this control exists to force. Reject it.
+    [Fact]
+    public void CoarseAclAcknowledged_OnOwnerOnlyObject_IsRejected()
+    {
+        var path = Write("ack-owneronly.json", """
+            {"objectList": [{"objectName": "X", "aclMode": "ownerOnly",
+                             "coarseAclAcknowledged": true,
+                             "selectedFields": {"Name": "Title"}}]}
+            """);
+        var exc = Assert.Throws<InvalidDataException>(() => SchemaConfig.Load(path));
+        Assert.Contains("coarseAclAcknowledged", exc.Message);
+        Assert.Contains("ownerOnly", exc.Message);
+    }
+
+    [Fact]
+    public void CoarseAclAcknowledgedFalse_OnOwnerOnlyObject_IsAccepted()
+    {
+        var path = Write("ack-owneronly-false.json", """
+            {"objectList": [{"objectName": "X", "aclMode": "ownerOnly",
+                             "coarseAclAcknowledged": false,
+                             "selectedFields": {"Name": "Title"}}]}
+            """);
+        var schema = SchemaConfig.Load(path);
+        Assert.False(schema.FindObject("X")!.IsCoarseAcl);
+    }
+
     // ── scale / freshness knobs ──────────────────────────────────────────────
 
     [Fact]
@@ -356,8 +572,26 @@ public class ValidateConfigTests : IDisposable
         var result = ValidateConfig.ValidateCore(
             RepoConfig("schema.json"), RepoConfig("graph-schema.json"),
             RepoConfig("filters.json"), strict: true);
-        Assert.Empty(result.Errors);
+        // Every shipped object is filtered, so the ONLY finding permitted here is
+        // the coarse-ACL posture of 'Account' (aclMode=group), which ships
+        // deliberately un-attested — see RepoSchema_ShipsNoPreCheckedAttestation.
+        Assert.All(result.Errors, e => Assert.Contains("coarse aclMode", e));
         Assert.Empty(result.Warnings);
+    }
+
+    // The shipped config must never pre-check the attestation. A copied 'true'
+    // would sign off an over-sharing exposure that no human ever reviewed, so
+    // `validate-config --strict` failing on a fresh clone is the INTENDED
+    // behaviour: the operator must look at Account's ACL posture and say so.
+    [Fact]
+    public void RepoSchema_ShipsNoPreCheckedAttestation()
+    {
+        var schema = SchemaConfig.Load(RepoConfig("schema.json"));
+        Assert.All(schema.ObjectList, o => Assert.False(o.CoarseAclAcknowledged));
+
+        var account = schema.FindObject("Account")!;
+        Assert.Equal("group", account.AclMode);
+        Assert.True(account.IsCoarseAcl);
     }
 
     // ── SchemaConfig.Validate rejections ─────────────────────────────────────

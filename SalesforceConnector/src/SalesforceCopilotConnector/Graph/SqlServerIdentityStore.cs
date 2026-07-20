@@ -445,6 +445,58 @@ public class SqlServerIdentityStore : IIdentityStore
         });
     }
 
+    // ── FLS cache (WP-SF-2) ─────────────────────────────────────────────────
+    //
+    // In lockstep with IdentityStore.GetCachedFls / SaveCachedFls / ClearFlsCache:
+    // same org+object key, same InstanceHash, same semantics.
+
+    /// <summary>
+    /// Return the cached field-level-security payload for <paramref name="objectType"/>
+    /// at <paramref name="instanceUrl"/>, or null if no entry exists.
+    /// </summary>
+    public string? GetCachedFls(string instanceUrl, string objectType)
+    {
+        var instHash = InstanceHash(instanceUrl);
+        return SqlExecutor.Execute<string?>(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_GetCachedFls");
+            cmd.Parameters.AddWithValue("@InstanceHash", instHash);
+            cmd.Parameters.AddWithValue("@ObjectType", objectType);
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() && !reader.IsDBNull(0) ? reader.GetString(0) : null;
+        });
+    }
+
+    /// <summary>Persist the field-level-security payload for an org/object.</summary>
+    public void SaveCachedFls(string instanceUrl, string objectType, string permissionsJson)
+    {
+        SqlExecutor.Execute(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_SaveCachedFls");
+            cmd.Parameters.AddWithValue("@InstanceHash", InstanceHash(instanceUrl));
+            cmd.Parameters.AddWithValue("@ObjectType", objectType);
+            cmd.Parameters.AddWithValue("@PermissionsJson", permissionsJson);
+            cmd.ExecuteNonQuery();
+        });
+    }
+
+    /// <summary>
+    /// Clear cached FLS entries (all / per-org / per-org+object), returning the
+    /// number deleted. Same argument semantics as <see cref="ClearFieldCache"/>.
+    /// </summary>
+    public int ClearFlsCache(string? instanceUrl = null, string? objectType = null)
+    {
+        return SqlExecutor.Execute(_connectionString, conn =>
+        {
+            using var cmd = Proc(conn, "dbo.usp_ClearFlsCache");
+            cmd.Parameters.AddWithValue("@InstanceHash",
+                string.IsNullOrEmpty(instanceUrl) ? DBNull.Value : InstanceHash(instanceUrl));
+            cmd.Parameters.AddWithValue("@ObjectType",
+                string.IsNullOrEmpty(instanceUrl) || string.IsNullOrEmpty(objectType) ? DBNull.Value : objectType);
+            return Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+        });
+    }
+
     // ── Utility ───────────────────────────────────────────────────────────────
 
     public string ConnectionId => _connectionId;
@@ -531,10 +583,21 @@ public class SqlServerIdentityStore : IIdentityStore
         return utc.ToString(format, CultureInfo.InvariantCulture) + "+00:00";
     }
 
-    /// <summary>Return a short hash of the Salesforce instance URL for cache keying.</summary>
-    private static string InstanceHash(string instanceUrl)
+    /// <summary>
+    /// Return a short hash of the Salesforce instance URL for cache keying.
+    ///
+    /// SHA-256 (WP-SF-5) — was MD5 through 1.0.0, replaced for FIPS 140-3. The
+    /// output shape is deliberately unchanged (first 8 chars of lowercase hex),
+    /// so <c>dbo.FieldCache.InstanceHash nvarchar(16)</c> and
+    /// <c>PK_FieldCache</c> need no DDL change and create-database.sql is
+    /// untouched by this work package.
+    ///
+    /// Must stay byte-identical to <see cref="IdentityStore.InstanceHash"/> —
+    /// the same instance URL has to key the same cache row on either backend.
+    /// </summary>
+    internal static string InstanceHash(string instanceUrl)
     {
-        var digest = MD5.HashData(Encoding.UTF8.GetBytes(instanceUrl));
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(instanceUrl));
         return Convert.ToHexString(digest).ToLowerInvariant()[..8];
     }
 

@@ -116,7 +116,7 @@ cannot be set), so this state is not world-readable on a shared host:
 | Dead-letter records | `logs/failed_records_*.jsonl` or `dbo.DeadLetter` | **default `redacted`** — indexed content/property values stripped to hash stubs (ids/version/error/ACL kept); set `DEADLETTER_PAYLOAD_MODE=full` (opt-in) to store verbatim payloads. An unrecognized mode fails startup |
 | Run logs | `logs/{run}/` | operational text; item ids/names appear; no secrets, tokens, signature values, or content bodies by policy |
 | Reconciliation reports | `logs/{run}/reconciliation_*.jsonl` | compliance evidence (item ids + rule + action) — retain per policy |
-| Decision ledger (`DECISION_LEDGER=true`) | `logs/{run}/decision_ledger_*.jsonl` | tamper-evident (SHA-256 hash-chained) exclusion/ACL-restriction audit — retain per policy |
+| Decision ledger (`DECISION_LEDGER=true`) | `logs/decision_ledger_{id}.jsonl` (one continuous chain, appended by every run; never removed by `LOG_RETENTION_DAYS`) | tamper-evident (SHA-256 hash-chained) exclusion/ACL-restriction/quarantine audit — retain per policy, ship off-box for tamper-*proof* |
 | Checkpoints / sync cursor | `logs/*.json` or SQL | timestamps + ids only |
 | Indexed content + ACLs | Microsoft Graph (tenant-side) | governed by M365, not by this repo |
 

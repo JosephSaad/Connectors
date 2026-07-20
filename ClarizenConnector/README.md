@@ -30,7 +30,7 @@ here as an independent, self-contained copy.
 | `env/.env.local.example` | every knob, documented |
 | `docs/` | `HA.md`, `RETRY.md`, `OBSERVABILITY.md`, `SQL_CONTRACT.md`, `SHARDING.md`, `DELETION_SYNC.md`, `ATTACHMENTS.md`, `WEBHOOKS.md`, `TRACING.md`, `RESILIENCE.md` |
 | `scripts/` | `install-windows-service.ps1`, `sql/create-database.sql` |
-| `tests/ClarizenConnector.Tests/` | xUnit suite (593 tests, mock HTTP — no network) |
+| `tests/ClarizenConnector.Tests/` | xUnit suite (877 tests, mock HTTP — no network) |
 | `Dockerfile` / `docker-compose.yml` | container image + local SQL/HA dev topology |
 | `.github/workflows/` | `ci.yml` (ubuntu + windows, SQL provisioning, docker), `codeql.yml`, `release.yml` (test-gated, checksummed bundles + GHCR image) |
 
@@ -59,6 +59,45 @@ are **financial** (budget/cost/rates/actuals/revenue), the ACL mode per object
 (`projectMembers` | `ownerOnly` | `public`) and the parent-project reference
 field. `config/graph-schema.json` must contain every Graph property the object
 list produces.
+
+This is **enforced at the write path, not advisory**. `ExternalItem.Properties`
+is a checked bag: stamping a Graph property that `config/graph-schema.json` does
+not declare throws `UndeclaredGraphPropertyException` at the point of the stamp,
+naming the property — literal, `const` or runtime-computed makes no difference,
+because the check is on the value of the name and not on where the stamp lives.
+An undeclared property therefore can never reach a Graph `PUT` (Graph would
+reject it, and the connector would be undeployable), and it is never silently
+dropped either. A **blank or whitespace-only** property name is the same fault
+with the same type — no connection schema can declare it. During a crawl these
+are **not** treated as a poisoned source row: they escape the per-record and
+per-object isolation catches and abort the run, because they are defects that
+affect every record and would otherwise close a crawl "successfully" with 100%
+of the data dead-lettered **and the sync cursor advanced past all of it**.
+
+The escalation keys on the base type `GraphSchemaConfigurationException`, so it
+covers the whole class of "the configuration cannot produce a deployable item" —
+including a `config/graph-schema.json` that is missing, is not a JSON array, or
+declares no usable names, which surfaces as `GraphSchemaUnavailableException`
+from the first stamp. A blank Graph property name in a `selectedFields` mapping
+is additionally rejected by `SchemaConfig.Load`, so that config never starts a
+crawl at all.
+
+`ExternalItem.ToJson()` re-checks the whole bag as a second layer, and that
+re-check is unconditional: it is not relaxed by the internal
+`GraphPropertyRegistry.SuspendEnforcement` scope that `StampedPropertyInventory`
+uses to observe stamps.
+
+`validate-config` reports drift as a **preflight** too — stamped-but-undeclared
+is an error, declared-but-unstamped a warning — but the preflight's stamped-side
+enumeration (`StampedPropertyInventory`) runs a fixed set of stamper call sites,
+so it is a **best-effort early warning and not the guarantee**. A stamp added
+somewhere it does not know about will be caught by the write path at crawl time,
+not by the preflight. A degenerate `graph-schema.json` (empty array, or entries
+whose `name` is empty) is itself a preflight **error**, since the connector reads
+that same file at runtime to decide what it may stamp.
+
+Add a `selectedFields` mapping to `schema.json` and you must add the matching
+property to `graph-schema.json`.
 
 ## Usage
 
@@ -156,6 +195,29 @@ and the `attachments_skipped_total` metric. The attachment item still inherits
 its parent's ACLs, is inventoried, and is swept on deletion — enrichment is
 purely additive. Off by default. Details: `docs/ATTACHMENTS.md`.
 
+### Content gate — prompt injection & malware
+
+Ingested content **is** Copilot grounding context, so a malicious document is an
+attack on every user whose query it grounds. With `CONTENT_GATE=true` two
+scanners run behind one stage: a config-driven prompt-injection heuristic
+(`config/content-gate.json` — imperative overrides, role reassignment,
+exfiltration directives, hidden zero-width/bidi text, smuggled base64) over the
+**final indexed text**, and an ICAP/HTTP malware scanner
+(`CONTENT_GATE_ICAP_URL`) over attachment **binaries**.
+
+The posture is **quarantine, not drop**: a positive verdict withholds the item
+from the index and routes it to the existing dead-letter queue with reason
+`content-gate:<category>`, writes a `quarantine` decision-ledger entry, stamps
+`ContentGateStatus`, increments `content_gate_blocked_total` and raises the
+alert webhook. `retry-failed` re-drives it unchanged.
+
+Fail modes are **deliberately asymmetric**: binaries **fail closed** (never
+index unscanned bytes), text **fails open** with a loud warning and metric (the
+injection scanner is a heuristic, not a security boundary — blocking a whole
+crawl on a heuristic outage is worse than the risk). A regex timeout is an
+incomplete scan, not an outage, so it fails **safe**. Off by default and
+byte-identical to before when unset. Details: `docs/CONTENT_GATE.md`.
+
 ### Financial data governance
 
 Fields listed in `financialFields` get `ContainsFinancialData=true` and
@@ -185,6 +247,7 @@ grant a default group instead.
 | `GRAPH_CONNECTION_SHARDS={...}` | Shard object types across N Graph connections — the throughput lever. | `docs/SHARDING.md` |
 | `DELETION_SYNC` (default **true**) + `DELETION_SYNC_MAX_PERCENT=25` + `DELETION_SYNC_MAX_ITEMS=1000` | Full-crawl existence sweep withdraws items deleted in Clarizen; the percent and absolute-cap knobs are the mass-deletion safety guards. | `docs/DELETION_SYNC.md` |
 | `ATTACHMENT_INGESTION=true` (+ `ATTACHMENT_MAX_BYTES`, `ATTACHMENT_ALLOWED_TYPES`) | Download + extract attachment text (dependency-free) into the attachment item's content. | `docs/ATTACHMENTS.md` |
+| `CONTENT_GATE=true` (+ `CONTENT_GATE_ICAP_URL`, `CONTENT_GATE_FAIL_MODE[_BINARY\|_TEXT]`, `CONTENT_GATE_MAX_SCAN_MB`) | Prompt-injection heuristics over indexed text + ICAP malware scanning of attachment binaries; positive verdicts quarantine to dead-letter (re-drivable). Binary fails closed, text fails open. | `docs/CONTENT_GATE.md` |
 | `GRAPH_BASE_URL` (+ `GRAPH_SCOPE`, `AAD_APP_OAUTH_AUTHORITY_HOST`) | Sovereign-cloud Graph endpoint (e.g. `https://graph.microsoft.us`); scope defaults to `<base>/.default`; authority host moves the token endpoint. | |
 | `USE_SQL_SERVER=true` + `SQL_CONNECTION_STRING` | Move state (identity store, checkpoints, sync ts, dead-letter) to SQL Server. | `docs/SQL_CONTRACT.md` |
 | `SQL_USE_MANAGED_IDENTITY=true` / `SQL_MAX_RETRIES=5` | Entra auth for SQL; transient-fault retry (AG failover). | `docs/RETRY.md` |
@@ -284,7 +347,7 @@ lives in `ops/` (`grafana-dashboard.json`, `prometheus-alerts.yml`,
 dotnet test
 ```
 
-593 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
+877 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
 shape **and concurrency invariants** (16 parallel writers, zero corrupt lines),
 retry/backoff math (numeric Retry-After, 60 s clamp, jitter), Graph client
 throttling/hardening (mock HTTP), adaptive concurrency, connection-sharding

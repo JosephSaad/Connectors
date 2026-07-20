@@ -24,6 +24,9 @@ public static class Reconcile
         {
             using var runtime = Runtime.Create();
             using var report = runtime.OpenReport(logFile);
+            // --repair re-ingests and withdraws, so this command makes exclusion
+            // and ACL-restriction decisions like any crawl: it needs the ledger.
+            using var ledger = runtime.OpenLedger();
 
             var runDir = Path.GetDirectoryName(logFile) ?? CommandRegistry.LogsDir;
             var driftReportPath = Path.Combine(

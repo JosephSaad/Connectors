@@ -63,6 +63,67 @@ worst-case exposure of a de-provisioned seat is bounded by that interval. For
 hard, immediate cut-off of the most sensitive tier, combine with
 `CLASSIFICATION_ENFORCE_ACL` (top-tier items locked to a small reviewer group).
 
+### Why the cadence is the *only* connector-side lever
+
+A Graph connector **cannot** re-evaluate entitlement per grounding call. Graph
+trims results against the ACL **stored on the item** at ingestion time, and
+offers no callback into Altrata at query time. There is no hook, anywhere in the
+connector, that runs when Copilot grounds a query.
+
+So authorisation staleness is bounded by exactly one thing: how often the seat
+re-ACL sweep runs. That is the incremental cadence (when
+`IDENTITY_SYNC_ON_INCREMENTAL` is true, the default), and nothing else.
+
+### Sub-hour cadence — `--incremental-minutes`
+
+`--incremental-hours` is an integer flag with a floor of 1, so it cannot express
+anything below 60 minutes. `--incremental-minutes <1–10080>` can:
+
+```
+altrata-connector ingest --continuous --incremental-minutes 15
+```
+
+It **wins over** `--incremental-hours` when both are given (it is the more
+specific unit). Unused, `--incremental-hours` behaves exactly as before — the
+default is still 4 hours.
+
+**The trade-off, honestly.** Every incremental re-reads the seat list and, if it
+changed, re-ACLs every affected existing item: source API calls plus one Graph
+write per item. A 5-minute cadence costs **12×** the sweeps of an hourly one,
+against Graph throttling limits that are shared with ingestion. Tightening the
+staleness budget is not free, and past some point it competes with the ingestion
+it is protecting.
+
+The scheduler wakes at most every 30 s (for graceful-stop responsiveness) but
+never sleeps past a due crawl, so a sub-hour interval is honoured to within one
+loop iteration rather than rounded up.
+
+### Minute-level freshness — use `seat-sync` under an external scheduler
+
+For tighter than the incremental crawl can sensibly go, run the standalone
+command on its own schedule (cron / Task Scheduler):
+
+```
+altrata-connector seat-sync
+```
+
+It does the **seat sweep only** — load seats, and re-ACL existing items if the
+seat hash changed — without dragging a full delivery-reconciliation crawl along
+with it. That is the right shape for minute-level entitlement freshness: cheap
+when nothing changed (a hash comparison), and it does not contend with the
+ingestion schedule.
+
+### Deferred, deliberately not built
+
+* **Agent-layer / retrieval-time entitlement checks.** A check at grounding time
+  belongs in Copilot Studio or MCP middleware — the layer that *sees* the query.
+  It is not connector code, and building a half-version of it here would imply a
+  guarantee the connector cannot make.
+* **A redistribution marker sourced from the feed manifest.** We have not
+  confirmed the vendor's manifest carries one. Reading a field that may not exist
+  and stamping items from it would be inventing provenance, not recording it.
+  Revisit once the manifest contract is confirmed.
+
 ## PII posture
 
 * Every item carries `piiClassification` — the HIGHEST personal-data label for

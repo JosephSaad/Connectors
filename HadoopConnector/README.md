@@ -76,7 +76,7 @@ cp env/.env.local.example env/.env.local     # non-secret config
 # SECRET_HDFS_DELEGATION_TOKEN) into env/.env.local.user (never committed)
 ```
 
-Review the three config files:
+Review the four config files:
 
 - `config/schema.json` — which Salesforce-shaped BDH objects are crawled,
   BDH column → Graph property mapping, the ACL mode per object
@@ -86,9 +86,15 @@ Review the three config files:
 - `config/filters.json` — **the scale control** (`docs/FILTERS.md`): partition
   pruning + record predicates per object. An object with no filter refuses to
   crawl (fail-closed) unless explicitly exempted.
-- `config/graph-schema.json` — must contain every Graph property the object
+- `config/graph-schema.json` — should contain every Graph property the object
   list produces (including `SourceSystem`, `DataAsOf` and, when classification
-  is on, `SensitivityLabel`/`DetectedCategories`).
+  is on, `SensitivityLabel`/`DetectedCategories`). **Nothing enforces this.**
+  `validate-config` does not cross-check the object list against this file, so a
+  property mapped in `schema.json` but undeclared here passes preflight green and
+  is rejected by Graph at push time. Keeping the two in step is manual.
+- `config/classification.json` — the classification category and pattern set.
+  Validated by `validate-config` unconditionally, whether or not `CLASSIFICATION`
+  is on.
 
 ## Usage
 
@@ -209,6 +215,75 @@ trade-off. Per-object `aclMode` in `config/schema.json`:
 | `ownerOnly` (default) | the record's owner only: `OwnerId` (`ownerField`) resolved through the identity store, with the owner email (`ownerEmailField`, default `OwnerEmail`) as fallback |
 | `group` | a fixed Entra group per object (`aclGroupId` required) |
 | `public` | `everyoneExceptGuests` — explicit operator opt-in |
+
+#### Coarse-ACL attestation (`coarseAclAcknowledged`) — interim control
+
+`group` and `public` are **coarse**: they grant access wider than the record
+owner and cannot express the row/column restrictions Salesforce enforces. At
+150M+ mirrored rows that is a material over-sharing exposure, and an object
+that is coarse **and** not effectively filtered is the worst case — the whole
+object indexed and exposed at a flat grant.
+
+`validate-config` therefore reports every `group`/`public` object on every run,
+naming its `aclMode` and whether it is effectively filtered, and sign-off is
+recorded in `config/schema.json` per object:
+
+```jsonc
+{ "objectName": "Account", "aclMode": "group", "aclGroupId": "e7b1…",
+  "coarseAclAcknowledged": true, "coarseAclAcknowledgedFor": "group:e7b1…" }
+```
+
+The attestation is **bound to the posture it signed**. `coarseAclAcknowledged`
+alone records only that *someone* signed, never *what* — so it would survive
+every widening of the exposure it covers (`group` → `public`, or a far broader
+`aclGroupId`) and silently pre-approve a posture nobody reviewed.
+`coarseAclAcknowledgedFor` names that posture verbatim — `public` or
+`group:<aclGroupId>` — and a mismatch is a **hard config-load error**, in both
+directions: the connector cannot know whether one Entra group is broader than
+another, so any change forces a fresh review rather than a guess.
+
+Without an attestation — or with a bare, unbound `true` — `validate-config
+--strict` **fails** for that object. With a bound one, `--strict` passes but the
+warning is **still printed** (`WARNING (acknowledged): …`) — **this control makes
+the risk visible and signed-off; it does not reduce it.** An attestation on an
+`ownerOnly` object is a config error (a stale `true` must never pre-approve a
+later widening), and the shipped `config/schema.json` deliberately does *not*
+pre-set the flag, so a fresh clone fails `--strict` on `Account` until someone
+reviews it. Interim measure pending the Apache Ranger integration — see
+[`docs/ACL_POSTURE.md`](docs/ACL_POSTURE.md).
+
+Sensitivity is otherwise per-**object**, so a restricted column would ride along
+with the record for everyone that coarse ACL admits. `columnPolicies` restricts
+individual columns:
+
+```jsonc
+{ "objectName": "Employee",
+  "selectedFields": { "Compensation__c": "Compensation", "SSN__c": "Ssn" },
+  "columnPolicies": { "Compensation__c": "drop", "SSN__c": "mask" } }
+```
+
+`drop` never emits the column (no Graph property, no content line, no title);
+`mask` keeps the property name and content key but replaces the value with
+`[RESTRICTED]`. Both are enforced in **both** conversion passes — the Graph
+property pass *and* the searchable content body — so a restricted column cannot
+survive in the text Copilot grounds on — including the dead-letter queue, whose
+payloads are the *converted* item and so inherit the same gate even under
+`DEADLETTER_PAYLOAD_MODE=full`. A policy naming an unselected column, an unknown
+action, or the identity column `Id`, **fails config load** — as does a
+`selectedFields` map with an empty column/property name or with **two columns
+mapped to the same Graph property** (only one can occupy it, so the loser's value
+and any policy protecting it would be silently discarded); `validate-config`
+prints the dropped/masked counts per object on every run, and says so explicitly
+when no object restricts any column.
+
+`Id` is rejected rather than half-applied: that value *is* the `externalItem` id,
+the `Url` deep link built from it, the content title fallback and the
+inventory/dead-letter key, so a policy on it would strip one Graph property while
+the value stayed indexed by three other routes — and preflight would report a
+restriction that was never real. Drop the column from `selectedFields` instead,
+narrow the `aclMode`, or filter the record out. No action rewrites the item ACL
+(deferred pending Ranger). See
+[`docs/COLUMN_POLICIES.md`](docs/COLUMN_POLICIES.md).
 
 The identity sync loads the Salesforce user directory from the BDH `User`
 object export (`BDH_IDENTITY_OBJECT`, default `User` — mirrored nightly like
@@ -370,6 +445,9 @@ timestamp. Details: `docs/HA.md`; schema contract: `docs/SQL_CONTRACT.md`.
 The enterprise hardening pack — read these before a production rollout:
 
 - [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — STRIDE per trust boundary, filters.json as a security control, FIPS posture, least-privilege matrix
+- [`docs/ACL_POSTURE.md`](docs/ACL_POSTURE.md) — the coarse `group`/`public` over-sharing exposure, the `coarseAclAcknowledged` attestation gating `--strict`, and how to actually reduce (not just accept) the risk pending Ranger
+- [`docs/COLUMN_POLICIES.md`](docs/COLUMN_POLICIES.md) — per-**column** `drop`/`mask` policies (`columnPolicies` in `schema.json`), enforced in *both* the property and content-body passes, and why an ACL-rewriting action is deliberately out of scope
+- [`docs/CONFIG_NULL_SEMANTICS.md`](docs/CONFIG_NULL_SEMANTICS.md) — what a JSON `null` means on any key in `schema.json` (one rule, enforced by a reflective normaliser rather than per-key guards), and why every invalid shape is a named `InvalidDataException` instead of a stack trace
 - [`docs/RUNBOOKS.md`](docs/RUNBOOKS.md) — Symptom → Diagnose → Remediate → Escalate per failure mode (guard refusals, partial crawls, watermark gaps, breaker/degraded, HA, state corruption, 429/token)
 - [`docs/DR.md`](docs/DR.md) — RPO/RTO, backup/restore, upgrade/rollback, schema versioning (a full crawl rebuilds everything from BDH)
 - [`docs/SIEM.md`](docs/SIEM.md) — Windows Event Log ids (`EVENTLOG_ENABLED`), Sentinel KQL + Splunk searches, the delegation-token-leak canary
@@ -386,7 +464,7 @@ anchors and the actual `hadoop_connector_*` metric names.
 dotnet test
 ```
 
-669 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
+930 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
 shape and concurrency invariants, dead-letter payload redaction
 (`DEADLETTER_PAYLOAD_MODE`), retry/backoff math (numeric Retry-After,
 60 s clamp, jitter), Graph client throttling/hardening (mock HTTP), Graph

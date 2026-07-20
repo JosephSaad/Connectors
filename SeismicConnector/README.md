@@ -310,6 +310,7 @@ The enterprise hardening pack — Windows Event Log mirroring
 dead-letter payload redaction (`DEADLETTER_PAYLOAD_MODE`), signed + SBOM'd
 releases, and the `ops/` dashboard/alert pack — is documented operator-first:
 
+* [docs/CONTENT_GATE.md](docs/CONTENT_GATE.md) — malware + prompt-injection scanning of grounding content, quarantine posture, fail-mode asymmetry (`CONTENT_GATE`, default off)
 * [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) — STRIDE per trust boundary, mitigations vs. residuals, FIPS audit result
 * [docs/RUNBOOKS.md](docs/RUNBOOKS.md) — symptom → diagnose → remediate → escalate, per failure mode
 * [docs/DR.md](docs/DR.md) — RPO/RTO, backup/restore, upgrade/rollback, schema versioning
@@ -327,7 +328,7 @@ dotnet build
 dotnet test
 ```
 
-491 xUnit tests, all offline (mock `HttpMessageHandler`, temp SQLite/state
+1017 xUnit tests, all offline (mock `HttpMessageHandler`, temp SQLite/state
 dirs): CLI parsing, checkpoint resume, dead-letter write/retry and integrity
 under concurrent writers, the Retry-After + jitter contract, the $batch
 429/503 retry ladder and adaptive concurrency, sovereign-cloud endpoint

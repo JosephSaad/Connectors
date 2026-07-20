@@ -10,6 +10,110 @@ All notable changes to the BDH Hadoop Copilot Connector. The format follows
 Bank-grade hardening follow-ups. Two safe-default flips (operators should note
 them); everything else is additive and off/unchanged by default.
 
+### Security (bypass fixes — action may be required)
+
+- **The coarse-ACL attestation is now BOUND to the posture it signed.**
+  `coarseAclAcknowledged` was an unbound bool: it recorded that *someone* signed,
+  never *what* they signed, so it survived every widening of the exposure it was
+  meant to cover — `group` → `public` reused the old sign-off and `--strict`
+  still passed, as did swapping `aclGroupId` for a far broader group. A coarse
+  object must now also set **`coarseAclAcknowledgedFor`** naming the posture
+  verbatim (`"public"` or `"group:<aclGroupId>"`). A binding that does not match
+  the effective posture is a **hard config-load error** — in both directions,
+  because the connector cannot know whether one Entra group is broader than
+  another, so any change forces a fresh review rather than a guess. A bare
+  `coarseAclAcknowledged: true` with no binding still parses (older configs load)
+  but is **no longer accepted as an attestation**: `validate-config` reports it
+  as an unbound sign-off and `--strict` fails. **Action:** add
+  `coarseAclAcknowledgedFor` to every attested `group`/`public` object.
+  (`Config/SchemaConfig.cs`, `Commands/ValidateConfig.cs`, `docs/ACL_POSTURE.md`)
+- **Fixed a crash in that binding check:** `"coarseAclAcknowledgedFor": null` is
+  valid JSON and deserialized the property to a null reference, which was
+  dereferenced unguarded in **two** places (`ValidateAttestationBinding` and
+  `HasBoundCoarseAclAttestation`, the latter running later from
+  `validate-config`), so the config load died with a `NullReferenceException`
+  instead of a validation message. A JSON `null` is how JSON spells "absent",
+  and an absent binding is deliberately not a load error, so `null` now behaves
+  exactly like absent, `""` and whitespace: it loads, it is **not** accepted as
+  an attestation, and `--strict` fails with the same unbound-sign-off message
+  naming the posture token to record. Non-empty garbage tokens remain a hard
+  load error. (`Config/SchemaConfig.cs`, `docs/ACL_POSTURE.md`)
+- **A JSON `null` anywhere in `schema.json` can no longer crash the connector,
+  and the model is null-safe by construction.** `System.Text.Json` does not treat
+  a C# property initializer as a default: it *overwrites* `= new()` /
+  `= string.Empty` with `null` whenever the JSON says `null`, so **every**
+  reference-typed member of the config model was a potential null. The worst
+  shape passed preflight green and then destroyed the crawl:
+  `"selectedFields": {"Comp__c": null}` loaded cleanly, `validate-config
+  --strict` reported **0 errors and 0 warnings**, and conversion then threw a
+  `NullReferenceException` on *every* record — which, because ingestion catches
+  per record, produced a **silent 100% dead-letter of the object** rather than a
+  loud crash. At the documented 150M-row scale that is a total indexing failure
+  for an object plus a dead-letter queue its size. Four more shapes
+  (`"objectList": null`, `"objectList": [null]`, `"selectedFields": null`,
+  `"columnPolicies": null`) crashed at config *load* with a bare
+  `NullReferenceException` stack. A previous round guarded exactly one property
+  at its setter; the reasoning was right and the scope was wrong. The fix is now
+  a single mechanism — `Config/ConfigNullNormalizer.cs` reflectively **walks**
+  the deserialized model and repairs every null before validation or any consumer
+  runs — so no property name is enumerated anywhere and a member added later is
+  covered the day it is added. The semantics are decided once for the whole
+  model: **a JSON `null` is read as that key's EMPTY value**, and whether empty is
+  legal is decided by ordinary validation with the ordinary message. Values of the
+  wrong *type* (`"coarseAclAcknowledged": null`, a truncated file) are likewise
+  reported as an `InvalidDataException` quoting the JSON path instead of a raw
+  parse error. New: [`docs/CONFIG_NULL_SEMANTICS.md`](docs/CONFIG_NULL_SEMANTICS.md).
+  (`Config/ConfigNullNormalizer.cs`, `Config/SchemaConfig.cs`,
+  `Item/ItemConverter.cs`)
+- **Two `selectedFields` columns mapped to the same Graph property are now
+  rejected at config load.** Only one can occupy `properties[name]` on the item
+  and the winner is dictionary-order luck, so the loser's value — *and any
+  `columnPolicies` drop/mask protecting it* — was silently discarded while
+  preflight went on reporting the policy as applied:
+  `{"Id":"Id","Salary":"Comp","Bonus":"Comp"}` with `{"Salary":"mask"}` printed
+  `masked=[Salary]` over an item whose `Comp` property held Bonus's real value
+  and no `[RESTRICTED]` marker. The masked value did not leak, but the report
+  claimed a restriction the item did not deliver — the same family as the
+  identity-column and colliding-property rejections. Rejecting the **mapping**
+  rather than the policy also closes the shapes nobody enumerated: the
+  overwritten `drop`, three columns onto one property, casing-only differences,
+  and plain silent data loss with no policy at all. `_bdh_` placeholders are
+  exempt (they are content-body markers keyed by column name, not property
+  names). Also rejected: a `selectedFields` entry with an empty column name or an
+  empty Graph property name. (`Config/SchemaConfig.cs`, `docs/COLUMN_POLICIES.md`)
+- **A `columnPolicies` entry on the identity column `Id` is now rejected at
+  config load.** It previously validated cleanly and `validate-config` announced
+  it as dropped, while the value still reached the index three ways —
+  `externalItem.id`, the `Url` deep link built from it
+  (`ItemConverter.BuildUrl`), and the content title fallback when `Name` was
+  dropped too. The id is structurally load-bearing (Graph cannot index an item
+  without it; inventory, deletion sync, the dead-letter queue and `retry-failed`
+  all key on it), so it cannot be enforced — and a control that reports a
+  restriction it is not delivering is worse than no control. The error names the
+  surviving routes and the real alternatives: remove the column from
+  `selectedFields`, narrow the `aclMode`, or filter the record out. Matching is
+  case-insensitive, mirroring `BdhRecord.RawId`.
+  (`Config/SchemaConfig.cs`, `docs/COLUMN_POLICIES.md`)
+- **A `columnPolicies` entry on a column named after ANOTHER column's Graph
+  property is now rejected at config load.** With
+  `selectedFields: {"Id": "RecordId", "RecordId": "Other"}` and
+  `columnPolicies: {"RecordId": "drop"}` the config loaded cleanly and
+  `validate-config` printed `dropped=[RecordId]` — while a fully populated Graph
+  property called `RecordId` carried on reaching the index from column `Id`. The
+  policy applied, but the report could not be read as true, and the likeliest
+  reason to write it is meaning the property rather than the column. Same family
+  as the two rejections above. Not rejected: a column mapped to a property of its
+  own name (the ordinary case), or a collision whose colliding property is itself
+  `drop`ped and so never reaches the index — `mask` does not qualify, since a
+  masked column still emits a property of that name.
+  (`Config/SchemaConfig.cs`, `docs/COLUMN_POLICIES.md`)
+- **Dead-letter payloads: investigated, no change needed.** Every dead-letter
+  request body is `ExternalItem.ToJson()` — the *converted* item — so column
+  policies already cover it and a dropped/masked column cannot re-appear there
+  even under `DEADLETTER_PAYLOAD_MODE=full`. A second, independent copy of the
+  gate would only drift out of lock-step; the property is pinned by a regression
+  test instead. (`RestrictionBypassProbeTests`)
+
 ### Changed (safe-default flips — action may be required)
 
 - **Dead-letter payload mode now defaults to `redacted`** (was `full`):
@@ -28,6 +132,18 @@ them); everything else is additive and off/unchanged by default.
 
 ### Added
 
+- **A bad config FILE on the crawl path now prints an actionable message, not a
+  stack trace.** `Runtime.Create` loaded `schema.json` and `filters.json` with no
+  `try`/`catch`, so any mistake in either escaped to `Program`'s final backstop —
+  which prints the whole exception, frames included. Both loaders already produce
+  a sentence naming the object, the key and the fix; burying it under a stack
+  trains operators to stop reading it. Config-shaped failures (invalid data,
+  malformed JSON, missing/unreadable file) now exit **2** with the message alone
+  plus a pointer to `validate-config --strict`, and the full record still goes to
+  the run log. Failures that are *not* config-shaped still reach the backstop
+  with their stack, because that is a bug and the stack is the point. Env/
+  `AppConfig` errors keep their existing exit-1 backstop contract.
+  (`Commands/Runtime.cs`)
 - **Restrictive filesystem permissions at startup**: the local state
   directories (logs / state / dead-letter) are created **owner-only** — POSIX
   `0700`; on Windows a best-effort `icacls` lock-down (owner + Administrators +
@@ -45,8 +161,60 @@ them); everything else is additive and off/unchanged by default.
   `Verify()` that detects any edit, deletion or reorder.
   (`Infrastructure/DecisionLedger.cs`)
 
+- **Coarse-ACL posture is now surfaced and must be attested** (WP-HD-2, INTERIM
+  control pending the Apache Ranger integration). `validate-config` reports
+  every object whose `aclMode` is `group` or `public` on **every** run, naming
+  the object, its mode, and whether it is effectively filtered — with a
+  materially stronger message for the worst case (coarse **and** unfiltered:
+  the entire object indexed at a flat grant). A new per-object property in
+  `config/schema.json`, **`coarseAclAcknowledged: true`**, records explicit
+  human sign-off; without it `validate-config --strict` **FAILS** for that
+  object, with it `--strict` passes but the warning is still printed
+  (`WARNING (acknowledged): …`, tracked separately in
+  `Result.AcknowledgedWarnings`). `ownerOnly` objects are unaffected; the
+  attestation on an `ownerOnly` object is a **config error** so a stale `true`
+  can never pre-approve a later widening. The shipped `config/schema.json`
+  deliberately does **not** pre-set the flag, so a fresh clone fails
+  `--strict` on `Account` until reviewed. **This control makes the exposure
+  visible and signed-off — it does not reduce it.**
+  (`Commands/ValidateConfig.cs`, `Config/SchemaConfig.cs`, `config/schema.json`,
+  `docs/ACL_POSTURE.md`)
+- **Per-column `drop`/`mask` policies** — new optional `columnPolicies` map per
+  object in `config/schema.json` (BDH column → `drop` | `mask`). Until now
+  sensitivity was per-**OBJECT** only, so a restricted column (compensation,
+  margin, personal identifiers) reached the index for everyone the record's
+  coarse ACL admitted. `drop` never emits the column; `mask` keeps the property
+  name and content key and replaces the value with `[RESTRICTED]` (the value is
+  never read). Enforced in **BOTH** conversion passes — the Graph **property**
+  loop and the searchable **content body** loop — plus the content title line,
+  which reads `Name` outside both loops; a column gated in only one path would
+  still be indexed in the other. Column matching is case-insensitive (as
+  `BdhRecord.Get` is). An **unknown action**, a policy naming a column **not in
+  that object's `selectedFields`**, or two keys differing only in case all
+  **fail config load**, because a policy that silently restricts nothing is
+  worse than none. `validate-config` prints a `POSTURE:` line per object with
+  the dropped/masked counts and column names — and states explicitly when no
+  object restricts any column; masking a column mapped to a non-`String` Graph
+  property is a **warning** (the marker is a string, so Graph would reject the
+  item). No action rewrites the item ACL: an ACL-rewriting action would
+  interact with the classification ACL-rewrite ordering in
+  `IngestPipeline.ApplyClassification` and is deliberately deferred until the
+  Ranger work settles the ACL model. Absent `columnPolicies` ⇒ conversion is
+  byte-identical to before. (`Config/SchemaConfig.cs`, `Item/ItemConverter.cs`,
+  `Commands/ValidateConfig.cs`, `config/schema.json`,
+  `docs/COLUMN_POLICIES.md`)
+
 ### Documentation / honesty
 
+- **`docs/ACL_POSTURE.md`** (new): the coarse `group`/`public` over-sharing
+  exposure stated plainly, what the `coarseAclAcknowledged` attestation does and
+  does not buy, and the ways to actually *reduce* the exposure (narrower
+  `aclMode`/`aclGroupId`, tighter `filters.json`, fewer `selectedFields` /
+  `columnPolicies`, `CLASSIFICATION_ENFORCE_ACL`) pending Ranger.
+- **`docs/COLUMN_POLICIES.md`** (new): what `drop`/`mask` do, why `mask` keeps
+  the key even for an empty value, the two-pass conversion model and why a gate
+  in only one pass leaks, the load-time rejections, and why an ACL-rewriting
+  action is out of scope.
 - Classification naming/docs corrected: `SensitivityLabel` is a
   connector-applied **advisory tag** (a Graph refiner), **not** a Microsoft
   Purview-enforced label — it does not encrypt or gate access on its own (the

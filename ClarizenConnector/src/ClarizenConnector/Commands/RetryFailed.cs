@@ -18,10 +18,36 @@ public static class RetryFailed
 {
     private static readonly IAppLogger Logger = Logging.GetLogger("clarizen_connector");
 
-    /// <summary>Parse "ObjectType_LocalId" back into its parts. Testable.</summary>
-    internal static (string ObjectType, string LocalId)? ParseItemId(string itemId)
+    /// <summary>
+    /// Parse "{ObjectType}_{LocalId}" (see <see cref="ClarizenRecord.ItemId"/>)
+    /// back into its parts. Testable.
+    /// <para>
+    /// Splitting on the FIRST underscore was wrong: Clarizen entity type names
+    /// may contain underscores (custom entities routinely do), so
+    /// "Custom_Entity_1234567" parsed as ObjectType "Custom" / LocalId
+    /// "Entity_1234567" and the retry re-fetched a record that does not exist.
+    /// </para>
+    /// <para>
+    /// When the caller knows the object type — the dead-letter entry carries
+    /// <c>object_type</c>, and it is resolved against the schema before we get
+    /// here — the split is BOUNDED by that known name, which is exact even for a
+    /// LocalId containing an underscore. Otherwise it falls back to the LAST
+    /// underscore, correct for every id this connector emits (LocalId is the
+    /// segment after the final '/' of a Clarizen entity id).
+    /// </para>
+    /// </summary>
+    internal static (string ObjectType, string LocalId)? ParseItemId(
+        string itemId, string? knownObjectType = null)
     {
-        var underscore = itemId.IndexOf('_');
+        if (!string.IsNullOrEmpty(knownObjectType)
+            && itemId.Length > knownObjectType.Length + 1
+            && itemId.StartsWith(knownObjectType, StringComparison.OrdinalIgnoreCase)
+            && itemId[knownObjectType.Length] == '_')
+        {
+            return (itemId[..knownObjectType.Length], itemId[(knownObjectType.Length + 1)..]);
+        }
+
+        var underscore = itemId.LastIndexOf('_');
         if (underscore <= 0 || underscore >= itemId.Length - 1)
             return null;
         return (itemId[..underscore], itemId[(underscore + 1)..]);
@@ -53,7 +79,10 @@ public static class RetryFailed
                 ?? ParseItemId(itemId)?.ObjectType
                 ?? string.Empty;
             var objectConfig = context.Schema.FindObject(objectTypeName);
-            if (objectConfig is null || ParseItemId(itemId) is not { } parsed)
+            // Re-parse bound by the RESOLVED object name: the schema is the
+            // authority on where the type ends and the local id begins.
+            if (objectConfig is null
+                || ParseItemId(itemId, objectConfig.ObjectName) is not { } parsed)
             {
                 stillFailing.Add((itemId, $"Unknown object type '{objectTypeName}'", objectTypeName));
                 continue;

@@ -8,6 +8,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using SeismicConnector.Infrastructure;
+using SeismicConnector.Security;
 using SeismicConnector.Seismic;
 
 namespace SeismicConnector.Config;
@@ -192,6 +193,16 @@ public sealed class AppConfig
     /// <summary>Classifier rules (config/classification.json, or the built-in default set).</summary>
     public required ClassificationRules Classification { get; init; }
 
+    /// <summary>ContentGate (CS-1) settings. Disabled unless CONTENT_GATE=true.</summary>
+    public ContentGateSettings ContentGate { get; init; } = new();
+
+    /// <summary>
+    /// Prompt-injection rules for the ContentGate text channel
+    /// (config/content-gate.json). EMPTY — and the file is never read — when the
+    /// gate is off, so an unset CONTENT_GATE costs nothing, not even the file IO.
+    /// </summary>
+    public ClassificationRules ContentGateRules { get; init; } = new();
+
     /// <summary>Directory holding config/schema.json etc. (repo root by default).</summary>
     public required string ConfigDir { get; init; }
 
@@ -216,6 +227,7 @@ public sealed class AppConfig
             SeismicConnector.Graph.CertificateCredential.CertThumbprintEnvVar);
         var graphCertConfigured = !string.IsNullOrWhiteSpace(graphCertPath)
             || !string.IsNullOrWhiteSpace(graphCertThumbprint);
+        var contentGate = ContentGateSettings.FromEnvironment();
         var config = new AppConfig
         {
             Connector = new ConnectorSettings
@@ -291,8 +303,18 @@ public sealed class AppConfig
             Schema = LoadSchema(Path.Combine(configDir, "schema.json")),
             Exclusions = ExclusionRules.LoadFile(Path.Combine(configDir, "exclusions.json")),
             Classification = ClassificationRules.LoadFile(Path.Combine(configDir, "classification.json")),
+            ContentGate = contentGate,
+            // Only read the injection ruleset when the gate is actually on, so
+            // CONTENT_GATE unset means zero new file IO at startup.
+            ContentGateRules = contentGate.Enabled
+                ? InjectionRules.LoadFile(Path.Combine(configDir, InjectionRules.FileName))
+                : new ClassificationRules(),
             ConfigDir = configDir,
         };
+
+        // Mistyped gate knobs fail fast — but only when the gate is on, so an
+        // unset CONTENT_GATE can never introduce a NEW startup failure.
+        config.ContentGate.Validate();
 
         if (config.Seismic.FallbackAcl is not ("skip" or "tenant"))
             throw new ConfigException(
@@ -368,6 +390,8 @@ public sealed class AppConfig
         Schema = Schema,
         Exclusions = Exclusions,
         Classification = Classification,
+        ContentGate = ContentGate,
+        ContentGateRules = ContentGateRules,
         ConfigDir = ConfigDir,
     };
 }

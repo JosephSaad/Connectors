@@ -27,9 +27,26 @@ GO
 -- ---------------------------------------------------------------------------
 -- State backend (State/SqlStateStore.cs :: SchemaScript)
 -- ---------------------------------------------------------------------------
+-- NOTE on dbo.altrata_suppressed.subject_id, below: it carries an EXPLICIT
+-- binary collation. That table is the DSAR erasure suppression list, and the
+-- file backend compares its entries with StringComparer.Ordinal; inheriting the
+-- database default (case- AND accent-INSENSITIVE on a stock install) made the
+-- two backends disagree about whether a subject had been erased. See
+-- SqlStateStore.SubjectIdCollation for the full account.
+--
+-- The ALTER that follows the CREATE migrates tables provisioned before the
+-- collation was pinned, and is a no-op once the column is BIN2. The direction
+-- is always safe: a case-insensitive primary key could never have admitted two
+-- rows differing only by case, so tightening to binary cannot raise a
+-- duplicate-key failure. It does NOT recover erasures that the insensitive key
+-- silently swallowed at insert time — re-file those from the erasure ledger
+-- after upgrading.
+--
+-- Comments must stay OUTSIDE the DDL block below: SqlScriptValidationTests
+-- asserts the embedded SchemaScript constant appears here contiguously.
 IF OBJECT_ID(N'dbo.altrata_checkpoint', N'U') IS NULL
 CREATE TABLE dbo.altrata_checkpoint (
-    connector_id  NVARCHAR(64)  NOT NULL PRIMARY KEY,
+    connector_id  NVARCHAR(64)  COLLATE Latin1_General_100_BIN2 NOT NULL PRIMARY KEY,
     delivery_id   NVARCHAR(256) NOT NULL,
     dataset       NVARCHAR(64)  NOT NULL,
     file_name     NVARCHAR(512) NOT NULL,
@@ -39,12 +56,13 @@ CREATE TABLE dbo.altrata_checkpoint (
 IF OBJECT_ID(N'dbo.altrata_deadletter', N'U') IS NULL
 CREATE TABLE dbo.altrata_deadletter (
     id            BIGINT IDENTITY(1,1) PRIMARY KEY,
-    connector_id  NVARCHAR(64)   NOT NULL,
+    connector_id  NVARCHAR(64)   COLLATE Latin1_General_100_BIN2 NOT NULL,
     item_id       NVARCHAR(256)  NOT NULL,
     dataset       NVARCHAR(64)   NOT NULL,
     delivery_id   NVARCHAR(256)  NOT NULL,
     error         NVARCHAR(MAX)  NOT NULL,
     op            NVARCHAR(16)   NOT NULL CONSTRAINT df_altrata_dl_op DEFAULT N'upsert',
+    correlation_id NVARCHAR(128) NULL,
     payload_json  NVARCHAR(MAX)  NOT NULL,
     failed_utc    DATETIME2      NOT NULL,
     attempts      INT            NOT NULL,
@@ -60,37 +78,80 @@ IF COL_LENGTH(N'dbo.altrata_deadletter', N'redacted') IS NULL
         ADD redacted       BIT           NOT NULL CONSTRAINT df_altrata_dl_redacted_mig DEFAULT 0,
             subject_ids    NVARCHAR(MAX) NOT NULL CONSTRAINT df_altrata_dl_subject_ids_mig DEFAULT N'[]',
             subject_hashes NVARCHAR(MAX) NOT NULL CONSTRAINT df_altrata_dl_subject_hashes_mig DEFAULT N'[]';
+IF COL_LENGTH(N'dbo.altrata_deadletter', N'correlation_id') IS NULL
+    ALTER TABLE dbo.altrata_deadletter ADD correlation_id NVARCHAR(128) NULL;
 IF OBJECT_ID(N'dbo.altrata_kv', N'U') IS NULL
 CREATE TABLE dbo.altrata_kv (
-    connector_id  NVARCHAR(64)  NOT NULL,
-    [key]         NVARCHAR(128) NOT NULL,
+    connector_id  NVARCHAR(64)  COLLATE Latin1_General_100_BIN2 NOT NULL,
+    [key]         NVARCHAR(128) COLLATE Latin1_General_100_BIN2 NOT NULL,
     [value]       NVARCHAR(MAX) NULL,
     CONSTRAINT pk_altrata_kv PRIMARY KEY (connector_id, [key])
 );
+IF EXISTS (SELECT 1 FROM sys.columns
+           WHERE object_id = OBJECT_ID(N'dbo.altrata_kv')
+             AND name IN (N'connector_id', N'key')
+             AND collation_name <> N'Latin1_General_100_BIN2')
+BEGIN
+    ALTER TABLE dbo.altrata_kv DROP CONSTRAINT pk_altrata_kv;
+    ALTER TABLE dbo.altrata_kv
+        ALTER COLUMN connector_id NVARCHAR(64) COLLATE Latin1_General_100_BIN2 NOT NULL;
+    ALTER TABLE dbo.altrata_kv
+        ALTER COLUMN [key] NVARCHAR(128) COLLATE Latin1_General_100_BIN2 NOT NULL;
+    ALTER TABLE dbo.altrata_kv
+        ADD CONSTRAINT pk_altrata_kv PRIMARY KEY (connector_id, [key]);
+END
 IF OBJECT_ID(N'dbo.altrata_deliveries', N'U') IS NULL
 CREATE TABLE dbo.altrata_deliveries (
-    connector_id  NVARCHAR(64)  NOT NULL,
-    delivery_id   NVARCHAR(256) NOT NULL,
+    connector_id  NVARCHAR(64)  COLLATE Latin1_General_100_BIN2 NOT NULL,
+    delivery_id   NVARCHAR(256) COLLATE Latin1_General_100_BIN2 NOT NULL,
     processed_utc DATETIME2     NOT NULL,
     CONSTRAINT pk_altrata_deliveries PRIMARY KEY (connector_id, delivery_id)
 );
+IF EXISTS (SELECT 1 FROM sys.columns
+           WHERE object_id = OBJECT_ID(N'dbo.altrata_deliveries')
+             AND name IN (N'connector_id', N'delivery_id')
+             AND collation_name <> N'Latin1_General_100_BIN2')
+BEGIN
+    ALTER TABLE dbo.altrata_deliveries DROP CONSTRAINT pk_altrata_deliveries;
+    ALTER TABLE dbo.altrata_deliveries
+        ALTER COLUMN connector_id NVARCHAR(64) COLLATE Latin1_General_100_BIN2 NOT NULL;
+    ALTER TABLE dbo.altrata_deliveries
+        ALTER COLUMN delivery_id NVARCHAR(256) COLLATE Latin1_General_100_BIN2 NOT NULL;
+    ALTER TABLE dbo.altrata_deliveries
+        ADD CONSTRAINT pk_altrata_deliveries PRIMARY KEY (connector_id, delivery_id);
+END
+IF EXISTS (SELECT 1 FROM sys.columns
+           WHERE object_id = OBJECT_ID(N'dbo.altrata_deadletter')
+             AND name = N'connector_id'
+             AND collation_name <> N'Latin1_General_100_BIN2')
+    ALTER TABLE dbo.altrata_deadletter
+        ALTER COLUMN connector_id NVARCHAR(64) COLLATE Latin1_General_100_BIN2 NOT NULL;
 IF OBJECT_ID(N'dbo.altrata_leases', N'U') IS NULL
 CREATE TABLE dbo.altrata_leases (
-    lease_name    NVARCHAR(128) NOT NULL PRIMARY KEY,
+    lease_name    NVARCHAR(128) COLLATE Latin1_General_100_BIN2 NOT NULL PRIMARY KEY,
     owner         NVARCHAR(128) NOT NULL,
     expires_utc   DATETIME2     NOT NULL
 );
 IF OBJECT_ID(N'dbo.altrata_suppressed', N'U') IS NULL
 CREATE TABLE dbo.altrata_suppressed (
-    connector_id NVARCHAR(64)  NOT NULL,
-    subject_id   NVARCHAR(256) NOT NULL,
+    connector_id NVARCHAR(64)  COLLATE Latin1_General_100_BIN2 NOT NULL,
+    subject_id   NVARCHAR(256) COLLATE Latin1_General_100_BIN2 NOT NULL,
     CONSTRAINT pk_altrata_suppressed PRIMARY KEY (connector_id, subject_id)
 );
-GO
+IF EXISTS (SELECT 1 FROM sys.columns
+           WHERE object_id = OBJECT_ID(N'dbo.altrata_suppressed')
+             AND name IN (N'subject_id', N'connector_id')
+             AND collation_name <> N'Latin1_General_100_BIN2')
+BEGIN
+    ALTER TABLE dbo.altrata_suppressed DROP CONSTRAINT pk_altrata_suppressed;
+    ALTER TABLE dbo.altrata_suppressed
+        ALTER COLUMN subject_id NVARCHAR(256) COLLATE Latin1_General_100_BIN2 NOT NULL;
+    ALTER TABLE dbo.altrata_suppressed
+        ALTER COLUMN connector_id NVARCHAR(64) COLLATE Latin1_General_100_BIN2 NOT NULL;
+    ALTER TABLE dbo.altrata_suppressed
+        ADD CONSTRAINT pk_altrata_suppressed PRIMARY KEY (connector_id, subject_id);
+END
 
--- ---------------------------------------------------------------------------
--- Identity / entitlement backend (Identity/SqlServerIdentityStore.cs :: SchemaScript)
--- ---------------------------------------------------------------------------
 IF OBJECT_ID(N'dbo.altrata_id_seats', N'U') IS NULL
 CREATE TABLE dbo.altrata_id_seats (
     connector_id NVARCHAR(64)  NOT NULL,

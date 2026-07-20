@@ -266,10 +266,66 @@ public static class CommandRegistry
                     Help = "Full crawl interval in hours (12-168, default 24)" },
             new() { Name = "--incremental-hours", HasValue = true, MinInt = 1, MaxInt = 168,
                     Help = "Incremental crawl interval in hours (1-168, default 4)" },
+            // WP-AL-4 part 2 — entitlement-freshness cadence. The hours flag
+            // cannot express anything below 60 minutes (it is an int), so a
+            // sub-hour cadence needs its own minutes-based option rather than a
+            // widened floor. Unused = --incremental-hours behaves exactly as before.
+            new() { Name = "--incremental-minutes", HasValue = true, MinInt = 1, MaxInt = 10080,
+                    Help = "Incremental crawl interval in MINUTES (1-10080). Sub-hour cadence for a " +
+                           "tighter authorisation-staleness budget; WINS over --incremental-hours. " +
+                           "Costs source API calls and Graph ACL writes at that rate" },
         };
         options.AddRange(extra);
         return options;
     }
+
+    /// <summary>
+    /// Resolve the incremental crawl cadence (WP-AL-4 part 2 — entitlement
+    /// freshness). --incremental-minutes WINS over --incremental-hours when both
+    /// are given, because it is the more specific unit and the only one that can
+    /// express a sub-hour cadence. Neither given → the historical 4h default, so
+    /// existing command lines are unaffected.
+    ///
+    /// WHY THIS IS THE ONLY CONNECTOR-SIDE LEVER: a Graph connector cannot
+    /// re-evaluate entitlement per grounding call. Graph trims results against
+    /// the ACL STORED ON THE ITEM at ingestion time and offers no callback into
+    /// Altrata at query time, so authorisation staleness is bounded by how often
+    /// the seat re-ACL sweep runs — nothing else. That sweep runs on incrementals
+    /// when IDENTITY_SYNC_ON_INCREMENTAL is true (the default), so this interval
+    /// IS the staleness budget.
+    ///
+    /// THE TRADE-OFF, HONESTLY: every incremental re-reads the seat list and, if
+    /// it changed, re-ACLs every existing item — source API calls plus one Graph
+    /// write per affected item. A 5-minute cadence costs 12x the sweeps of an
+    /// hourly one, against Graph throttling limits shared with ingestion. For
+    /// minute-level freshness prefer the standalone `seat-sync` command (see
+    /// SeatSyncOneAsync) under an external scheduler: it does the seat sweep ONLY,
+    /// without dragging a full delivery-reconciliation crawl along with it.
+    /// </summary>
+    internal static TimeSpan ResolveIncrementalInterval(ParsedArgs args) =>
+        args.GetString("--incremental-minutes") != null
+            ? TimeSpan.FromMinutes(args.GetInt("--incremental-minutes", 240))
+            : TimeSpan.FromHours(args.GetInt("--incremental-hours", 4));
+
+    /// <summary>How long the continuous scheduler sleeps before re-checking.
+    /// Capped at 30s so a graceful stop is honoured promptly; the cap must never
+    /// OVERSHOOT the next due crawl, which is what lets a sub-hour cadence be
+    /// honoured to within one loop iteration rather than being rounded up.</summary>
+    internal static TimeSpan SchedulerSleep(DateTime nowUtc, DateTime nextFullUtc, DateTime nextIncrementalUtc)
+    {
+        var wake = nextFullUtc < nextIncrementalUtc ? nextFullUtc : nextIncrementalUtc;
+        var wait = wake - nowUtc;
+        if (wait <= TimeSpan.Zero)
+            return TimeSpan.Zero;
+        return wait < TimeSpan.FromSeconds(30) ? wait : TimeSpan.FromSeconds(30);
+    }
+
+    /// <summary>Human-readable cadence — minutes below an hour, hours above, so a
+    /// sub-hour interval is never logged as a misleading "0h".</summary>
+    internal static string FormatCadence(TimeSpan interval) =>
+        interval.TotalHours >= 1
+            ? $"{interval.TotalHours:0.##}h"
+            : $"{interval.TotalMinutes:0.##}m";
 
     /// <summary>Wrap a handler with logging startup, runtime wiring and teardown.</summary>
     private static Func<ParsedArgs, Task<object?>> WithRuntime(
@@ -432,7 +488,7 @@ public static class CommandRegistry
         var continuous = args.GetFlag("--continuous");
         var incremental = args.GetFlag("--incremental");
         var fullEvery = TimeSpan.FromHours(args.GetInt("--full-crawl-hours", 24));
-        var incrementalEvery = TimeSpan.FromHours(args.GetInt("--incremental-hours", 4));
+        var incrementalEvery = ResolveIncrementalInterval(args);
 
         if (!continuous)
         {
@@ -442,8 +498,21 @@ public static class CommandRegistry
             return !result.Stopped && result.DeliveriesRejected == 0;
         }
 
-        Logger.Info($"Continuous mode: full every {fullEvery.TotalHours:0}h, " +
-                    $"incremental every {incrementalEvery.TotalHours:0}h");
+        Logger.Info($"Continuous mode: full every {FormatCadence(fullEvery)}, " +
+                    $"incremental every {FormatCadence(incrementalEvery)}");
+        // The incremental cadence IS the entitlement-staleness budget when
+        // IDENTITY_SYNC_ON_INCREMENTAL is on (the default): Graph trims against
+        // the ACL stored on the item, so a seat removal only takes effect at the
+        // next re-ACL sweep. Say so, with the cost, rather than leaving the
+        // operator to infer it.
+        Logger.Info(
+            incrementalEvery < TimeSpan.FromHours(1)
+                ? $"Entitlement re-ACL sweep runs at the incremental cadence ({FormatCadence(incrementalEvery)}) " +
+                  "when IDENTITY_SYNC_ON_INCREMENTAL is true — a sub-hour cadence tightens the authorisation " +
+                  "staleness budget at the cost of proportionally more source API calls and Graph ACL writes."
+                : $"Entitlement re-ACL sweep runs at the incremental cadence ({FormatCadence(incrementalEvery)}) " +
+                  "when IDENTITY_SYNC_ON_INCREMENTAL is true — use --incremental-minutes for a tighter " +
+                  "authorisation staleness budget, or run `seat-sync` under an external scheduler for minute-level freshness.");
         var nextFull = DateTime.UtcNow;                       // full crawl immediately
         var nextIncremental = DateTime.UtcNow + incrementalEvery;
 
@@ -461,14 +530,15 @@ public static class CommandRegistry
                 nextIncremental = DateTime.UtcNow + incrementalEvery;
             }
 
-            var wake = nextFull < nextIncremental ? nextFull : nextIncremental;
-            var wait = wake - DateTime.UtcNow;
+            // Sleep only as far as the next DUE crawl (capped for graceful-stop
+            // responsiveness) — never past it, which is what lets a sub-hour
+            // cadence be honoured to within one loop iteration.
+            var wait = SchedulerSleep(DateTime.UtcNow, nextFull, nextIncremental);
             if (wait > TimeSpan.Zero)
             {
                 try
                 {
-                    await Task.Delay(wait < TimeSpan.FromSeconds(30) ? wait : TimeSpan.FromSeconds(30),
-                        ServiceStop.Token);
+                    await Task.Delay(wait, ServiceStop.Token);
                 }
                 catch (OperationCanceledException)
                 {
@@ -607,6 +677,13 @@ public static class CommandRegistry
         // records) and short hashes (redacted records carry hashes only).
         HashSet<string>? suppressedIds = null;
         HashSet<string>? suppressedHashes = null;
+        // ContentGate (CS-1) re-applied on replay: draining the queue while
+        // CONTENT_GATE is on must NOT silently bypass a quarantine. A still-
+        // blocked item stays queued with its original content-gate reason; the
+        // operator re-drives it by reviewing and clearing the gate (or fixing
+        // the source feed) — the same "fix the cause, re-run" loop as every
+        // other dead-letter. Built once per queue.
+        var contentGate = ContentGate.FromEnv();
         void EnsureSuppressionSets()
         {
             if (suppressedIds != null)
@@ -703,6 +780,13 @@ public static class CommandRegistry
                     subjectsForIndex = record.SubjectIds;
                 }
                 SeatAclBuilder.AssertNeverEveryone(item.Acl);
+                if (contentGate != null)
+                {
+                    var gated = contentGate.Inspect(item);
+                    if (gated.Verdict.Quarantine)
+                        throw new ContentGateBlockedException(gated.Verdict.Reason);
+                    item = gated.Item;
+                }
                 await runtime.Graph.PutItemAsync(item, ServiceStop.Token);
                 runtime.Identity.RecordIngestedItem(new Identity.IngestedItem(
                     item.Id, record.Dataset, currentSeatHash!, DateTime.UtcNow));

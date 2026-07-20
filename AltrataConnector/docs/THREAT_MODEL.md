@@ -74,6 +74,30 @@ the group id is embedded in ACLs and evaluated by Microsoft Search at query time
 | E | Replay resurrecting an ERASED subject | Suppression guard in `retry-failed`: upserts for suppressed subjects are DROPPED (raw-id match in full mode, hash match in redacted, re-fetch re-check for legacy records); DELETE ops exempt — they complete erasures | Records queued by pre-1.0 builds carry no subject stamps AND a payload — drain or clear the queue before relying on the guard (RUNBOOKS) |
 | T | Queue-file edit injecting a forged payload to PUT | Replay rebuilds the ACL from CURRENT seats (never the captured ACL) and re-asserts never-everyone; redacted mode ignores payloads entirely (re-fetch from manifest-verified feed) | In `full` mode forged PROPERTIES would be PUT under a correct ACL. File ACLs; prefer redacted (default) |
 
+## 5b. Ingested content as Copilot grounding context (ContentGate, CS-1)
+
+The connector's output is not just data at rest — it is grounding context for
+Copilot answers. A record whose free text carries an injected instruction
+attacks **every user whose query that item grounds**, not only the subject the
+record describes. `CONTENT_GATE=true` screens the FINAL indexed text.
+
+| STRIDE | Threat | Mitigation (actual) | Residual |
+|---|---|---|---|
+| T | Prompt injection in a feed field (imperative override, role reassignment, exfiltration directive) becomes grounding context and steers Copilot | `ContentGate` + `InjectionScanner` scan the assembled body AND every string property; a hit is QUARANTINED to the dead-letter queue with reason `content-gate:<category>`, a `quarantine` decision-ledger entry, `contentScanStatus` on the item, `altrata_content_gate_blocked_total`, and the `content_gate_blocked` alert. Never indexed | **Heuristic, not a boundary.** Regex detection has false negatives by construction; a payload prefixed with a citation cue defeats the mention guard (documented in SECURITY.md, pinned by a test). Gate is OFF by default |
+| T | Detection evaded with hidden characters (zero-width interleaving, bidi overrides) | Every pattern runs twice: raw text, then a NORMALIZED copy with zero-width/bidi/soft-hyphen stripped. Runs of 3+ zero-width chars and any bidi control are themselves a hit (`injection.hidden-text`) | A lone zero-width joiner is legitimate (emoji) and is not flagged |
+| T | Instruction smuggled as an encoded blob | Long base64-dense runs (180+ chars, mixed case + digits) flagged `injection.encoded-blob` | The connector does not decode; a shorter encoded payload passes |
+| D | Pathological content stalls the crawl (catastrophic regex backtracking, huge field) | Per-pattern match budget (`CONTENT_GATE_PATTERN_TIMEOUT_MS`, 250 ms) and a size cap (`CONTENT_GATE_MAX_SCAN_MB`, 4). Both report an INCOMPLETE scan — **never "clean"** — and the fail mode adjudicates | With the shipped text fail-mode `open`, an attacker who reliably induces timeouts gets their item indexed unscanned. It is loud (`altrata_content_gate_incomplete_total`, warning, `contentScanStatus=incomplete`); set `CONTENT_GATE_FAIL_MODE=closed` to trade availability for it |
+| I | The verdict itself leaking PII into logs/ledger/queue/alerts | Verdicts carry the item id + a fixed-vocabulary category ONLY. No matched text, no snippet, no field value, no offset. Test drives a quarantine on a PII-loaded record and asserts all four sinks are clean | — |
+| E | `retry-failed` used to launder a quarantined item into the index | `retry-failed` RE-RUNS the gate: a still-blocked item stays queued with its original reason and a bumped attempt count | Clearing `CONTENT_GATE` (the deliberate operator override after review) re-drives it — by design; the ledger entry remains |
+
+**Malware / binary content: out of scope here, structurally.** This connector
+ingests no binary content — `FeedReader.ReadRecords` accepts `.json`/`.jsonl`/
+`.csv` only and throws `NotSupportedException` on anything else, item content
+type is always `"text"`, and there is no attachment/blob path. File integrity is
+covered by the SHA-256 manifest gate in section 1. `CONTENT_GATE_ICAP_URL` is
+accepted for fleet parity and logged as INERT; the binary fail mode defaults to
+CLOSED so a future binary path starts safe.
+
 ## 6. Review queue (logs/match_review_{CONNECTOR_ID}.jsonl)
 
 | STRIDE | Threat | Mitigation (actual) | Residual |

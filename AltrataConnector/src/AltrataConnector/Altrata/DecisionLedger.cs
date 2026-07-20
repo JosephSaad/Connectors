@@ -30,6 +30,14 @@ public static class DecisionActions
 {
     public const string Exclude = "exclude";
     public const string RestrictAcl = "acl-restrict";
+
+    /// <summary>QUARANTINE — an item the ContentGate stage refused to index and
+    /// routed to the dead-letter queue for human review (CS-1). Its OWN kind on
+    /// purpose: a quarantine is reversible (retry-failed re-drives it) and is
+    /// driven by a heuristic, whereas an exclusion is a permanent, deterministic
+    /// refusal. Overloading 'exclude' would make the two indistinguishable in
+    /// the audit.</summary>
+    public const string Quarantine = "quarantine";
 }
 
 public sealed record DecisionLedgerEntry
@@ -54,6 +62,10 @@ public interface IDecisionLedger
     DecisionLedgerEntry Append(string itemId, string decision, string reason, string? actor = null);
     DecisionLedgerEntry RecordExclusion(string itemId, string reason, string? actor = null);
     DecisionLedgerEntry RecordAclRestriction(string itemId, string reason, string? actor = null);
+
+    /// <summary>ContentGate quarantine (CS-1). <paramref name="reason"/> must be
+    /// the PII-safe "content-gate:&lt;category&gt;" string — never matched text.</summary>
+    DecisionLedgerEntry RecordQuarantine(string itemId, string reason, string? actor = null);
     IReadOnlyList<DecisionLedgerEntry> ReadAll();
     bool Verify(out int brokenAtSeq);
 }
@@ -121,6 +133,9 @@ public sealed class DecisionLedger : HashChainedLedger<DecisionLedgerEntry>, IDe
 
     public DecisionLedgerEntry RecordAclRestriction(string itemId, string reason, string? actor = null) =>
         Append(itemId, DecisionActions.RestrictAcl, reason, actor);
+
+    public DecisionLedgerEntry RecordQuarantine(string itemId, string reason, string? actor = null) =>
+        Append(itemId, DecisionActions.Quarantine, reason, actor);
 
     protected override long SeqOf(DecisionLedgerEntry e) => e.Seq;
     protected override string PrevHashOf(DecisionLedgerEntry e) => e.PrevHash;

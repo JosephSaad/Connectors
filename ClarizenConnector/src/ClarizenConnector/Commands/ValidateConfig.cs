@@ -29,6 +29,16 @@ public static class ValidateConfig
         "SECRET_AAD_APP_CLIENT_SECRET",
     };
 
+    /// <summary>Prefix of every finding the schema.json block below records for a
+    /// file it could not load. AddSchemaDriftFindings matches on it to PROVE a
+    /// load failure was already reported instead of assuming it was.</summary>
+    internal const string SchemaJsonErrorPrefix = "schema.json invalid:";
+
+    /// <summary>Prefix shared by every graph-schema.json finding recorded before
+    /// the drift check runs. Same purpose as <see cref="SchemaJsonErrorPrefix"/>.
+    /// </summary>
+    internal const string GraphSchemaJsonErrorPrefix = "graph-schema.json";
+
     public sealed class Result
     {
         public List<string> Errors { get; } = new();
@@ -88,7 +98,7 @@ public static class ValidateConfig
             }
             catch (Exception exc)
             {
-                result.Errors.Add($"schema.json invalid: {exc.Message}");
+                result.Errors.Add($"{SchemaJsonErrorPrefix} {exc.Message}");
             }
         }
 
@@ -124,6 +134,22 @@ public static class ValidateConfig
                 result.Errors.Add($"graph-schema.json invalid: {exc.Message}");
             }
         }
+
+        // ── SCHEMA DRIFT: what the code stamps vs what graph-schema.json declares ──
+        //
+        // This used to exist ONLY as a unit test, so an operator running
+        // `validate-config` on a deployment host against a hand-edited
+        // graph-schema.json got no drift signal at all — the first sign was
+        // Graph rejecting items mid-crawl. It is a preflight now.
+        //
+        // The stamped side is collected by EXECUTING stamper call sites
+        // (StampedPropertyInventory) rather than by reading a list of registered
+        // NAMES — but the set of call sites it executes is itself maintained, so
+        // this is a best-effort early warning, NOT the drift guarantee. A stamp
+        // written somewhere the inventory does not invoke passes here and is
+        // caught by GraphPropertyBag at the moment of the stamp instead, which
+        // aborts the crawl. Do not read a clean preflight as proof of no drift.
+        AddSchemaDriftFindings(result, schemaFile, graphSchemaFile);
 
         // Cross-flag consistency.
         if (EnvFlags.HaMode && !EnvFlags.UseSqlServer)
@@ -172,6 +198,61 @@ public static class ValidateConfig
             }
         }
 
+        // Content gate (docs/CONTENT_GATE.md). Preflight catches the two
+        // configurations an operator regrets discovering mid-crawl: a fail-mode
+        // typo, and "gate on, binaries ingested, no scanner" — which is a valid
+        // but total block of every attachment.
+        foreach (var name in new[]
+                 {
+                     "CONTENT_GATE_FAIL_MODE", "CONTENT_GATE_FAIL_MODE_BINARY",
+                     "CONTENT_GATE_FAIL_MODE_TEXT",
+                 })
+        {
+            var mode = Environment.GetEnvironmentVariable(name);
+            if (!string.IsNullOrWhiteSpace(mode)
+                && mode.Trim().ToLowerInvariant() is not ("closed" or "open"))
+            {
+                result.Errors.Add($"{name} must be one of closed | open.");
+            }
+        }
+
+        if (EnvFlags.IsTrue("CONTENT_GATE"))
+        {
+            var icapUrl = Environment.GetEnvironmentVariable("CONTENT_GATE_ICAP_URL");
+            var binaryFailOpen = string.Equals(
+                EnvFlags.GetString(
+                    "CONTENT_GATE_FAIL_MODE_BINARY",
+                    EnvFlags.GetString("CONTENT_GATE_FAIL_MODE", "closed")),
+                "open", StringComparison.OrdinalIgnoreCase);
+
+            if (string.IsNullOrWhiteSpace(icapUrl)
+                && EnvFlags.IsTrue("ATTACHMENT_INGESTION")
+                && !binaryFailOpen)
+            {
+                result.Warnings.Add(
+                    "CONTENT_GATE=true with ATTACHMENT_INGESTION=true but no CONTENT_GATE_ICAP_URL: "
+                    + "no binary scanner is wired and the binary fail mode is closed, so EVERY "
+                    + "attachment will be quarantined. Set CONTENT_GATE_ICAP_URL, or accept the "
+                    + "risk explicitly with CONTENT_GATE_FAIL_MODE_BINARY=open.");
+            }
+            if (binaryFailOpen)
+            {
+                result.Warnings.Add(
+                    "CONTENT_GATE_FAIL_MODE_BINARY=open means UNSCANNED BINARY CONTENT CAN BE "
+                    + "INDEXED when the scanner is unreachable. The shipped default is closed.");
+            }
+
+            var patterns = ContentGate.InjectionScanner.Load();
+            if (patterns.PatternCount == 0)
+            {
+                result.Warnings.Add(
+                    $"CONTENT_GATE=true but no usable injection patterns loaded from "
+                    + $"config/{ContentGate.InjectionScanner.ConfigFileName}. The text scanner is "
+                    + "BLIND and CONTENT_GATE_FAIL_MODE_TEXT decides what happens (default open = "
+                    + "ingestion continues UNPROTECTED).");
+            }
+        }
+
         var tdwPath = Environment.GetEnvironmentVariable("TDW_EXPORT_PATH");
         if (!string.IsNullOrWhiteSpace(tdwPath) && !Directory.Exists(tdwPath))
             result.Warnings.Add($"TDW_EXPORT_PATH '{tdwPath}' does not exist; full crawls will use the REST API.");
@@ -202,6 +283,100 @@ public static class ValidateConfig
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Compare the Graph property names the code ACTUALLY stamps against the
+    /// names config/graph-schema.json declares, in both directions.
+    /// <list type="bullet">
+    ///   <item>stamped but undeclared → ERROR. Graph rejects the property; the
+    ///   connector is undeployable and every affected item fails.</item>
+    ///   <item>declared but never stamped → WARNING. Harmless dead schema, but
+    ///   usually the trace of a rename that only got applied on one side.</item>
+    /// </list>
+    /// Both files must have parsed for this to mean anything. When one did not,
+    /// this stays silent ONLY if the earlier checks demonstrably recorded an
+    /// error for that same file — it CHECKS that rather than assuming it.
+    /// <para>
+    /// The previous version wrapped both loads in a blanket
+    /// <c>catch { return; }</c> justified by that assumption. The assumption was
+    /// false for a degenerate graph-schema.json (<c>[]</c>, or entries whose
+    /// name is empty): the earlier array/field checks pass it, the swallowed
+    /// <see cref="InvalidDataException"/> produced no finding, and
+    /// <c>validate-config --strict</c> reported a clean config for a file that
+    /// makes the first property stamp of the crawl throw.
+    /// </para>
+    /// </summary>
+    internal static void AddSchemaDriftFindings(
+        Result result, string schemaFile, string graphSchemaFile)
+    {
+        if (!File.Exists(schemaFile) || !File.Exists(graphSchemaFile))
+            return;
+
+        SchemaConfig schema;
+        try
+        {
+            schema = SchemaConfig.Load(schemaFile);
+        }
+        catch (Exception exc)
+        {
+            if (!result.Errors.Any(e => e.StartsWith(SchemaJsonErrorPrefix, StringComparison.Ordinal)))
+            {
+                result.Errors.Add(
+                    $"schema.json could not be loaded, so Graph schema drift could not be checked: "
+                    + exc.Message);
+            }
+            return;
+        }
+
+        HashSet<string> declared;
+        try
+        {
+            declared = GraphPropertyRegistry.ReadDeclaredNames(graphSchemaFile);
+        }
+        catch (Exception exc)
+        {
+            if (!result.Errors.Any(e => e.StartsWith(GraphSchemaJsonErrorPrefix, StringComparison.Ordinal)))
+            {
+                result.Errors.Add(
+                    "graph-schema.json is unusable as a Graph property declaration: " + exc.Message
+                    + " The connector loads this same file at runtime to decide which properties it "
+                    + "may stamp, so with this file every record would fail to transform.");
+            }
+            return;
+        }
+
+        List<string> stamped;
+        try
+        {
+            stamped = StampedPropertyInventory.Collect(schema).ToList();
+        }
+        catch (Exception exc)
+        {
+            result.Errors.Add(
+                "Could not determine which Graph properties the connector stamps, so schema drift "
+                + $"could not be checked: {exc.Message}");
+            return;
+        }
+
+        var undeclared = stamped.Where(name => !declared.Contains(name)).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        if (undeclared.Count > 0)
+        {
+            result.Errors.Add(
+                "graph-schema.json does not declare property name(s) the connector stamps on "
+                + $"external items: {string.Join(", ", undeclared)}. Microsoft Graph REJECTS "
+                + "undeclared properties, so every item carrying one will fail to ingest. Add them "
+                + "to config/graph-schema.json.");
+        }
+
+        var unused = declared.Where(name => !stamped.Contains(name)).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        if (unused.Count > 0)
+        {
+            result.Warnings.Add(
+                "graph-schema.json declares property name(s) nothing stamps: "
+                + $"{string.Join(", ", unused)}. Harmless, but usually a rename applied to only one "
+                + "of schema.json / graph-schema.json.");
+        }
     }
 
     public static async Task<object?> RunAsync(ParsedArgs args)

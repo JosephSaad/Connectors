@@ -1,0 +1,90 @@
+{
+  "_comment": "ContentGate injection-heuristic pattern set (docs/CONTENT_GATE.md). Scanned against the FINAL indexed text of every item (content body + string/string[] properties) and against extracted attachment text, but ONLY when CONTENT_GATE=true. Patterns are compiled once at startup with a per-pattern match timeout; a timeout FAILS SAFE (the document is treated as suspicious, not as 'no match'). 'category' is a wire contract: it becomes the dead-letter reason 'content-gate:<category>', the decision-ledger reason, and the content_gate_blocked_total metric label. 'quoteAware' (default true) suppresses a match that sits entirely inside quotation marks, so a document that merely QUOTES an attack phrase in prose is not quarantined. Patterns are evaluated in file order and the FIRST hit wins, so order the strongest, least ambiguous signals first. Matching is case-insensitive. Edit patterns here; no code change needed.",
+  "patterns": [
+    {
+      "name": "zeroWidthHiddenText",
+      "category": "injection.hidden_text",
+      "quoteAware": false,
+      "_comment": "Zero-width character splitting a word (the classic filter-evasion shape) or a run of 2+. A leading BOM is stripped before matching, and emoji ZWJ sequences do not match because the neighbours are not word characters.",
+      "regex": "(?<=\\w)[\\u200B\\u200C\\u200D\\uFEFF](?=\\w)|[\\u200B\\u200C\\u200D\\uFEFF]{2,}"
+    },
+    {
+      "name": "bidiOverride",
+      "category": "injection.hidden_text",
+      "quoteAware": false,
+      "_comment": "LEFT-TO-RIGHT / RIGHT-TO-LEFT OVERRIDE only (U+202D, U+202E). Deliberately excludes the embedding/isolate codepoints that legitimate right-to-left documents rely on.",
+      "regex": "[\\u202D\\u202E]"
+    },
+    {
+      "name": "ignorePriorInstructions",
+      "category": "injection.override",
+      "regex": "\\b(?:ignore|disregard|forget|override|bypass|skip)\\b[^.\\n]{0,60}?\\b(?:previous|prior|preceding|above|earlier|foregoing|original|initial|before|all)\\b[^.\\n]{0,60}?\\b(?:instruction|prompt|direction|directive|rule|guideline|command|order|constraint|restriction)s?\\b"
+    },
+    {
+      "name": "disregardTheAbove",
+      "category": "injection.override",
+      "regex": "\\b(?:disregard|ignore)\\s+(?:everything\\s+)?(?:the\\s+|all\\s+|any\\s+)?(?:text\\s+|content\\s+|instructions\\s+)?(?:above|preceding|previous|prior|earlier)\\b"
+    },
+    {
+      "name": "forgetEverythingAbove",
+      "category": "injection.override",
+      "regex": "\\bforget\\s+(?:everything|all|what|any)\\b[^.\\n]{0,40}?\\b(?:above|before|previously|earlier|told|said|instructed|learned)\\b"
+    },
+    {
+      "name": "systemPromptDisclosure",
+      "category": "injection.override",
+      "regex": "\\b(?:reveal|show|print|output|repeat|disclose|dump|display)\\b[^.\\n]{0,40}?\\b(?:system\\s+prompt|initial\\s+instructions|your\\s+instructions|your\\s+rules|hidden\\s+prompt|the\\s+prompt\\s+above)\\b"
+    },
+    {
+      "name": "roleHeaderInjection",
+      "category": "injection.override",
+      "_comment": "A forged conversation turn ('System: ignore ...') pasted into document text.",
+      "regex": "(?:^|\\n)\\s*(?:system|assistant|developer)\\s*[:>]\\s*(?:you\\s+|ignore\\b|disregard\\b|new\\s+instructions\\b|override\\b)"
+    },
+    {
+      "name": "youAreNowRole",
+      "category": "injection.role",
+      "_comment": "Requires an AI-role noun, so ordinary business text ('You are now able to submit expenses') does not trip.",
+      "regex": "\\byou\\s+are\\s+now\\b[^.\\n]{0,24}?\\b(?:ai|assistant|model|chatbot|llm|dan|unrestricted|unfiltered|uncensored|jailbroken|developer\\s+mode|no\\s+longer\\s+bound|free\\s+from|without\\s+restrictions)\\b"
+    },
+    {
+      "name": "actAsRole",
+      "category": "injection.role",
+      "_comment": "Requires an AI-role noun, so 'Ravi will act as release manager' does not trip.",
+      "regex": "\\bact\\s+as\\s+(?:a\\s+|an\\s+|the\\s+)?(?:ai\\b|assistant|model|chatbot|llm|dan\\b|unrestricted|unfiltered|uncensored|jailbroken|rogue|hypothetical|simulator)"
+    },
+    {
+      "name": "fromNowOnRole",
+      "category": "injection.role",
+      "regex": "\\bfrom\\s+now\\s+on,?\\s+you\\s+(?:are|will\\s+be|must\\s+act\\s+as|shall\\s+act\\s+as|should\\s+act\\s+as)\\b[^.\\n]{0,24}?\\b(?:ai\\b|assistant|model|chatbot|llm|dan\\b|unrestricted|unfiltered|uncensored|jailbroken|developer\\s+mode)\\b"
+    },
+    {
+      "name": "pretendToBe",
+      "category": "injection.role",
+      "regex": "\\bpretend\\s+(?:to\\s+be|that\\s+you|you\\s+are|to\\s+act)\\b"
+    },
+    {
+      "name": "sendToUrl",
+      "category": "injection.exfiltration",
+      "_comment": "Requires the URL to be the direct destination ('... to https://'), so 'send the report to the team, see https://intranet/...' does not trip.",
+      "regex": "\\b(?:send|post|upload|transmit|forward|deliver)\\b[^.\\n]{0,60}?\\bto\\s+https?://"
+    },
+    {
+      "name": "exfiltrationVerb",
+      "category": "injection.exfiltration",
+      "regex": "\\b(?:exfiltrate|exfiltration|smuggle\\s+(?:out|the)|leak\\s+(?:the|all|every))\\b"
+    },
+    {
+      "name": "curlPostToUrl",
+      "category": "injection.exfiltration",
+      "regex": "\\bcurl\\b[^.\\n]{0,80}?(?:-d\\b|--data\\b|-X\\s+POST\\b|--upload-file\\b)[^.\\n]{0,80}?https?://"
+    },
+    {
+      "name": "longBase64Run",
+      "category": "injection.encoded_blob",
+      "quoteAware": false,
+      "_comment": "240+ contiguous base64 characters — a smuggled payload, not prose. Ordinary business text does not contain unbroken alphanumeric runs this long.",
+      "regex": "[A-Za-z0-9+/]{240,}={0,2}"
+    }
+  ]
+}

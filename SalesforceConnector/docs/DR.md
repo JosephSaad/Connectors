@@ -136,5 +136,10 @@ the old version expire harmlessly).
   `@redaction`) are additive JSON keys that old readers ignore.
 - **Breaking changes** (reserved for a major version bump): shipped with an
   explicit migration section in `CHANGELOG.md` and, where feasible, a
-  dual-read window. The identity-store MD5 `instance_hash` key is pinned by
-  this policy — see the FIPS note in [THREAT_MODEL.md](THREAT_MODEL.md).
+  dual-read window. The identity-store `instance_hash` key moved from MD5 to
+  SHA-256 in WP-SF-5 without a dual-read window, because the field cache it
+  keys is a **pure cache**: stale rows are simply missed and rebuilt by the
+  existing field-discovery loop on the next crawl, with no data loss and no
+  operator action. Recovery objectives are unaffected — a restored backup
+  rebuilds its own cache the same way. See the FIPS posture in
+  [THREAT_MODEL.md](THREAT_MODEL.md#fips-posture).

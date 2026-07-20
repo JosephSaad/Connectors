@@ -95,6 +95,39 @@ groups:
           description: "Event-driven incremental is off; the polling cursor still reconciles. Check bind/URL-ACL logs."
           runbook_url: "<REPO>/docs/RUNBOOKS.md#webhook-flood--401-spike"
 
+      # ── Content gate (CONTENT_GATE, docs/CONTENT_GATE.md) ───────────────────
+      # The text path FAILS OPEN by design, so this metric is the ONLY signal
+      # that the injection heuristic silently stopped covering a crawl. It is
+      # the most important alert in this file when the gate is enabled.
+      - alert: ContentGateTextScannerBlind
+        expr: increase(clarizen_connector_content_gate_scan_unavailable_total{kind="text"}[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Content gate is not scanning text ({{ $labels.instance }})"
+          description: "CONTENT_GATE_FAIL_MODE_TEXT=open means ingestion CONTINUES UNPROTECTED. Check that config/content-gate.json is present and parseable."
+          runbook_url: "<REPO>/docs/CONTENT_GATE.md#operator-runbook"
+
+      # Binary fails CLOSED, so this shows up as mass quarantine rather than as
+      # silent exposure — still page, because attachment ingestion has stopped.
+      - alert: ContentGateBinaryScannerDown
+        expr: increase(clarizen_connector_content_gate_scan_unavailable_total{kind="binary"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Content gate cannot scan attachment binaries ({{ $labels.instance }})"
+          description: "Fail-closed (default) means every attachment is being quarantined. Nothing is lost — fix CONTENT_GATE_ICAP_URL reachability, then run retry-failed."
+          runbook_url: "<REPO>/docs/CONTENT_GATE.md#operator-runbook"
+
+      - alert: ContentGateBlockSpike
+        expr: increase(clarizen_connector_content_gate_blocked_total[1h]) > 25
+        labels:
+          severity: warning
+        annotations:
+          summary: "Content gate quarantined {{ $value }} items in an hour ({{ $labels.category }})"
+          description: "Either a genuine injection campaign in the source data, or a pattern in config/content-gate.json is too broad. Items are in the dead-letter queue and re-drivable."
+          runbook_url: "<REPO>/docs/CONTENT_GATE.md#operator-runbook"
+
       # ── Crawl liveness / HA ─────────────────────────────────────────────────
       - alert: CrawlStale
         expr: (time() - max by (instance) (clarizen_connector_last_crawl_completed_timestamp_seconds)) > 129600

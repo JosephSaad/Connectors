@@ -162,6 +162,31 @@ public static class ValidateConfig
                     warnings.Add("Altrata API token could not be acquired");
                     Warn("Altrata API token could not be acquired");
                 }
+
+                // Usage-ceiling posture (WP-AL-4). Surfaced here because "we are
+                // metering but never refusing" is exactly the state an operator
+                // assumes they are NOT in. Note the scope caveat: the counter is
+                // per state store, so the file backend enforces it per host.
+                var budget = Altrata.UsageBudgetOptions.FromConfig(config);
+                if (budget.Enforcing)
+                {
+                    var parts = new List<string>();
+                    if (budget.MaxPerDay > 0)
+                        parts.Add($"{budget.MaxPerDay}/UTC-day");
+                    if (budget.MaxPerWindow > 0)
+                        parts.Add($"{budget.MaxPerWindow}/rolling-{budget.WindowHours}h");
+                    Pass($"Altrata usage ceiling ENFORCED: {string.Join(", ", parts)} — over-ceiling " +
+                         "lookups are refused fail-closed" +
+                         (config.UseSqlServer
+                             ? " (fleet-wide via shared SQL state)"
+                             : " (per host — the file state backend does not share the counter across nodes)"));
+                }
+                else
+                {
+                    Warn($"Altrata usage ceiling OFF ({Altrata.UsageBudgetOptions.MaxPerDayEnvVar} / " +
+                         $"{Altrata.UsageBudgetOptions.MaxPerWindowEnvVar} unset) — billable lookups are " +
+                         "counted and rate-limited but NEVER refused; spend is unbounded");
+                }
             }
             else
             {

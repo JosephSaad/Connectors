@@ -148,7 +148,7 @@ public class GraphIngestTests
 
     // ── Pipeline fixture ─────────────────────────────────────────────────────
 
-    private sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         public readonly TempDir Dir = new();
         public readonly SyncStateScope StateScope = new();

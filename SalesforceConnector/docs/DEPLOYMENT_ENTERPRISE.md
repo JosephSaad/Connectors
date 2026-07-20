@@ -97,10 +97,13 @@ Destinations needed outbound (default clouds): your
 
 On Windows with the FIPS local-security policy enabled, .NET maps its crypto to
 CNG/validated providers; the connector's TLS, SHA-256 usage (client-assertion
-`x5t#S256`, dead-letter redaction hashes) and RSA signing all comply. One
-legacy MD5 call exists — a non-security cache key inherited from the Python
-original's state format; audit result, risk assessment and the migration note
-are in [THREAT_MODEL.md](THREAT_MODEL.md#fips-audit-2026-07). Graph
+`x5t#S256`, dead-letter redaction hashes, decision-ledger chain, field-cache
+instance key) and RSA signing all comply. **No MD5 or SHA-1 call remains in
+`src/`** — the last one, the field-cache `instance_hash` key, moved to SHA-256
+in WP-SF-5 and is enforced by a source-contract test. Note the one-time
+field-cache rebuild on upgrade from 1.0.0 (automatic, no data loss): full
+posture and the optional operator cleanup are in
+[THREAT_MODEL.md](THREAT_MODEL.md#fips-posture). Graph
 certificate auth (`GRAPH_CLIENT_CERT_THUMBPRINT` + machine store,
 non-exportable key) is the FIPS-friendly credential — prefer it over PFX files
 and client secrets in FIPS estates.

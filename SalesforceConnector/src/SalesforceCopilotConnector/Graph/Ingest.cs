@@ -158,6 +158,11 @@ public static class Ingest
         (instanceUrl, schema, tenantId) => new SalesforceItemTransformer(instanceUrl, schema, tenantId: tenantId);
     internal static Func<AppConfig, DateTime?, Task<Dictionary<string, int>>> GetObjectCountsHook =
         ApiClient.GetObjectCountsAsync;
+    // WP-SF-2 seam: resolves field-level security and pushes the drop set into the
+    // converter handlers before any record is converted.
+    internal static Func<FlsFetcher, Dictionary<string, SalesforceObjectHandler>, string, Task> FlsEnforcementHook =
+        async (fetcher, handlers, connectorId) =>
+            await FlsEnforcement.ApplyAsync(fetcher, handlers, connectorId);
     // HA seam (docs/SQL_CONTRACT.md): when non-null, the per-object worker loop
     // pulls object types from the returned work source (coordinator claims)
     // instead of the static schema list. Null (default) → behavior unchanged.
@@ -1492,6 +1497,47 @@ public static class Ingest
             config.Connector.Salesforce.InstanceUrl,
             config.Connector.Schema,
             config.TenantId);
+
+        // ── WP-SF-2: field-level security ────────────────────────────────────────
+        // Resolve which fields Salesforce would hide and withhold them from the
+        // index BEFORE any record is converted. Defaults ON (FLS_ENFORCEMENT) in
+        // strict mode (FLS_MODE) — see AclEngine/FlsFetcher.cs for the decision rule.
+        if (FlsSettings.Enforcement)
+        {
+            try
+            {
+                var flsSfClient = new SalesforceClient(
+                    instanceUrl: config.Connector.Salesforce.InstanceUrl,
+                    apiVersion: config.Connector.Salesforce.ApiVersion,
+                    accessToken: await ApiClient.GetSalesforceAccessTokenAsync(config),
+                    tokenRefresher: () => ApiClient.GetSalesforceAccessTokenAsync(config).GetAwaiter().GetResult());
+                using var flsStore = IdentityStore.CreateStore(config.Connector.Id);
+                await FlsEnforcementHook(
+                    new FlsFetcher(flsSfClient, flsStore, config.Connector.Salesforce.InstanceUrl),
+                    transformer.Handlers,
+                    config.Connector.Id);
+            }
+            catch (Exception exc)
+            {
+                // Deliberate posture: an FLS metadata hiccup logs LOUDLY and lets the
+                // crawl proceed rather than halting all ingestion. The operator's
+                // manual `flsFields` list still applies, but the fetched restrictions
+                // do NOT — so this run can index fields Salesforce would hide. The
+                // in-band failure modes (FieldPermissions unreadable, scope query
+                // unreadable) are already handled fail-closed inside FlsFetcher; only
+                // an unexpected failure reaches here.
+                Logger.Error(
+                    "[FLS] Field-level security could not be resolved — THIS CRAWL MAY INDEX FIELDS "
+                    + $"SALESFORCE WOULD HIDE. Only the manual schema.json 'flsFields' list is in force. Cause: {exc.Message}",
+                    exc);
+            }
+        }
+        else
+        {
+            Logger.Warning(
+                "[FLS] FLS_ENFORCEMENT is off — field-level security is NOT evaluated. "
+                + "Every indexed field is visible to every principal on the item's ACL.");
+        }
 
         // ── New ACL engine: initialise once ──────────────────────────────────────
         NewAclResolver? newAclResolver = null;

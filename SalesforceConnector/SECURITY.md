@@ -121,3 +121,48 @@ Not persisted anywhere: access tokens (memory only), client-assertion JWTs
 (built per token request, 10-minute lifetime), Key Vault values (resolved into
 process memory), certificate private keys (stay in the OS store / PFX you
 supplied).
+
+## Cryptographic posture (FIPS 140-3)
+
+**No MD5, SHA-1, DES, RC4, or TripleDES call exists anywhere in `src/`.** Every
+hash the connector computes is SHA-256:
+
+| Use | Location |
+|---|---|
+| Field-cache instance key (`instance_hash` / `@InstanceHash`) | `Graph/IdentityStore.cs`, `Graph/SqlServerIdentityStore.cs` — `InstanceHash` |
+| Client-assertion certificate binding (`x5t#S256`) | `Graph/GraphAuth.cs` |
+| Dead-letter redaction hashes | `Config/DeadLetterRedaction.cs` |
+| Decision-ledger hash chain | `Graph/DecisionLedger.cs` |
+
+TLS, RSA signing, and X509 chain building use the platform providers, so on a
+FIPS-enforced host (Windows FIPS local-security policy) nothing maps to a
+non-validated path. `GRAPH_CLIENT_CERT_THUMBPRINT` against the machine store
+with a non-exportable key is the FIPS-friendly credential — prefer it over PFX
+files and client secrets in FIPS estates
+([docs/DEPLOYMENT_ENTERPRISE.md](docs/DEPLOYMENT_ENTERPRISE.md) §4).
+
+The posture is regression-guarded, not just reviewed: a source-contract test
+(`FipsSourceContractTests` in
+`tests/SalesforceCopilotConnector.Tests/TestGraph/FipsInstanceHashTests.cs`)
+greps `src/` on every test run and fails if a broken primitive reappears.
+
+### Upgrading from 1.0.0 — one-time field-cache rebuild
+
+Through 1.0.0 the field-cache instance key was an MD5 prefix. It is now a
+SHA-256 prefix, with the **same 8-lowercase-hex output shape**, so no schema
+migration is needed — `scripts/sql/create-database.sql` is unchanged and both
+primary keys stay valid.
+
+The field cache is a pure cache (it only skips the `INVALID_FIELD` field
+discovery loop). On the first crawl after upgrade, rows keyed by the old MD5
+value are simply missed and rebuilt under the new key. **No data loss and no
+operator action — expect one slightly slower crawl, then steady state.**
+
+Pre-upgrade rows are deliberately left in place rather than auto-deleted: they
+are inert and a few KB, and one database can legitimately hold live cache rows
+for several Salesforce instances (sandbox + production), so no automatic
+deletion rule can tell an orphan from another instance's live row. If you want
+them gone, run the existing `ClearFieldCache()` **with no arguments** once,
+after upgrading (SQL backend: `EXEC dbo.usp_ClearFieldCache` with both
+parameters `NULL`). Full rationale in
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md#fips-posture).

@@ -1,0 +1,88 @@
+{
+  "patterns": [
+    {
+      "id": "override-instructions",
+      "category": "injection.imperative-override",
+      "regex": "\\b(?:ignore|disregard|override|bypass|forget)\\b[^\\n]{0,40}?\\b(?:previous|prior|preceding|earlier|above|foregoing|all|any|your|the\\s+system)\\b[^\\n]{0,20}?\\b(?:instructions?|prompts?|directions?|rules?|guardrails?|guidelines?|messages?|context)\\b",
+      "mentionGuard": true
+    },
+    {
+      "id": "disregard-the-above",
+      "category": "injection.imperative-override",
+      "regex": "\\b(?:ignore|disregard)\\s+(?:everything\\s+)?(?:the\\s+)?(?:above|foregoing|preceding)\\b",
+      "mentionGuard": true
+    },
+    {
+      "id": "forget-everything",
+      "category": "injection.imperative-override",
+      "regex": "\\bforget\\s+(?:everything|all)\\s+(?:above|before|you)\\b",
+      "mentionGuard": true
+    },
+    {
+      "id": "role-you-are-now",
+      "category": "injection.role-reassignment",
+      "regex": "\\byou\\s+are\\s+(?:now\\s+)?(?:no\\s+longer\\s+)?(?:a\\s+|an\\s+|the\\s+)?(?:helpful\\s+)?(?:AI|A\\.I\\.|assistant|chatbot|language\\s+model|LLM|DAN|unrestricted|unfiltered|jailbroken|developer\\s+mode|in\\s+developer\\s+mode)\\b",
+      "mentionGuard": true
+    },
+    {
+      "id": "role-act-as",
+      "category": "injection.role-reassignment",
+      "regex": "\\bact(?:s|ing)?\\s+as\\s+(?:a\\s+|an\\s+|the\\s+)?(?:AI|A\\.I\\.|assistant|chatbot|language\\s+model|LLM|DAN|system\\s+prompt|unrestricted|unfiltered|different\\s+AI)\\b",
+      "mentionGuard": true
+    },
+    {
+      "id": "role-new-system-prompt",
+      "category": "injection.role-reassignment",
+      "regex": "\\b(?:new|updated|revised|replacement)\\s+system\\s+(?:prompt|message|instructions?)\\b",
+      "mentionGuard": true
+    },
+    {
+      "id": "role-pretend",
+      "category": "injection.role-reassignment",
+      "regex": "\\bpretend\\s+(?:to\\s+be|that\\s+you|you(?:'re|\\s+are))\\b",
+      "mentionGuard": true
+    },
+    {
+      "id": "role-chat-template-marker",
+      "category": "injection.role-reassignment",
+      "regex": "<\\|(?:im_start|im_end|system|endoftext)\\|>|\\[/?INST\\]|<<SYS>>|###\\s*(?:system|instruction)\\b",
+      "mentionGuard": false
+    },
+    {
+      "id": "exfil-to-url",
+      "category": "injection.exfiltration",
+      "regex": "\\b(?:send|post|upload|transmit|forward|leak|publish)\\b[^\\n]{0,100}?\\b(?:conversation|chat\\s+history|context|system\\s+prompt|prompts?|instructions?|credentials?|api[\\s_-]*keys?|tokens?|secrets?|passwords?|private\\s+key|user\\s+data|seat\\s+list|the\\s+above|everything\\s+above)\\b[^\\n]{0,100}?https?://",
+      "mentionGuard": true
+    },
+    {
+      "id": "exfil-url-carrying-secrets",
+      "category": "injection.exfiltration",
+      "regex": "https?://[^\\n]{0,120}?\\b(?:with|containing|including)\\b[^\\n]{0,60}?\\b(?:conversation|context|credentials?|api[\\s_-]*keys?|tokens?|secrets?|passwords?)\\b",
+      "mentionGuard": true
+    },
+    {
+      "id": "exfil-verb",
+      "category": "injection.exfiltration",
+      "regex": "\\bexfiltrat(?:e|es|ed|ing|ion)\\b",
+      "mentionGuard": true
+    },
+    {
+      "id": "hidden-zero-width-run",
+      "category": "injection.hidden-text",
+      "regex": "[\\u200B-\\u200D\\u2060\\uFEFF]{3,}",
+      "mentionGuard": false
+    },
+    {
+      "id": "hidden-bidi-control",
+      "category": "injection.hidden-text",
+      "regex": "[\\u202A-\\u202E\\u2066-\\u2069]",
+      "mentionGuard": false
+    },
+    {
+      "id": "encoded-long-base64-run",
+      "category": "injection.encoded-blob",
+      "regex": "(?<![A-Za-z0-9+/])(?=[A-Za-z0-9+/]{0,400}[a-z])(?=[A-Za-z0-9+/]{0,400}[A-Z])(?=[A-Za-z0-9+/]{0,400}[0-9])[A-Za-z0-9+/]{180,}={0,2}",
+      "mentionGuard": false
+    }
+  ]
+}

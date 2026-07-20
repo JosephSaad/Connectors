@@ -26,6 +26,7 @@
 using System.Text.Json.Nodes;
 using SeismicConnector.Config;
 using SeismicConnector.Infrastructure;
+using SeismicConnector.Security;
 using SeismicConnector.Seismic;
 
 namespace SeismicConnector.Graph;
@@ -181,6 +182,14 @@ public sealed class IngestPipeline
     private readonly HaCoordinator _ha;
     private readonly ContentClassifier? _classifier;
 
+    /// <summary>
+    /// CS-1 ContentGate: malware + prompt-injection scanning of everything that
+    /// becomes Copilot grounding context. Null unless CONTENT_GATE=true.
+    /// Deliberately INDEPENDENT of <see cref="_classifier"/> — the injection gate
+    /// must not be silently disabled just because CLASSIFICATION happens to be off.
+    /// </summary>
+    private readonly ContentGate? _contentGate;
+
     public IngestionStats Stats { get; }
 
     /// <summary>Reconciliation report for the current crawl (swapped per run).</summary>
@@ -208,7 +217,8 @@ public sealed class IngestPipeline
         AclMapper? aclMapper = null,
         ItemTransformer? transformer = null,
         HaCoordinator? ha = null,
-        IngestionStats? stats = null)
+        IngestionStats? stats = null,
+        IMalwareScanner? malwareScanner = null)
     {
         Stats = stats ?? new IngestionStats();
         _config = config;
@@ -220,6 +230,12 @@ public sealed class IngestPipeline
         _transformer = transformer ?? new ItemTransformer(ttlDays: config.Seismic.GraphItemTtlDays);
         _ha = ha ?? new HaCoordinator(config.Connector.Id);
         _classifier = config.Seismic.Classification ? new ContentClassifier(config.Classification) : null;
+        _contentGate = config.ContentGate.Enabled
+            ? new ContentGate(
+                config.ContentGate,
+                config.ContentGateRules,
+                malwareScanner ?? ContentGate.CreateScanner(config.ContentGate))
+            : null;
         _concurrency = new AdaptiveConcurrency(config.Ingest.BatchWorkers);
     }
 
@@ -879,6 +895,36 @@ public sealed class IngestPipeline
             payload = await _seismic.DownloadContentAsync(content.TeamsiteId, content.Id, ct)
                 .ConfigureAwait(false);
         }
+
+        // ── CS-1 ContentGate, BINARY channel ────────────────────────────────
+        // Sits immediately after the download and BEFORE the transformer, so a
+        // malicious payload is never even extracted. On a positive verdict the
+        // payload is NULLED: ItemTransformer already treats a null payload as
+        // "no extractable text" and degrades to the established metadata-only
+        // path, so the item still indexes its title/owner/URL while the
+        // dangerous bytes never reach the index. That graceful degradation is
+        // the whole reason this seam was chosen over dropping the item.
+        string? gateStatus = null;
+        if (_contentGate is not null && payload is not null)
+        {
+            using var gateSpan = Tracing.StartActivity("content.gate.binary");
+            gateSpan?.SetTag("seismic.content_id", content.Id);
+            var verdict = await _contentGate.ScanBinaryAsync(payload, content.Name, ct).ConfigureAwait(false);
+            if (verdict.Blocked)
+            {
+                payload = null;
+                gateStatus = verdict.Category == ContentGateCategories.Malware
+                    ? ContentGateStatusValues.QuarantinedMalware
+                    : ContentGateStatusValues.QuarantinedScanUnavailable;
+                await QuarantineAsync(content, verdict, "binary").ConfigureAwait(false);
+            }
+            else if (verdict.ScannerUnavailable)
+            {
+                gateStatus = ContentGateStatusValues.WarnScanUnavailable;
+            }
+            gateSpan?.SetTag("content_gate.blocked", verdict.Blocked);
+        }
+
         _usageByContentId.TryGetValue(content.Id, out var usage);
 
         // LiveDoc field/variable enrichment — the extra API call is gated so
@@ -900,6 +946,13 @@ public sealed class IngestPipeline
         transformSpan?.SetTag("seismic.content_id", content.Id);
         var item = _transformer.Transform(content, teamsite, payload, acl, usage, liveDocFields);
 
+        // ── CS-1 ContentGate, TEXT channel ──────────────────────────────────
+        // Runs on the FINAL indexed text (post LiveDoc weaving, post truncation)
+        // and BEFORE classification, so a quarantined body is never classified
+        // on its malicious content.
+        if (_contentGate is not null)
+            gateStatus = await ApplyTextGateAsync(content, item, gateStatus).ConfigureAwait(false);
+
         // Data classification & sensitivity TAGGING (CLASSIFICATION): runs over
         // the FINAL indexed text and folds the item's distribution restriction
         // into a unified taxonomy tag. The tag is ADVISORY (a connector-applied
@@ -910,6 +963,88 @@ public sealed class IngestPipeline
             ClassifyItem(content, item);
 
         return (content.Id, item);
+    }
+
+    /// <summary>
+    /// ContentGate TEXT channel + the scan-status stamp for both channels.
+    ///
+    /// Scans EXACTLY what Copilot will index — <c>item["content"]["value"]</c>,
+    /// the same node ClassifyItem reads — so LiveDoc weaving and the
+    /// transformer's truncation are already applied. On a positive verdict the
+    /// indexed text is EMPTIED rather than the item dropped: the metadata still
+    /// makes the item findable and re-drivable, while the injected instructions
+    /// never become grounding context.
+    /// </summary>
+    private async Task<string?> ApplyTextGateAsync(SeismicContent content, JsonNode item, string? binaryStatus)
+    {
+        using var span = Tracing.StartActivity("content.gate.text");
+        span?.SetTag("seismic.content_id", content.Id);
+
+        var text = item["content"]?["value"]?.GetValue<string>() ?? string.Empty;
+        var verdict = _contentGate!.ScanText(text);
+
+        var status = binaryStatus;
+        if (verdict.Blocked)
+        {
+            if (item["content"] is JsonObject contentNode)
+                contentNode["value"] = string.Empty;
+            status = ContentGateStatusValues.Escalate(
+                status,
+                verdict.Category == ContentGateCategories.Injection
+                    ? ContentGateStatusValues.QuarantinedInjection
+                    : ContentGateStatusValues.QuarantinedScanUnavailable);
+            await QuarantineAsync(content, verdict, "text").ConfigureAwait(false);
+        }
+        else if (verdict.ScannerUnavailable)
+        {
+            status = ContentGateStatusValues.Escalate(status, ContentGateStatusValues.WarnScanUnavailable);
+        }
+
+        status ??= ContentGateStatusValues.Clean;
+        item["properties"]!.AsObject()[ContentGateStatusValues.PropertyName] = status;
+        span?.SetTag("content_gate.status", status);
+        return status;
+    }
+
+    /// <summary>
+    /// The QUARANTINE posture, shared by both channels: dead-letter (so
+    /// retry-failed re-drives the item unchanged once the document is
+    /// remediated or the scanner is back), an immutable ledger entry under the
+    /// dedicated <c>quarantine</c> kind, the blocked metric and the existing
+    /// alert path. The item itself still ingests — metadata-only.
+    /// </summary>
+    private async Task QuarantineAsync(SeismicContent content, ContentGateVerdict verdict, string channel)
+    {
+        var reason = ContentGateCategories.Reason(verdict.Category);
+        Metrics.IncContentGateBlocked(verdict.Category);
+        Ledger.Append(content.Id, DecisionLedger.DecisionQuarantine,
+            $"{reason}; channel={channel}; {verdict.Detail}");
+
+        // The EXISTING dead-letter queue, with the existing object type, so
+        // `retry-failed` routes the record straight back through
+        // IngestSingleAsync with no new code path.
+        SyncState.AppendFailedRecords(
+            SyncState.FailedRecordsPath(ConnectorId),
+            new List<(string, string)> { (content.Id, reason) },
+            "ContentItem");
+
+        Logger.Error(
+            $"QUARANTINE {content.Id} ('{content.Name}') [{channel}]: {reason} — {verdict.Detail}. "
+            + "The item is indexed METADATA-ONLY; the content was withheld from the index and the "
+            + "item is dead-lettered for retry-failed.");
+
+        await Alerting.RaiseAsync(
+            "content_gate_blocked",
+            $"ContentGate quarantined {content.Id} ({reason})",
+            new
+            {
+                item_id = content.Id,
+                teamsite_id = content.TeamsiteId,
+                category = verdict.Category,
+                channel,
+                detail = verdict.Detail,
+                signals = verdict.Signals,
+            }).ConfigureAwait(false);
     }
 
     /// <summary>

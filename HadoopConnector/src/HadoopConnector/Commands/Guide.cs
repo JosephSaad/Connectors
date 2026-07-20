@@ -53,6 +53,19 @@ public static class Guide
            HadoopConnector validate-config --strict
            # --strict fails on unfiltered objects, malformed filters, and
            # missing BDH/Graph connectivity.
+           # It ALSO fails on any object whose aclMode is group/public until you
+           # attest the coarse posture in config/schema.json with BOTH
+           #   "coarseAclAcknowledged": true
+           #   "coarseAclAcknowledgedFor": "public" | "group:<aclGroupId>"
+           # The second one binds the sign-off to WHAT was reviewed: change the
+           # aclMode or the group later and the attestation is void (a hard
+           # config-load error), so widening the exposure forces a fresh review
+           # instead of inheriting the old approval. A bare "true" with no
+           # binding is NOT accepted. The shipped config does NOT pre-set them,
+           # so a fresh clone fails here on 'Account' BY DESIGN — review the
+           # grant, then record the sign-off. The warning is still printed
+           # afterwards: the attestation makes the over-sharing exposure visible
+           # and accepted, it does NOT reduce it (docs/ACL_POSTURE.md).
 
         4. IDENTITY DRY RUN (optional but recommended)
            HadoopConnector identity-dry-run --verbose     # add --save to persist

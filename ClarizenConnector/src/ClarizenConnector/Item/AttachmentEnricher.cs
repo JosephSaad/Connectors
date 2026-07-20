@@ -17,6 +17,13 @@
 // and stamped on the item as AttachmentExtractionStatus so operators can see
 // why a file was not indexed. Extraction never fails a crawl — the worst case
 // is a metadata-only attachment item, exactly as before this feature.
+//
+// When CONTENT_GATE is on, two scans are interleaved into that sequence:
+//   3a. the downloaded BYTES, between the download and the extractor
+//   3b. the EXTRACTED TEXT, before it is appended to the item's content body
+// A block reuses the same Skip(...)/AttachmentExtractionStatus convention as
+// every other skip reason, and additionally stamps ContentGateStatus so the
+// pipeline quarantines the whole item (see ContentGate/ContentGateStage.cs).
 
 using System.Globalization;
 using ClarizenConnector.Clarizen;
@@ -39,12 +46,18 @@ public sealed class AttachmentEnricher
     private readonly IContentExtractor _extractor;
 
     public AttachmentEnricher(
-        AppConfig config, IAttachmentDownloader downloader, IContentExtractor? extractor = null)
+        AppConfig config,
+        IAttachmentDownloader downloader,
+        IContentExtractor? extractor = null,
+        ContentGate.ContentGateStage? contentGate = null)
     {
         _config = config;
         _downloader = downloader;
         _extractor = extractor ?? new ContentExtractor();
+        _contentGate = contentGate;
     }
+
+    private readonly ContentGate.ContentGateStage? _contentGate;
 
     /// <summary>True when this object type carries downloadable attachments and
     /// ingestion is enabled.</summary>
@@ -119,6 +132,31 @@ public sealed class AttachmentEnricher
             return Skip(item, record, status, $"download failed: {download.Reason}");
         }
 
+        // 3a. CONTENT GATE — binary. This sits between the download and the
+        // extractor deliberately: it is the only point where raw bytes exist,
+        // and nothing derived from unscanned bytes may reach the index. A block
+        // here also stamps the item so the pipeline quarantines the whole item
+        // rather than merely indexing it without its attachment text.
+        if (_contentGate is not null)
+        {
+            var binaryVerdict = await _contentGate
+                .ScanBinaryAsync(download.Content, fileName, ct)
+                .ConfigureAwait(false);
+            if (binaryVerdict.IsBlocked)
+            {
+                _contentGate.StampVerdict(item, binaryVerdict);
+                status = $"skipped:{binaryVerdict.Category}";
+                return Skip(item, record, status, $"content gate: {binaryVerdict.Detail}");
+            }
+
+            // Fail-open on an unscannable binary still indexes the attachment —
+            // that is the documented mode — but the verdict must travel with the
+            // item. Stamping it here is what stops the later item-level scan from
+            // reporting text-derived-from-unscanned-bytes as "clean".
+            if (binaryVerdict.IsIncomplete)
+                _contentGate.StampVerdict(item, binaryVerdict);
+        }
+
         var result = _extractor.Extract(download.Content, fileName, contentType);
         if (!result.Extracted)
         {
@@ -126,18 +164,38 @@ public sealed class AttachmentEnricher
             return Skip(item, record, status, $"no text extracted ({result.Reason})");
         }
 
+        // 3b. CONTENT GATE — extracted text, BEFORE it becomes item content.
+        // An attachment is the highest-value injection carrier: its text is
+        // indexed verbatim as grounding context.
+        if (_contentGate is not null)
+        {
+            var textVerdict = _contentGate.ScanText(result.Text);
+            if (textVerdict.IsBlocked)
+            {
+                _contentGate.StampVerdict(item, textVerdict);
+                status = $"skipped:{textVerdict.Category}";
+                return Skip(item, record, status, $"content gate: {textVerdict.Detail}");
+            }
+        }
+
         AppendContent(item, fileName, result.Text);
-        item.Properties[StatusProperty] = "extracted";
+        StampStatus(item, "extracted");
         Metrics.IncAttachmentsExtracted();
         Logger.Info(
             $"Extracted {result.Text.Length} chars from attachment '{fileName}' ({record.ItemId}).");
         return "extracted";
     }
 
+    /// <summary>The ONE place this enricher writes its status property. Named
+    /// (rather than a bare indexer write at each site) so the stamped-property
+    /// inventory can execute it and see the name it publishes.</summary>
+    internal static void StampStatus(ExternalItem item, string status) =>
+        item.Properties[StatusProperty] = status;
+
     private static string Skip(
         ExternalItem item, ClarizenRecord record, string status, string reason)
     {
-        item.Properties[StatusProperty] = status;
+        StampStatus(item, status);
         Metrics.IncAttachmentsSkipped();
         Logger.Info($"Attachment '{record.ItemId}' content not indexed — {reason}.");
         return status;

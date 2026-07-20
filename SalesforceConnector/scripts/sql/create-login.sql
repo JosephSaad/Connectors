@@ -65,6 +65,9 @@ GRANT EXECUTE ON OBJECT::dbo.usp_GetLastSuccessfulContentCrawl TO [SalesforceCon
 GRANT EXECUTE ON OBJECT::dbo.usp_GetCachedFields               TO [SalesforceConnectorApp];
 GRANT EXECUTE ON OBJECT::dbo.usp_SaveCachedFields              TO [SalesforceConnectorApp];
 GRANT EXECUTE ON OBJECT::dbo.usp_ClearFieldCache               TO [SalesforceConnectorApp];
+GRANT EXECUTE ON OBJECT::dbo.usp_GetCachedFls                  TO [SalesforceConnectorApp];
+GRANT EXECUTE ON OBJECT::dbo.usp_SaveCachedFls                 TO [SalesforceConnectorApp];
+GRANT EXECUTE ON OBJECT::dbo.usp_ClearFlsCache                 TO [SalesforceConnectorApp];
 -- Sync state / checkpoints / dead-letter
 GRANT EXECUTE ON OBJECT::dbo.usp_ReadLastSync                  TO [SalesforceConnectorApp];
 GRANT EXECUTE ON OBJECT::dbo.usp_WriteLastSync                 TO [SalesforceConnectorApp];

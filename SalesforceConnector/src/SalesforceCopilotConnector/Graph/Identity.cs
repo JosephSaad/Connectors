@@ -490,6 +490,11 @@ internal sealed class ObjectScopedIdentityStore : IIdentityStore
         => _inner.SaveCachedFields(instanceUrl, objectType, fields);
     public int ClearFieldCache(string? instanceUrl = null, string? objectType = null)
         => _inner.ClearFieldCache(instanceUrl, objectType);
+    public string? GetCachedFls(string instanceUrl, string objectType) => _inner.GetCachedFls(instanceUrl, objectType);
+    public void SaveCachedFls(string instanceUrl, string objectType, string permissionsJson)
+        => _inner.SaveCachedFls(instanceUrl, objectType, permissionsJson);
+    public int ClearFlsCache(string? instanceUrl = null, string? objectType = null)
+        => _inner.ClearFlsCache(instanceUrl, objectType);
     public string ConnectionId => _inner.ConnectionId;
     public string DbPath => _inner.DbPath;
     public Dictionary<string, int> GetStats() => _inner.GetStats();

@@ -210,6 +210,51 @@ public class LogPrunerTests : IDisposable
         Assert.True(Directory.Exists(unrelated));
         Assert.True(File.Exists(stateFile));
     }
+
+    /// <summary>
+    /// An enormous LOG_RETENTION_DAYS means "keep everything for a very long
+    /// time", not "crash". The cutoff arithmetic used to run OUTSIDE the guard,
+    /// so DateTime.Now.AddDays(-1000000) threw ArgumentOutOfRangeException
+    /// straight out of Prune — which every command calls at startup and on each
+    /// --continuous cycle, so a single typo'd env var took the connector down
+    /// before it did any work. Prune documents that it never throws.
+    /// </summary>
+    [Theory]
+    [InlineData("1000000")]
+    [InlineData("2147483647")]   // int.MaxValue
+    public void AbsurdlyLargeRetention_KeepsEverything_AndDoesNotThrow(string retention)
+    {
+        Environment.SetEnvironmentVariable("LOG_RETENTION_DAYS", retention);
+        var now = new DateTime(2026, 7, 12, 12, 0, 0);
+        var ancient = Path.Combine(_dir, "ingest_20200101_000000");
+        Directory.CreateDirectory(ancient);
+
+        // No throw, nothing pruned: a retention window longer than the calendar
+        // can express cannot make any directory "expired".
+        Assert.Equal(0, LogPruner.Prune(_dir, now));
+        Assert.True(Directory.Exists(ancient));
+
+        // Same on the default-clock path (nowLocal omitted), which is what the
+        // commands actually call.
+        Assert.Equal(0, LogPruner.Prune(_dir));
+        Assert.True(Directory.Exists(ancient));
+    }
+
+    /// <summary>The small-value end of the range still prunes normally.</summary>
+    [Fact]
+    public void MinimalRetention_StillPrunesExpiredDirectories()
+    {
+        Environment.SetEnvironmentVariable("LOG_RETENTION_DAYS", "1");
+        var now = new DateTime(2026, 7, 12, 12, 0, 0);
+        var expired = Path.Combine(_dir, "ingest_20260710_090000");
+        var fresh = Path.Combine(_dir, $"ingest_{now.AddHours(-1):yyyyMMdd_HHmmss}");
+        Directory.CreateDirectory(expired);
+        Directory.CreateDirectory(fresh);
+
+        Assert.Equal(1, LogPruner.Prune(_dir, now));
+        Assert.False(Directory.Exists(expired));
+        Assert.True(Directory.Exists(fresh));
+    }
 }
 
 public class AlertingTests : IDisposable

@@ -117,20 +117,23 @@ public class ItemConverterTests
     public void ExternalItem_ToJson_Shape()
     {
         var item = new ExternalItem { Id = "Task_1", Acl = { DefaultAcl[0] } };
+        // Property NAMES here must be ones config/graph-schema.json declares —
+        // the bag rejects anything else. The point under test is the C# value
+        // type → JSON value mapping, so one declared name per value shape.
         item.Properties["Title"] = "T";
-        item.Properties["Count"] = 3L;
-        item.Properties["When"] = new DateTime(2026, 7, 12, 0, 0, 0, DateTimeKind.Utc);
-        item.Properties["Tags"] = new[] { "a", "b" };
-        item.Properties["Skip"] = null;
+        item.Properties["FileSize"] = 3L;
+        item.Properties["StartDate"] = new DateTime(2026, 7, 12, 0, 0, 0, DateTimeKind.Utc);
+        item.Properties["DetectedCategories"] = new[] { "a", "b" };
+        item.Properties["IconUrl"] = null;
         item.Content = "body";
 
         var json = item.ToJson();
         Assert.Equal("Task_1", json["id"]!.GetValue<string>());
         Assert.Equal("T", json["properties"]!["Title"]!.GetValue<string>());
-        Assert.Equal(3, json["properties"]!["Count"]!.GetValue<long>());
-        Assert.StartsWith("2026-07-12", json["properties"]!["When"]!.GetValue<string>());
-        Assert.Equal(2, json["properties"]!["Tags"]!.AsArray().Count);
-        Assert.Null(json["properties"]!["Skip"]);
+        Assert.Equal(3, json["properties"]!["FileSize"]!.GetValue<long>());
+        Assert.StartsWith("2026-07-12", json["properties"]!["StartDate"]!.GetValue<string>());
+        Assert.Equal(2, json["properties"]!["DetectedCategories"]!.AsArray().Count);
+        Assert.Null(json["properties"]!["IconUrl"]);
         Assert.Equal("body", json["content"]!["value"]!.GetValue<string>());
         Assert.Equal("text", json["content"]!["type"]!.GetValue<string>());
         Assert.Single(json["acl"]!.AsArray());

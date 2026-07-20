@@ -81,6 +81,22 @@ public interface IIdentityStore : IDisposable
     /// <summary>Clear cached field entries. Returns the number of entries deleted.</summary>
     int ClearFieldCache(string? instanceUrl = null, string? objectType = null);
 
+    // ── Field-level security cache (WP-SF-2) ──────────────────────────────────
+    //
+    // Mirrors the field cache above in every respect (same org+object key, same
+    // instance hash, same "corrupt row is treated as absent" contract) so the two
+    // backends stay in lockstep. The payload is the JSON produced by
+    // AclEngine.FlsObjectPermissions.ToJson().
+
+    /// <summary>Return the cached FLS payload for an org/object, or null if not cached.</summary>
+    string? GetCachedFls(string instanceUrl, string objectType);
+
+    /// <summary>Persist the FLS payload for an org/object.</summary>
+    void SaveCachedFls(string instanceUrl, string objectType, string permissionsJson);
+
+    /// <summary>Clear cached FLS entries. Returns the number of entries deleted.</summary>
+    int ClearFlsCache(string? instanceUrl = null, string? objectType = null);
+
     // ── Utility ───────────────────────────────────────────────────────────────
 
     /// <summary>The Graph external connection ID this store tracks.</summary>

@@ -21,10 +21,20 @@ public sealed class CrawlHarness : IDisposable
     public SeatService Seats { get; }
     public CrawlEngine Engine { get; }
 
+    /// <summary>Decision ledger, wired only when a test asks for it (opt-in so
+    /// existing tests keep their exact behaviour).</summary>
+    public DecisionLedger? Decisions { get; }
+
     private readonly string? _previousLogsDir;
 
+    /// <param name="withDecisions">Wire a real DecisionLedger into the engine
+    /// (exclusion / ACL-restriction / ContentGate quarantine audit).</param>
+    /// <param name="scanner">Substitute content scanner for the ContentGate
+    /// stage — e.g. one that always throws, to drive the fail-mode matrix.
+    /// Ignored unless CONTENT_GATE is on.</param>
     public CrawlHarness(int retentionDays = 0, string retentionMode = "archive",
-        string? crmContactsPath = null, Func<AppConfig, AppConfig>? configure = null)
+        string? crmContactsPath = null, Func<AppConfig, AppConfig>? configure = null,
+        bool withDecisions = false, IContentScanner? scanner = null)
     {
         Root = TestFixtures.NewTempDir("crawl");
         FeedPath = Path.Combine(Root, "feed");
@@ -46,7 +56,18 @@ public sealed class CrawlHarness : IDisposable
             logsDir: Path.Combine(Root, "logs"), dataDir: Path.Combine(Root, "data"));
         Identity = new SqliteIdentityStore(Path.Combine(Root, "data", "identity.db"));
         Seats = new SeatService(Config, Identity, State);
-        Engine = new CrawlEngine(Config, Graph, State, Identity, Seats, Alerts);
+        if (withDecisions)
+            Decisions = new DecisionLedger(Config.ConnectorId, logsDir: Path.Combine(Root, "logs"));
+
+        // The gate is env-driven in production; a test scanner only makes sense
+        // when the env switch is on, so honour both.
+        var gateOptions = ContentGateOptions.FromEnv();
+        var gate = scanner != null && gateOptions.Enabled
+            ? new ContentGate(gateOptions, scanner)
+            : null;
+
+        Engine = new CrawlEngine(Config, Graph, State, Identity, Seats, Alerts,
+            ha: null, decisions: Decisions, contentGate: gate);
         ServiceStop.ResetForTests();
     }
 

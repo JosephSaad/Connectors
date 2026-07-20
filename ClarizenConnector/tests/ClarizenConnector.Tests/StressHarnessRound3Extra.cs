@@ -246,6 +246,9 @@ public class RedactorStructuralAdversaryStressTests : IDisposable
     {
         using var state = new SyncStateScope();
         using var env = new EnvScope((DeadLetterRedactor.ModeEnvVar, "redacted"));
+        // Array-valued financial property, modelled as an operator schema
+        // extension so the property name is declared like any other.
+        using var schema = new GraphSchemaScope("CostCenters");
 
         const int producers = 16, perProducer = 500;
         var sw = Stopwatch.StartNew();

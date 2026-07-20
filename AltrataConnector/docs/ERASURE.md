@@ -62,6 +62,43 @@ reconciles cleanly and is marked processed. Derived items of a suppressed person
 `unsuppress-subject --id X --confirm` lifts the block (and ledgers it) so the
 person may be ingested again on the next crawl.
 
+### KNOWN OPEN ISSUE: the subject id is NOT validated, and two shapes break erasure
+
+Filing a suppression is the point where an id's exact bytes decide whether a
+person is erased. **Nothing validates the id.** A round that did validate it —
+refusing empty, padded, over-256-code-unit and ill-formed-UTF-16 ids on both
+backends — wedged read-modify-write over legacy dead-letter state and left
+erasures HALF-APPLIED (subject marked suppressed, payload still on disk), so the
+validation was withdrawn. See *Value domain* in `docs/SQL_CONTRACT.md`.
+
+Two shapes therefore break `forget-subject` today. Neither is guarded, and
+neither reports an error:
+
+* **An unpaired UTF-16 surrogate in the id, on the FILE backend.** The JSON
+  writer rewrites it to U+FFFD, so the suppression list holds a **different id**
+  than the one erased and it *does not match itself*: `forget-subject` reports
+  success and **the subject stays ingestible**. The SQL backend stores the id
+  verbatim and answers "suppressed", so the two backends also disagree.
+* **An id longer than 256 UTF-16 code units, on the SQL backend.**
+  `subject_id` is `NVARCHAR(256)`; the insert raises **SQL error 8152**, which
+  is not in `TransientErrorNumbers` and is rethrown without retry, so **the
+  erasure FAILS**. The same id erases successfully on the file backend.
+
+**Operator mitigation, required until this is closed:** normalise subject ids
+upstream — reject or repair ids over 256 UTF-16 code units, ids containing
+unpaired surrogates, and ids with leading/trailing whitespace — before issuing
+`forget-subject`. Then **verify every erasure**: run `list-suppressed-subjects`
+and confirm the listed id is byte-identical to the one you submitted. Under the
+surrogate defect it will not be, and that mismatch is the only signal you get.
+
+Leading/trailing whitespace and the empty string are a third, lesser divergence:
+SQL's `=` blank-pads, ordinal comparison does not, so `ALT-1` and `ALT-1 ` may
+be one subject on SQL and are always two on file.
+
+Well-formed non-BMP ids (emoji, other supplementary-plane characters) round-trip
+exactly on the file backend — the surrogate defect is about ill-formed UTF-16,
+not non-ASCII.
+
 ## Tamper-evident erasure ledger
 
 Separate from the purpose-of-use audit log (which records lawful *use*), the

@@ -63,6 +63,14 @@ public static class Metrics
     private static readonly ConcurrentDictionary<string, long> ClassifiedByLabel = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, long> DetectionsByCategory = new(StringComparer.Ordinal);
 
+    // ContentGate (CS-1): items quarantined by category (malware / injection /
+    // scan-unavailable), and scans that could not complete by channel
+    // (binary / text). The second counter is what makes the TEXT channel's
+    // fail-OPEN default honest — a silent heuristic outage is visible here.
+    private static readonly ConcurrentDictionary<string, long> ContentGateBlocked = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, long> ContentGateScannerUnavailable =
+        new(StringComparer.Ordinal);
+
     // Process start, used to derive uptime. Captured at type init.
     private static readonly DateTime StartUtc = DateTime.UtcNow;
 
@@ -147,6 +155,20 @@ public static class Metrics
         foreach (var category in categories)
             DetectionsByCategory.AddOrUpdate(category, 1, (_, v) => v + 1);
     }
+
+    /// <summary>Record one item quarantined by the ContentGate stage.</summary>
+    public static void IncContentGateBlocked(string category) =>
+        ContentGateBlocked.AddOrUpdate(category, 1, (_, v) => v + 1);
+
+    /// <summary>Record one ContentGate scan that could not complete (channel = binary|text).</summary>
+    public static void IncContentGateScannerUnavailable(string channel) =>
+        ContentGateScannerUnavailable.AddOrUpdate(channel, 1, (_, v) => v + 1);
+
+    internal static IReadOnlyDictionary<string, long> ContentGateBlockedSnapshot =>
+        new Dictionary<string, long>(ContentGateBlocked);
+
+    internal static IReadOnlyDictionary<string, long> ContentGateScannerUnavailableSnapshot =>
+        new Dictionary<string, long>(ContentGateScannerUnavailable);
 
     internal static IReadOnlyDictionary<string, long> ClassifiedByLabelSnapshot =>
         new Dictionary<string, long>(ClassifiedByLabel);
@@ -288,6 +310,13 @@ public static class Metrics
             "Items classified, by unified sensitivity label.", ClassifiedByLabel, "label");
         LabeledCounter(sb, "sensitive_detections_total",
             "Sensitive-data detections, by category (PII/PCI/secret/MNE-adjacent).", DetectionsByCategory, "category");
+
+        LabeledCounter(sb, "content_gate_blocked_total",
+            "Items quarantined by the ContentGate stage, by category (malware/injection/scan-unavailable).",
+            ContentGateBlocked, "category");
+        LabeledCounter(sb, "content_gate_scanner_unavailable_total",
+            "ContentGate scans that could not complete because the scanner was unavailable, by channel.",
+            ContentGateScannerUnavailable, "channel");
 
         Gauge(sb, "dead_letter_depth", "Current number of records in the dead-letter queue.", DeadLetterDepth);
         Gauge(sb, "webhook_queue_depth", "Current undrained webhook event queue depth.", WebhookQueueDepth);

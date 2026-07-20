@@ -9,6 +9,10 @@
 //   acl_restriction  — an item's ACL was tightened away from its resolved
 //                      principals (FINANCIAL_DATA_MODE=acl, or
 //                      CLASSIFICATION_ENFORCE_ACL on a Restricted item).
+//   quarantine       — the ContentGate stage (CONTENT_GATE) refused to index an
+//                      item because its content was scored malicious (prompt
+//                      injection) or its attachment binary could not be proven
+//                      clean. The item is in the dead-letter queue, not gone.
 //
 // Scope is deliberately LOW-VOLUME: only these decisions, never every ingest.
 // Each record carries {seq, item_id, decision, reason, timestamp, prev_hash}
@@ -38,6 +42,10 @@ public static class DecisionLedger
     public const string DecisionExclusion = "exclusion";
     public const string DecisionAclRestriction = "acl_restriction";
 
+    /// <summary>ContentGate refused to index an item (its own decision kind — a
+    /// quarantine is NOT an exclusion: the item is retained and re-drivable).</summary>
+    public const string DecisionQuarantine = "quarantine";
+
     /// <summary>Genesis link for the first record in a chain.</summary>
     internal const string GenesisHash = "genesis";
 
@@ -61,6 +69,11 @@ public static class DecisionLedger
     /// <summary>Record an ACL-restriction decision (item locked down).</summary>
     public static void RecordRestriction(string connectorId, string itemId, string reason) =>
         Record(connectorId, itemId, DecisionAclRestriction, reason);
+
+    /// <summary>Record a content-gate quarantine (item withheld from the index
+    /// and dead-lettered for re-drive).</summary>
+    public static void RecordQuarantine(string connectorId, string itemId, string reason) =>
+        Record(connectorId, itemId, DecisionQuarantine, reason);
 
     /// <summary>
     /// Append one decision to the chain. Reads the tail to link the previous

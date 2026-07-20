@@ -152,6 +152,23 @@ public sealed class ContentClassifier
     private readonly List<string> _mneKeywords;
     private readonly SensitivityLabel _defaultLabel;
 
+    /// <summary>
+    /// Number of patterns that actually COMPILED. Zero means the engine cannot
+    /// detect anything — callers that treat detection as a control (the
+    /// ContentGate injection channel) read this as "scanner unavailable"
+    /// rather than silently reporting every document clean.
+    /// </summary>
+    public int PatternCount => _patterns.Count;
+
+    /// <summary>
+    /// The categories of the patterns that actually COMPILED, in ruleset order
+    /// (duplicates kept). Callers that treat only SOME categories as actionable
+    /// — the ContentGate injection channel, which can only signal on categories
+    /// prefixed "Injection." — need this rather than <see cref="PatternCount"/>
+    /// to tell "detecting" from "compiled but inert".
+    /// </summary>
+    public IReadOnlyList<string> CompiledCategories { get; }
+
     /// <param name="matchTimeout">Per-pattern regex match timeout override (test seam; default 2s).</param>
     public ContentClassifier(ClassificationRules rules, TimeSpan? matchTimeout = null)
     {
@@ -177,6 +194,8 @@ public sealed class ContentClassifier
             .ToList();
 
         _defaultLabel = ParseLabel(rules.DefaultLabel, SensitivityLabel.Internal);
+
+        CompiledCategories = _patterns.Select(p => p.Category).ToList();
     }
 
     private bool TryCompile(string pattern, out Regex? regex)

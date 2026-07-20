@@ -36,6 +36,9 @@ public static class RetryFailed
 
             progress.Info($"Retrying {records.Count} dead-lettered item(s)...");
             using var report = runtime.OpenReport(logFile);
+            // Each retry re-drives IngestSingleAsync, which can exclude, restrict
+            // or quarantine the item — all ledgered decisions.
+            using var ledger = runtime.OpenLedger();
 
             var allOk = true;
             var seen = new HashSet<string>(StringComparer.Ordinal);

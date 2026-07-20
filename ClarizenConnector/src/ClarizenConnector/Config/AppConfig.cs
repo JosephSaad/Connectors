@@ -94,6 +94,45 @@ public sealed partial class AppConfig
     /// items are locked to when CLASSIFICATION_ENFORCE_ACL is on.</summary>
     public string? ClassificationRestrictedGroupId { get; init; }
 
+    // ── Content gate: prompt-injection + malware scanning (docs/CONTENT_GATE.md) ─
+    /// <summary>CONTENT_GATE — master switch for the ContentGate stage (injection
+    /// heuristics over indexed text + malware scanning of attachment binaries).
+    /// Default OFF: with it unset the connector behaves byte-identically to
+    /// before the feature existed — no scanning, no new properties, no cost.</summary>
+    public bool ContentGateEnabled { get; init; }
+
+    /// <summary>CONTENT_GATE_ICAP_URL — HTTP endpoint of the ICAP/AV gateway used
+    /// to scan attachment binaries. Unset means NO binary scanner is wired, which
+    /// the binary fail mode resolves (closed by default ⇒ binaries are not indexed).</summary>
+    public string? ContentGateIcapUrl { get; init; }
+
+    /// <summary>CONTENT_GATE_FAIL_MODE_BINARY (or CONTENT_GATE_FAIL_MODE) —
+    /// closed | open. Default <c>closed</c>: never index unscanned binary content.</summary>
+    public string ContentGateBinaryFailMode { get; init; } = "closed";
+
+    /// <summary>CONTENT_GATE_FAIL_MODE_TEXT (or CONTENT_GATE_FAIL_MODE) —
+    /// closed | open. Default <c>open</c>: the injection scanner is a HEURISTIC,
+    /// not a security boundary, so a scanner outage must not block a whole crawl.
+    /// The asymmetry with the binary default is deliberate.</summary>
+    public string ContentGateTextFailMode { get; init; } = "open";
+
+    /// <summary>CONTENT_GATE_MAX_SCAN_MB — cap on content handed to a scanner
+    /// (default 16 MiB). Text over the cap is truncated and still scanned; a
+    /// BINARY over the cap cannot be proven clean and is therefore treated as
+    /// unscannable (binary fail mode applies).</summary>
+    public int ContentGateMaxScanMb { get; init; } = 16;
+
+    /// <summary>True when binary content that could not be scanned must NOT be indexed.</summary>
+    public bool ContentGateBinaryFailClosed =>
+        string.Equals(ContentGateBinaryFailMode, "closed", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True when text that could not be scanned must NOT be indexed.</summary>
+    public bool ContentGateTextFailClosed =>
+        string.Equals(ContentGateTextFailMode, "closed", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Scan cap in bytes (<see cref="ContentGateMaxScanMb"/> as MiB).</summary>
+    public long ContentGateMaxScanBytes => (long)ContentGateMaxScanMb * 1024 * 1024;
+
     // ── Stale-index expiry (docs/DELETION_SYNC.md) ───────────────────────────
     /// <summary>GRAPH_ITEM_TTL_DAYS — when &gt; 0, ingested items are stamped with
     /// expirationDateTime = now + TTL so the search index self-expires if crawling
@@ -171,6 +210,16 @@ public sealed partial class AppConfig
             throw new ArgumentException(
                 $"Invalid configuration: {Infrastructure.DeadLetterRedactor.ModeEnvVar} "
                 + "must be one of full | redacted.");
+
+        // CONTENT_GATE fail modes must be exact known values — a typo silently
+        // meaning "open" on the BINARY path would let unscanned bytes into the
+        // index, which is precisely the failure this gate exists to prevent.
+        // CONTENT_GATE_FAIL_MODE sets both knobs; the per-kind knobs win.
+        var gateFailMode = Environment.GetEnvironmentVariable("CONTENT_GATE_FAIL_MODE");
+        var gateBinaryFailMode = ParseFailMode(
+            "CONTENT_GATE_FAIL_MODE_BINARY", gateFailMode, "CONTENT_GATE_FAIL_MODE", "closed");
+        var gateTextFailMode = ParseFailMode(
+            "CONTENT_GATE_FAIL_MODE_TEXT", gateFailMode, "CONTENT_GATE_FAIL_MODE", "open");
 
         // Proxy / custom trust roots fail fast here, naming the setting, rather
         // than surfacing later as an opaque TLS or connect error mid-crawl.
@@ -262,8 +311,37 @@ public sealed partial class AppConfig
             ClassificationEnforceAcl = classificationEnforceAcl,
             ClassificationRestrictedGroupId = classificationRestrictedGroup,
 
+            ContentGateEnabled = EnvFlags.IsTrue("CONTENT_GATE"),
+            ContentGateIcapUrl = Environment.GetEnvironmentVariable("CONTENT_GATE_ICAP_URL"),
+            ContentGateBinaryFailMode = gateBinaryFailMode,
+            ContentGateTextFailMode = gateTextFailMode,
+            ContentGateMaxScanMb = Math.Clamp(EnvFlags.GetInt("CONTENT_GATE_MAX_SCAN_MB", 16), 1, 1024),
+
             GraphItemTtlDays = Math.Max(0, EnvFlags.GetInt("GRAPH_ITEM_TTL_DAYS", 0)),
         };
+    }
+
+    /// <summary>
+    /// Resolve one fail-mode knob: the specific variable wins, else the shared
+    /// <c>CONTENT_GATE_FAIL_MODE</c>, else the shipped default. Any value that is
+    /// not exactly <c>closed</c> or <c>open</c> is a hard configuration error —
+    /// silently falling back would hide a security-relevant typo.
+    /// </summary>
+    internal static string ParseFailMode(
+        string specificName, string? sharedValue, string sharedName, string defaultValue)
+    {
+        var specific = Environment.GetEnvironmentVariable(specificName);
+        var (raw, source) = !string.IsNullOrWhiteSpace(specific)
+            ? (specific, specificName)
+            : !string.IsNullOrWhiteSpace(sharedValue)
+                ? (sharedValue, sharedName)
+                : (defaultValue, specificName);
+
+        var value = raw!.Trim().ToLowerInvariant();
+        if (value is not ("closed" or "open"))
+            throw new ArgumentException(
+                $"Invalid configuration: {source} must be one of closed | open.");
+        return value;
     }
 
     /// <summary>Parse ATTACHMENT_ALLOWED_TYPES (comma/space list of extensions or
@@ -337,6 +415,11 @@ public sealed partial class AppConfig
         ClassificationManifest = ClassificationManifest,
         ClassificationEnforceAcl = ClassificationEnforceAcl,
         ClassificationRestrictedGroupId = ClassificationRestrictedGroupId,
+        ContentGateEnabled = ContentGateEnabled,
+        ContentGateIcapUrl = ContentGateIcapUrl,
+        ContentGateBinaryFailMode = ContentGateBinaryFailMode,
+        ContentGateTextFailMode = ContentGateTextFailMode,
+        ContentGateMaxScanMb = ContentGateMaxScanMb,
         GraphItemTtlDays = GraphItemTtlDays,
     };
 

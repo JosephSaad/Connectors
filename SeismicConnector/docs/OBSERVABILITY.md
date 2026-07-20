@@ -58,6 +58,13 @@ All metric names are prefixed `seismic_connector_`:
   of every command and each continuous cycle. Root state files
   (`sync_state.json`, `checkpoint_*.json`, `failed_records_*.jsonl`) are never
   touched.
+* **Retention never deletes a decision ledger.** The ledger
+  (`logs/decision_ledger_{id}.jsonl`, `DECISION_LEDGER=true`) lives at the logs
+  root, outside the run directories the pruner removes. A run directory that
+  still holds a *legacy* per-run ledger — written by releases before the ledger
+  moved to the stable path — is **kept**, and the pruner logs a warning naming
+  the file. Archive it off-box, then delete the directory by hand; the pruner
+  will not do it for you. See docs/EXCLUSIONS.md for the ledger's chain model.
 * The **reconciliation report** (`reconciliation_*.jsonl`, see
   docs/EXCLUSIONS.md) lives in the same run directory.
 * `EVENTLOG_ENABLED=true` (Windows) mirrors WARNING+ records and lifecycle

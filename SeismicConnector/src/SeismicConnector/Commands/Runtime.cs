@@ -81,19 +81,29 @@ public sealed class Runtime : IDisposable
     }
 
     /// <summary>
-    /// Open the decision audit ledger for the run and attach it to the pipeline.
-    /// File-backed, hash-chained JSONL when DECISION_LEDGER=true; otherwise a
-    /// no-op in-memory ledger, so the caller's <c>using</c> works either way.
+    /// Open the decision audit ledger and attach it to the pipeline. File-backed,
+    /// hash-chained JSONL when DECISION_LEDGER=true; otherwise a no-op in-memory
+    /// ledger, so the caller's <c>using</c> works either way.
+    /// <para>
+    /// Unlike the report and the manifest this takes NO run log file: the ledger
+    /// is deliberately not a per-run artifact. It lives at the stable logs-root
+    /// path (<see cref="DecisionLedger.PathFor"/>) so it survives run-directory
+    /// retention pruning and forms ONE continuous hash chain across runs.
+    /// </para>
+    /// <para>
+    /// EVERY command that runs the pipeline must call this — the flag has to mean
+    /// the same thing on every command, or an operator who turns the ledger on
+    /// loses that run's exclusion and ACL-restriction decisions with no warning.
+    /// </para>
     /// </summary>
-    public DecisionLedger OpenLedger(string runLogFile)
+    public DecisionLedger OpenLedger()
     {
         DecisionLedger ledger;
         if (EnvFlags.IsTrue(DecisionLedger.EnvVar))
         {
-            var dir = Path.GetDirectoryName(runLogFile) ?? CommandRegistry.LogsDir;
-            var path = Path.Combine(
-                dir, $"decision_ledger_{Config.Connector.Id}_{DateTime.Now:yyyyMMdd_HHmmss}.jsonl");
-            ledger = new DecisionLedger(path);
+            ReportLegacyRunLedgers();
+            ledger = new DecisionLedger(
+                DecisionLedger.PathFor(CommandRegistry.LogsDir, Config.Connector.Id));
         }
         else
         {
@@ -101,6 +111,25 @@ public sealed class Runtime : IDisposable
         }
         Pipeline.Ledger = ledger;
         return ledger;
+    }
+
+    /// <summary>
+    /// Point the operator at any per-run ledgers written before the stable-path
+    /// move. They are separate chains, each rooted at its own genesis, and the
+    /// current ledger does NOT continue them — so they are named rather than
+    /// left to be discovered (or pruned) by accident.
+    /// </summary>
+    private static void ReportLegacyRunLedgers()
+    {
+        var legacy = DecisionLedger.FindLegacyRunLedgers(CommandRegistry.LogsDir);
+        if (legacy.Count == 0)
+            return;
+        Logging.GetLogger("seismic_connector").Warning(
+            $"Decision ledger: found {legacy.Count} legacy per-run ledger file(s) from before the move to "
+            + $"the stable logs-root path ({string.Join(", ", legacy)}). Each is a SEPARATE hash chain and "
+            + "is not continued by the current ledger; archive them alongside it for a complete audit "
+            + "history. Log retention will not delete them (LogPruner skips any run directory holding a "
+            + "ledger), so remove them by hand once archived.");
     }
 
     public void Dispose()

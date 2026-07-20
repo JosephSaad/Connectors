@@ -32,6 +32,61 @@ public sealed class EnvScope : IDisposable
     }
 }
 
+/// <summary>
+/// Points <see cref="ClarizenConnector.Graph.GraphPropertyRegistry"/> at a
+/// temporary graph-schema.json = the real deployed declaration PLUS the extra
+/// property names a test needs, and restores the default on dispose.
+/// <para>
+/// This is how a test models an operator who extended BOTH config/schema.json
+/// and config/graph-schema.json. It is deliberately the only way to get an extra
+/// name accepted: the registry has no "test mode" that waves properties through,
+/// because a bypass in the guard is the defect the guard exists to prevent.
+/// </para>
+/// </summary>
+public sealed class GraphSchemaScope : IDisposable
+{
+    private readonly TempDir _dir = new();
+    private readonly string? _previous;
+
+    public GraphSchemaScope(params string[] extraPropertyNames)
+    {
+        _previous = ClarizenConnector.Graph.GraphPropertyRegistry.OverridePath;
+
+        var baseline = System.Text.Json.Nodes.JsonNode
+            .Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "config", "graph-schema.json")))!
+            .AsArray();
+        var extended = new System.Text.Json.Nodes.JsonArray();
+        foreach (var property in baseline.ToList())
+        {
+            baseline.Remove(property);
+            extended.Add(property!);
+        }
+        foreach (var name in extraPropertyNames)
+        {
+            extended.Add(new System.Text.Json.Nodes.JsonObject
+            {
+                ["name"] = name,
+                ["type"] = "String",
+                ["isSearchable"] = true,
+                ["isRetrievable"] = true,
+                ["isQueryable"] = false,
+                ["isRefinable"] = false,
+                ["description"] = "Test-scoped extension property.",
+            });
+        }
+
+        var path = Path.Combine(_dir.Path, "graph-schema.json");
+        File.WriteAllText(path, extended.ToJsonString());
+        ClarizenConnector.Graph.GraphPropertyRegistry.OverridePath = path;
+    }
+
+    public void Dispose()
+    {
+        ClarizenConnector.Graph.GraphPropertyRegistry.OverridePath = _previous;
+        _dir.Dispose();
+    }
+}
+
 /// <summary>Creates (and deletes on dispose) a unique temp directory.</summary>
 public sealed class TempDir : IDisposable
 {
@@ -99,6 +154,11 @@ public static class TestConfig
         bool classificationManifest = false,
         bool classificationEnforceAcl = false,
         string? classificationRestrictedGroupId = null,
+        bool contentGate = false,
+        string? contentGateIcapUrl = null,
+        string contentGateBinaryFailMode = "closed",
+        string contentGateTextFailMode = "open",
+        int contentGateMaxScanMb = 16,
         int graphItemTtlDays = 0) => new()
     {
         ConnectorId = connectorId,
@@ -125,6 +185,11 @@ public static class TestConfig
         ClassificationManifest = classificationManifest,
         ClassificationEnforceAcl = classificationEnforceAcl,
         ClassificationRestrictedGroupId = classificationRestrictedGroupId,
+        ContentGateEnabled = contentGate,
+        ContentGateIcapUrl = contentGateIcapUrl,
+        ContentGateBinaryFailMode = contentGateBinaryFailMode,
+        ContentGateTextFailMode = contentGateTextFailMode,
+        ContentGateMaxScanMb = contentGateMaxScanMb,
         GraphItemTtlDays = graphItemTtlDays,
     };
 }
