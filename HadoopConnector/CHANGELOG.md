@@ -132,6 +132,55 @@ them); everything else is additive and off/unchanged by default.
 
 ### Added
 
+- **`validate-config` now cross-checks `graph-schema.json` against what the
+  object list actually produces.** Previously nothing enforced the two files
+  staying in step (the README said so): `graph-schema.json =
+  [{"name":"Irrelevant","type":"String"}]` with a `schema.json` mapping onto
+  `TotallyUndeclaredProp` passed `--strict` **green**, naming neither that
+  property nor any always-emitted one — and Graph would then reject every item
+  at push time. The produced set is now derived from **production symbols, not
+  a restated rule copy** (a duplicated rule set drifts — that is exactly how
+  the earlier "five standard properties" defect happened):
+  `Item/ProducedGraphProperties.cs` executes `ItemConverter.Convert` over a
+  synthetic record per object (so a `drop`ped column emits nothing and needs no
+  declaration, a `mask`ed column still emits and does, and a `_bdh_`
+  placeholder is not a Graph property) and unions
+  `AlwaysEmittedProperties.Names` — **unconditionally, flag on or off**,
+  because gating `SensitivityLabel`/`DetectedCategories` on `CLASSIFICATION`
+  would recreate the flag-flip asymmetry fixed in this same round. A
+  produced-but-undeclared property is an **ERROR** (the config cannot work);
+  declared-but-unproduced is an informational notice, never gating
+  (pre-declaring ahead of a rollout is encouraged, and a one-sided rename is
+  still made visible). Degenerate `graph-schema.json` shapes — empty array,
+  empty/whitespace name — are now preflight ERRORs too (bare `null`,
+  non-string/duplicate names and malformed JSON already were), and the drift
+  diff deliberately does not run over a file that failed to parse, so nothing
+  is double-reported. Adapted from the Clarizen connector's drift check
+  *including its failure history*: no blanket `catch {}` around the
+  computation — a failure to compute the produced set is itself an ERROR
+  (pinned by an injected-failure test). The shipped
+  `config/schema.json`/`config/graph-schema.json` pair has zero drift in
+  either direction, flag on and off (pinned by
+  `ShippedConfigPair_HasZeroDrift_FlagOnOrOff`).
+  (`Commands/ValidateConfig.cs`, `Item/ProducedGraphProperties.cs`, `README.md`,
+  `docs/COLUMN_POLICIES.md`)
+- **The empty-categories finding is no longer gated on `CLASSIFICATION`.** The
+  warning for a `classification.json` that yields no usable categories was
+  guarded by `classificationEnabled &&` — one line below the round-10 comment
+  explaining why flag-conditional validation is a time bomb — so
+  `{"categories": []}` was `--strict` **green** with the flag unset and **red**
+  with it set. The flag is what operators flip last: that asymmetry converts a
+  green change ticket into a silent-detection-gap deployment on the day
+  classification is enabled. The finding is now emitted whenever the file
+  exists, whatever the flag says; it stays a **warning** (empty categories is
+  valid JSON describing a useless configuration — the crawl does not crash on
+  it — and `--strict` already turns warnings into failures, which is what
+  restores flag-flip invariance). The `--strict` verdict is now pinned
+  invariant under the flag for every file-present shape
+  (`StrictVerdict_IsInvariantUnderClassificationFlag_WhenFileExists`); an
+  *absent* file remains the one flag-judged case, because absence with the
+  feature off is a valid deployment and enabling the feature means authoring
+  the file in that same change. (`Commands/ValidateConfig.cs`)
 - **A bad config FILE on the crawl path now prints an actionable message, not a
   stack trace.** `Runtime.Create` loaded `schema.json` and `filters.json` with no
   `try`/`catch`, so any mistake in either escaped to `Program`'s final backstop —

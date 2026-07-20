@@ -504,11 +504,20 @@ public class ConfigNullSweepTests : IDisposable
         get
         {
             var path = Path.Combine(_dir.Path, "graph-schema.json");
+            // Mapped properties + the always-emitted set — required by the
+            // produced-vs-declared cross-check for any green-path run.
             File.WriteAllText(path, """
                 [{"name": "Title", "type": "String", "isSearchable": true},
                  {"name": "RecordId", "type": "String", "isSearchable": false},
                  {"name": "Comp", "type": "String", "isSearchable": false},
-                 {"name": "Other", "type": "String", "isSearchable": false}]
+                 {"name": "Other", "type": "String", "isSearchable": false},
+                 {"name": "ObjectName", "type": "String"},
+                 {"name": "Url", "type": "String"},
+                 {"name": "IconUrl", "type": "String"},
+                 {"name": "SourceSystem", "type": "String"},
+                 {"name": "DataAsOf", "type": "String"},
+                 {"name": "SensitivityLabel", "type": "String"},
+                 {"name": "DetectedCategories", "type": "StringCollection"}]
                 """);
             return path;
         }

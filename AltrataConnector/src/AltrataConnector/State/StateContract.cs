@@ -29,8 +29,13 @@
 //     way.
 //
 // A DSAR erasure that cannot complete is worse than the silent-divergence
-// defects the validation was meant to close, so the validation is gone rather
-// than replaced.
+// defects the validation was meant to close, so the validation was withdrawn
+// from HERE — and later REPLACED AT A DIFFERENT LAYER. The subject-id
+// divergences (a) and (b) below are now closed by Commands/SubjectIdPolicy.cs,
+// which validates ONLY where a new subject id enters the system from an
+// operator (`forget-subject --id`, before any state mutation) and NOWHERE on
+// the state-write paths. This file still validates nothing, and must not: a
+// value read from legacy state must always be writable back unchanged.
 //
 // WHAT REMAINS HERE is only what cannot throw:
 //
@@ -46,29 +51,38 @@
 //     through ISO-8601 'o'; DATETIME2 carries no Kind and SqlDataReader hands
 //     back Unspecified. Applied on READ as well as write, and it never rejects.
 //
-// KNOWN, ACCEPTED, OPEN DIVERGENCES — reintroduced by withdrawing the
-// validation. These are NOT closed. See docs/SQL_CONTRACT.md.
+// DIVERGENCES, and where each stands. See docs/SQL_CONTRACT.md.
 //
-//   (a) UNPAIRED SURROGATE IN A SUBJECT ID. System.Text.Json cannot encode one
-//       and substitutes U+FFFD, so the FILE backend silently rewrites the id it
-//       was given. AddSuppressedSubject("ALT-\uD83D-9001") then
-//       IsSubjectSuppressed(THE SAME STRING) returns FALSE on the same store
-//       instance — the DSAR erasure is filed under a different id and THE
-//       SUBJECT STAYS INGESTIBLE. NVARCHAR is UCS-2 and stores the unpaired
-//       code unit verbatim, so SQL answers TRUE. OPEN.
+//   (a) UNPAIRED SURROGATE IN A SUBJECT ID — CLOSED AT THE OPERATOR ENTRY
+//       POINT, not here. System.Text.Json cannot encode one and substitutes
+//       U+FFFD, so the FILE backend silently rewrites the id it was given
+//       (AddSuppressedSubject then IsSubjectSuppressed with the SAME string
+//       returned FALSE, the erasure was filed under a different id and the
+//       subject stayed ingestible; NVARCHAR is UCS-2 and would answer TRUE).
+//       `forget-subject` now REFUSES an ill-formed `--id` at the very start of
+//       the command (Commands/SubjectIdPolicy.cs), before any mutation, so no
+//       operator-supplied id can reach either backend. The STORES still accept
+//       such an id — deliberately, for replay of legacy state — so the
+//       store-level rewrite still exists and is pinned by test
+//       (SuppressionSurrogateTests.TheStoreItselfStillToleratesWhatTheCommandRefuses).
 //
-//   (b) LENGTH. subject_id / item_id / delivery_id are NVARCHAR(256), [key] is
-//       NVARCHAR(128), dataset is NVARCHAR(64); the file backend has no bound.
-//       An over-long id erases SUCCESSFULLY on file and raises SQL error 8152
-//       ("String or binary data would be truncated") on SQL. 8152 is not in
-//       TransientErrorNumbers, so it is rethrown without retry and the erasure
-//       FAILS. OPEN.
+//   (b) LENGTH — CLOSED AT THE OPERATOR ENTRY POINT for subject ids, same
+//       mechanism and same scope as (a): an `--id` longer than the DDL's
+//       declared subject_id width (read off SqlStateStore.SchemaScript at
+//       runtime, not hardcoded again) is refused up front instead of erasing
+//       on file and raising un-retried SQL error 8152 ("String or binary data
+//       would be truncated") on SQL. item_id / delivery_id / [key] / dataset
+//       remain unbounded on file and bounded on SQL with NO validation
+//       anywhere — those identifiers are connector-generated or replayed, not
+//       operator-typed, and remain OPEN.
 //
 //   (c) BLANK PADDING. SQL Server's `=` on (n)varchar pads the shorter operand
 //       with trailing spaces, so 'ALT-1' and 'ALT-1 ' may be ONE subject on SQL
 //       and are always TWO on file; '' and ' ' likewise. (Whether binary
 //       collations are exempt is disputed in the wild and this file no longer
-//       takes a position.) OPEN.
+//       takes a position.) OPEN for values already in state; operator-typed
+//       subject ids are trimmed by the commands before use, which is a
+//       normalisation, not a rejection.
 
 using System.Text;
 
@@ -84,8 +98,11 @@ public static class StateContract
     // widened in the schema without widening the constant here fails the
     // build's test run.
     //
-    // NOTE: these are DOCUMENTATION of the SQL schema, not enforcement. Nothing
-    // checks a value against them any more — see (b) above.
+    // NOTE: these are DOCUMENTATION of the SQL schema, not enforcement on any
+    // state write. The one enforcement point that exists — the erase-subject
+    // operator entry (Commands/SubjectIdPolicy.cs) — parses its bound off the
+    // shipped DDL directly rather than using SubjectIdMax, and a test pins the
+    // two equal, so neither can drift from the schema alone.
 
     public const int ConnectorIdMax = 64;
     public const int SubjectIdMax = 256;

@@ -40,8 +40,19 @@ public class ValidateConfigTests : IDisposable
         }]}
         """);
 
+    // Declares the mapped property plus the ALWAYS-EMITTED set: since the
+    // produced-vs-declared cross-check, a graph-schema.json that omits a
+    // property the connector emits (including the classifier pair, flag on or
+    // off) is a preflight ERROR, so a green-path fixture must be complete.
     private string GraphSchemaPath => Write("graph-schema.json", """
-        [{"name": "Title", "type": "String", "isSearchable": true}]
+        [{"name": "Title", "type": "String", "isSearchable": true},
+         {"name": "ObjectName", "type": "String"},
+         {"name": "Url", "type": "String"},
+         {"name": "IconUrl", "type": "String"},
+         {"name": "SourceSystem", "type": "String"},
+         {"name": "DataAsOf", "type": "String"},
+         {"name": "SensitivityLabel", "type": "String"},
+         {"name": "DetectedCategories", "type": "StringCollection"}]
         """);
 
     private string FiltersPath => Write("filters.json", """

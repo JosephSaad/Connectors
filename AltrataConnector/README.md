@@ -335,7 +335,7 @@ perf-smoked CI.
 ## Tests
 
 ```bash
-dotnet test        # 730 tests: CLI parsing, checkpoint resume, dead-letter
+dotnet test        # 743 tests: CLI parsing, checkpoint resume, dead-letter
                    # (incl. 16-writer concurrency corruption stress),
                    # retry/backoff math (Retry-After honoured exactly + 60s clamp,
                    # ±20% jitter), $batch pipeline (429 ladder, adaptive

@@ -537,12 +537,14 @@ public sealed class FileStateStore : IStateStore
 
     public void AddSuppressedSubject(string subjectId)
     {
-        // The DSAR filing point. NOTE, OPEN DEFECT: an id containing an
-        // unpaired UTF-16 surrogate is silently rewritten to U+FFFD by
-        // System.Text.Json on save, so the erasure is filed under a DIFFERENT
-        // id and IsSubjectSuppressed(the same string) returns false — the
-        // subject stays ingestible. See StateContract.cs (a) and
-        // docs/SQL_CONTRACT.md.
+        // The DSAR filing point. An id containing an unpaired UTF-16 surrogate
+        // is still silently rewritten to U+FFFD by System.Text.Json on save —
+        // an inherent limit of the JSON backend — but since the operator-entry
+        // validation (Commands/SubjectIdPolicy.cs, enforced at the
+        // forget-subject command before any mutation) no such id can arrive
+        // here from an operator; only a replay of legacy state can, and
+        // replays must never be refused. Deliberately NO validation here — see
+        // StateContract.cs history and docs/SQL_CONTRACT.md.
         var id = subjectId;
         lock (StateLock)
         {

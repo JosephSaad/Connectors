@@ -86,15 +86,28 @@ Review the four config files:
 - `config/filters.json` — **the scale control** (`docs/FILTERS.md`): partition
   pruning + record predicates per object. An object with no filter refuses to
   crawl (fail-closed) unless explicitly exempted.
-- `config/graph-schema.json` — should contain every Graph property the object
-  list produces (including `SourceSystem`, `DataAsOf` and, when classification
-  is on, `SensitivityLabel`/`DetectedCategories`). **Nothing enforces this.**
-  `validate-config` does not cross-check the object list against this file, so a
-  property mapped in `schema.json` but undeclared here passes preflight green and
-  is rejected by Graph at push time. Keeping the two in step is manual.
+- `config/graph-schema.json` — must contain every Graph property the object
+  list produces, and **`validate-config` enforces this**: it derives the
+  produced set from the production emission code (the converter itself, plus
+  the always-emitted registry) and fails preflight with an **ERROR** naming any
+  produced-but-undeclared property, because Graph rejects such an item at push
+  time. The rules mirror the converter exactly — a `drop`ped column emits
+  nothing (no declaration needed), a `mask`ed column still emits its property
+  (declaration required), a `_bdh_` placeholder routes to the content body and
+  is not a Graph property. The always-emitted set — `ObjectName`, `Url`,
+  `IconUrl`, `SourceSystem`, `DataAsOf`, `SensitivityLabel`,
+  `DetectedCategories` — is required **unconditionally, whether or not
+  `CLASSIFICATION` is on**: the flag is what operators flip last, and a schema
+  gap discovered on flag-flip day is an incident. The reverse direction
+  (declared but never produced) is an informational notice, never gating —
+  pre-declaring ahead of a rollout is fine. A degenerate file (empty array,
+  empty/duplicate/non-string names, malformed JSON) is a preflight ERROR too.
 - `config/classification.json` — the classification category and pattern set.
   Validated by `validate-config` unconditionally, whether or not `CLASSIFICATION`
-  is on.
+  is on — including the "no usable categories" warning, so the `--strict`
+  verdict cannot depend on the flag. (Only an *absent* file is judged by the
+  flag: with the feature off there is nothing to validate, and enabling it
+  means authoring the file as part of that same change.)
 
 ## Usage
 
@@ -464,7 +477,7 @@ anchors and the actual `hadoop_connector_*` metric names.
 dotnet test
 ```
 
-930 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
+981 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
 shape and concurrency invariants, dead-letter payload redaction
 (`DEADLETTER_PAYLOAD_MODE`), retry/backoff math (numeric Retry-After,
 60 s clamp, jitter), Graph client throttling/hardening (mock HTTP), Graph

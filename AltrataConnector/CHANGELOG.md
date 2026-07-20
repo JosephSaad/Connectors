@@ -9,6 +9,65 @@ and this file.
 
 ## [Unreleased]
 
+### Fixed — refusal messages cap the rendered id at 64 units on BOTH branches
+
+The hostile verifier fed `SubjectIdPolicy.Explain` an ill-formed id of 100,001
+units and got a 100,800-character error message: the ill-formed branch rendered
+the offending id uncapped while the over-long branch already truncated at 64.
+Escaping held (no raw surrogate reached the console), so this was log bloat,
+not a leak — but an error message whose size is attacker-controlled is still
+wrong. Both branches now render `Render(subjectId, 64)`; pinned red-then-green
+by `SuppressionSurrogateTests.ARefusalMessageStaysSmallHoweverLargeTheOffendingId`
+(both clauses).
+
+### Fixed — subject-id validation at the erase-subject ENTRY POINT (closes the re-opened (a)/(b) below)
+
+The two subject-id divergences the revert below re-opened are closed again —
+**at the operator entry point, not on state writes**. This is not the withdrawn
+write-side validation reinstated; the placement is the whole fix:
+
+* **Where it validates**: `forget-subject` checks the operator-supplied `--id`
+  (`Commands/SubjectIdPolicy.cs`) at the **very start of the command, before
+  any state mutation** — before the suppression add, the dead-letter scrub,
+  the withdrawals and the ledger append — so a refused erasure leaves every
+  store **byte-identical** (test-proven per clause:
+  `SuppressionSurrogateTests.ARejectedEraseLeavesTheStoreByteIdentical`). The
+  dry-run refuses too, so a preview cannot promise an erasure the real run
+  would reject.
+* **What it validates, and no more**: ill-formed UTF-16 (an unpaired surrogate
+  would be rewritten to U+FFFD by the file backend, filing the erasure under a
+  different id while SQL stored it verbatim — a silent cross-backend
+  divergence on DSAR evidence), and length against the DDL's declared
+  `subject_id` width. The bound is **parsed from the shipped
+  `SqlStateStore.SchemaScript` at runtime**, not hardcoded a second time, and
+  a test pins it equal to `StateContract.SubjectIdMax` (itself AST-paired to
+  the DDL). Whitespace is trimmed (as the command always did), not refused.
+  Well-formed non-BMP ids (surrogate pairs) remain valid operator input.
+* **Where it deliberately does NOT validate** — the round-8 lesson: ids
+  resolved from the crosswalk via `--email` (replay of stored state; a legacy
+  out-of-domain id must remain erasable or that person's DSAR can never
+  complete), `unsuppress-subject` / `RemoveSuppressedSubject` (an operator
+  must be able to remove a legacy bad entry), `IsSubjectSuppressed`,
+  `ListSuppressedSubjects`, every dead-letter path, and the state stores'
+  write methods themselves. `LegacyStateReadModifyWriteTests` still pins all
+  of that tolerance, and the store-level U+FFFD rewrite — now unreachable from
+  operator input — stays pinned by
+  `SuppressionSurrogateTests.TheStoreItselfStillToleratesWhatTheCommandRefuses`.
+* **The refusal is actionable**: it names the offending code unit and index
+  (or the length and the column bound, including the 8152 consequence),
+  renders the id escaped — no raw unpaired surrogate is ever printed — and
+  tells the operator how to proceed with the DSAR.
+* The former `OPEN_DEFECT_A` / `OPEN_DEFECT_B` pins are **rewritten** as
+  `FIXED_DEFECT_A` / `FIXED_DEFECT_B`, asserting the refusal end-to-end
+  through `CommandRegistry.ForgetSubjectAsync`.
+
+Still open, unchanged by this: blank padding of values already in state
+(divergence (c)), the length bounds on `item_id` / `delivery_id` / `[key]` /
+`dataset` (connector-generated or replayed, not operator-typed), the
+connector-id case divergence on unmigrated inline primary keys, and the IL-only
+scope of the rollback-masking guard. `docs/SQL_CONTRACT.md` and
+`docs/ERASURE.md` carry the updated status.
+
 ### Reverted — the state-backend boundary validation (it was a regression)
 
 The previous round added write-side validation in `State/StateContract.cs`: an
@@ -39,10 +98,13 @@ throw — the column-width constants (documentation of the schema, still pinned 
 the DDL by test), free-text U+FFFD normalisation for the `NVARCHAR(MAX)`
 columns, and `DateTimeKind` stamping.
 
-### Known — issues this revert RE-OPENS. Not closed. Not guarded.
+### Known — issues this revert RE-OPENED at the time
 
-Documented at length in `docs/SQL_CONTRACT.md`; an operator must not read these
-as fixed.
+Documented at length in `docs/SQL_CONTRACT.md`. **Status update: (a) and (b)
+are closed again for operator-supplied subject ids by the entry-point
+validation above; (c) remains open**, as do the length bounds for identifiers
+other than the erase-subject `--id`. The text below records what the revert
+re-opened when it shipped.
 
 * **(a) An unpaired UTF-16 surrogate in a subject id is silently rewritten to
   U+FFFD by the FILE backend** (`System.Text.Json` on save), so a DSAR erasure
@@ -63,9 +125,12 @@ verify an erasure with `list-suppressed-subjects` — under (a) the id listed is
 not the id submitted.
 
 Covered by test: the regression itself, per rejected clause and per write path
-(`LegacyStateReadModifyWriteTests`), and (a) and (b) pinned as tests asserting
-the defective behaviour they currently have, so this entry stays checkable
-(`SuppressionSurrogateTests.OPEN_DEFECT_A` / `OPEN_DEFECT_B`).
+(`LegacyStateReadModifyWriteTests`). (a) and (b) were pinned as
+`SuppressionSurrogateTests.OPEN_DEFECT_A` / `OPEN_DEFECT_B`, asserting the
+then-defective behaviour; with the entry-point fix above those tests are
+rewritten as `FIXED_DEFECT_A` / `FIXED_DEFECT_B`, and the store-level
+tolerance they documented is pinned separately
+(`TheStoreItselfStillToleratesWhatTheCommandRefuses`).
 
 ### Fixed — kept from the previous round (NOT reverted)
 

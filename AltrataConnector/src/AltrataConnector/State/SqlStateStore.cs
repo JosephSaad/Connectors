@@ -89,14 +89,21 @@ public sealed class SqlStateStore : IStateStore
     /// reach that: the two backends store DIFFERENT VALUES, they do not compare
     /// the same value differently.
     ///
-    /// THAT DEFECT IS OPEN. A later round tried to close it by rejecting
-    /// out-of-domain ids at the door of both backends; the rejection wedged DSAR
-    /// erasure over legacy data and was withdrawn. Subject ids reaching this
-    /// store are therefore NOT bounded, NOT checked for unpaired surrogates and
-    /// NOT checked for the leading/trailing whitespace SQL's blank padding folds
-    /// away. See State/StateContract.cs and docs/SQL_CONTRACT.md for the
-    /// accepted, open divergences. BIN2 remains correct and necessary here; it
-    /// is simply not sufficient on its own.</summary>
+    /// THAT DEFECT IS NOW CLOSED — at the erase-subject entry point, not on
+    /// state writes. A round that rejected out-of-domain ids at the door of
+    /// both backends wedged DSAR erasure over legacy data and was withdrawn;
+    /// the replacement (Commands/SubjectIdPolicy.cs) validates the
+    /// operator-supplied `forget-subject --id` — ill-formed UTF-16 and length
+    /// against the DDL's declared subject_id width — at the very start of the
+    /// command, before any mutation. Subject ids reaching THIS STORE are still
+    /// deliberately NOT validated: ids resolved from stored state (the
+    /// crosswalk via --email, legacy suppression entries being removed) must
+    /// remain writable and removable, or read-modify-write over legacy state
+    /// wedges again. Whitespace is trimmed from operator input by the
+    /// commands; blank padding of legacy state remains an open divergence
+    /// (docs/SQL_CONTRACT.md (c)). BIN2 remains correct and necessary here; it
+    /// is simply about comparison, and the entry-point validation is about
+    /// value domain.</summary>
     internal const string SubjectIdCollation = "Latin1_General_100_BIN2";
 
     /// <summary>The same binary collation, applied to the OTHER columns this

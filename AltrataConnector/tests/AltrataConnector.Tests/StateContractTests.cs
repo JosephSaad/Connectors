@@ -15,10 +15,13 @@
 //   2. The file backend run for real, end to end, on disk: the normalisations
 //      that remain (free text, DateTimeKind), and the legacy-read guarantees.
 //
-//   3. The two divergences the withdrawal RE-OPENED, pinned as tests that
-//      assert the defective behaviour they currently have, so the doc
-//      describing them as OPEN stays checkable — see
-//      SuppressionSurrogateTests.OPEN_DEFECT_A / OPEN_DEFECT_B.
+//   3. The two subject-id divergences the withdrawal re-opened — unpaired
+//      surrogate, over-long id — are now CLOSED at the OPERATOR ENTRY POINT:
+//      `forget-subject` validates `--id` before any state mutation
+//      (Commands/SubjectIdPolicy.cs) and refuses with an actionable error.
+//      The STORE stays non-validating (replay tolerance), pinned by
+//      LegacyStateReadModifyWriteTests. See
+//      SuppressionSurrogateTests.FIXED_DEFECT_A / FIXED_DEFECT_B.
 //
 // There is NO SQL Server on this host and no container runtime to start one, so
 // no test here executes a query against a live server. What is NOT proven: that
@@ -35,6 +38,9 @@
 using System.Reflection;
 using Microsoft.Data.Sqlite;
 using Microsoft.SqlServer.TransactSql.ScriptDom;
+using AltrataConnector.Altrata;
+using AltrataConnector.Commands;
+using AltrataConnector.Identity;
 using AltrataConnector.State;
 
 namespace AltrataConnector.Tests;
@@ -605,8 +611,21 @@ public class CheckpointContractTests
 }
 
 // ============================================================================
-// MAJOR 1, end to end: the exact reported id
+// MAJOR 1, end to end: the exact reported id — CLOSED AT THE OPERATOR ENTRY
 // ============================================================================
+//
+// These tests were OPEN_DEFECT_A / OPEN_DEFECT_B, pinning the then-current
+// DEFECTIVE behaviour: an unpaired-surrogate subject id silently rewritten to
+// U+FFFD by the file backend (erasure filed under a different id, subject
+// still ingestible) and an over-long id accepted on file while SQL would raise
+// un-retried error 8152. They are REWRITTEN, not deleted, to assert the FIXED
+// behaviour: `forget-subject` validates the operator-supplied `--id` at the
+// COMMAND entry point — before any state mutation — and refuses with an
+// actionable error. The STORE stays deliberately non-validating (replay
+// tolerance over legacy state — LegacyStateReadModifyWriteTests below), so a
+// store-level fact here still asserts acceptance: the store's behaviour is
+// unchanged; what changed is that no operator-typed id can reach it
+// unvalidated.
 
 public class SuppressionSurrogateTests
 {
@@ -616,50 +635,199 @@ public class SuppressionSurrogateTests
         return new FileStateStore("c1", Path.Combine(dir, "logs"), Path.Combine(dir, "data"));
     }
 
-    [Fact]
-    public void OPEN_DEFECT_A_AnUnpairedSurrogateSubjectIdIsSilentlyRewrittenOnFile()
+    private static (Runtime Runtime, FakeGraphClient Graph, string Root) NewRuntime(string prefix)
     {
-        // KNOWN, ACCEPTED, OPEN — see StateContract.cs (a) and
-        // docs/SQL_CONTRACT.md. A round that closed this by REJECTING the id at
-        // the write boundary wedged DSAR erasure over legacy state and was
-        // withdrawn. This test pins the defect's CURRENT observable shape so it
-        // cannot change without someone noticing, and so the documentation
-        // describing it stays checkable.
-        //
-        // System.Text.Json cannot encode a lone surrogate and substitutes
-        // U+FFFD, so the id filed is not the id asked for.
-        var store = File_("surrogate-open");
+        var root = TestFixtures.NewTempDir(prefix);
+        var graph = new FakeGraphClient();
+        var runtime = TestFixtures.NewRuntime(TestFixtures.NewConfig(), graph, root);
+        return (runtime, graph, root);
+    }
+
+    /// <summary>Swap Console.Error for the duration of a refusal so the test
+    /// can assert the message an operator actually sees (Logger.Error writes
+    /// ERROR lines to stderr). Restored in Dispose.</summary>
+    private sealed class StderrCapture : IDisposable
+    {
+        private readonly TextWriter _original = Console.Error;
+        private readonly StringWriter _writer = new();
+        public StderrCapture() => Console.SetError(_writer);
+        public string Text => _writer.ToString();
+        public void Dispose() => Console.SetError(_original);
+    }
+
+    // The ill-formed ids are BUILT IN THE TEST BODY and their code units are
+    // asserted before use: xUnit serialises theory arguments and a lone
+    // surrogate does not survive that round trip (it arrives rewritten to
+    // U+FFFD, i.e. well-formed), so a theory row carrying the VALUE would
+    // silently exercise the wrong input. Clause NAMES travel; values do not.
+    private static string OperatorId(string clause) => clause switch
+    {
+        "lone-high" => "ALT-\uD83D-9001",
+        "lone-low" => "ALT-\uDC00-9001",
+        "over-long" => new string('A', SubjectIdPolicy.MaxLength + 48),
+        _ => throw new ArgumentOutOfRangeException(nameof(clause), clause, "unmapped clause"),
+    };
+
+    [Fact]
+    public async Task FIXED_DEFECT_A_ForgetSubjectRefusesAnUnpairedSurrogateIdBeforeAnyMutation()
+    {
+        // The exact reported id. Prove the input is what it claims to be:
+        // code unit 4 is a HIGH surrogate with no low surrogate after it.
         var id = "ALT-\uD83D-9001";
+        Assert.Equal(0xD83D, id[4]);
+        Assert.False(StateContract.IsWellFormedUtf16(id));
 
-        store.AddSuppressedSubject(id);          // accepted, no longer refused
+        var (runtime, graph, _) = NewRuntime("fixed-a");
+        using var _1 = runtime;
+        runtime.Identity.RecordIngestedItem(new IngestedItem("PersonProfile-X", Datasets.PersonProfile, "h", DateTime.UtcNow));
 
-        var listed = Assert.Single(store.ListSuppressedSubjects());
-        Assert.NotEqual(id, listed);             // filed under a DIFFERENT id
-        Assert.Equal("ALT-\uFFFD-9001", listed);
+        using var stderr = new StderrCapture();
+        var result = await CommandRegistry.ForgetSubjectAsync(runtime, id, null, "joseph", confirm: true);
 
-        // The consequence: the erasure reports success, the subject stays
-        // ingestible, on the SAME store instance.
-        Assert.False(store.IsSubjectSuppressed(id));
+        Assert.Equal(false, result);                              // command refused
+        Assert.Empty(runtime.State.ListSuppressedSubjects());     // nothing filed — not under U+FFFD either
+        Assert.False(runtime.State.IsSubjectSuppressed(id));
+        Assert.False(runtime.State.IsSubjectSuppressed("ALT-�-9001"));
+        Assert.Empty(runtime.Erasure.ReadAll());                  // nothing ledgered
+        Assert.Empty(graph.DeletedItems);                         // nothing withdrawn
 
-        // SQL (NVARCHAR, UCS-2) would store the lone surrogate verbatim and
-        // answer true. That half needs a live server and is NOT executed here.
+        // The error is ACTIONABLE and renders the id SAFELY: it names the
+        // offending code unit and position, escapes it, and tells the operator
+        // what to do — and no RAW unpaired surrogate reaches the console.
+        var message = stderr.Text;
+        Assert.Contains("forget-subject refused", message);
+        Assert.Contains("0xD83D", message);
+        Assert.Contains("index 4", message);
+        Assert.Contains("\\uD83D", message);                      // escaped rendering
+        Assert.DoesNotContain('\uD83D', message);                 // never raw
+        Assert.Contains("re-run forget-subject", message);        // remediation
     }
 
     [Fact]
-    public void OPEN_DEFECT_B_AnOverLongSubjectIdIsAcceptedByTheFileBackend()
+    public async Task FIXED_DEFECT_B_ForgetSubjectRefusesAnOverLongIdBeforeAnyMutation()
     {
-        // KNOWN, ACCEPTED, OPEN — see StateContract.cs (b). subject_id is
-        // NVARCHAR(256) on SQL; the file backend has no bound, so this erasure
-        // succeeds here and raises SQL error 8152 on the SQL backend, which is
-        // not in TransientErrorNumbers and is therefore rethrown unretried.
-        var store = File_("overlong-open");
-        var id = new string('A', StateContract.SubjectIdMax + 48);
+        // Over the declared NVARCHAR width of altrata_suppressed.subject_id.
+        // On SQL this id would raise error 8152 (not transient, not retried);
+        // on file it would erase "successfully" — a cross-backend divergence.
+        // Now neither happens: the command refuses it up front, identically on
+        // both backends, before anything is written.
+        var id = new string('A', SubjectIdPolicy.MaxLength + 48);
 
-        store.AddSuppressedSubject(id);
+        var (runtime, graph, _) = NewRuntime("fixed-b");
+        using var _1 = runtime;
 
-        Assert.True(store.IsSubjectSuppressed(id));
-        Assert.Equal(id, Assert.Single(store.ListSuppressedSubjects()));
+        using var stderr = new StderrCapture();
+        var result = await CommandRegistry.ForgetSubjectAsync(runtime, id, null, "joseph", confirm: true);
+
+        Assert.Equal(false, result);
+        Assert.Empty(runtime.State.ListSuppressedSubjects());
+        Assert.Empty(runtime.Erasure.ReadAll());
+        Assert.Empty(graph.DeletedItems);
+
+        var message = stderr.Text;
+        Assert.Contains("forget-subject refused", message);
+        Assert.Contains($"{id.Length} UTF-16 code units", message);
+        Assert.Contains($"NVARCHAR({SubjectIdPolicy.MaxLength})", message);
+        Assert.Contains("8152", message);
+        Assert.Contains("re-run forget-subject", message);
     }
+
+    /// <summary>Both refusal branches cap the rendered id at 64 units. The
+    /// hostile verifier fed Explain an ill-formed id of 100,001 units and got a
+    /// 100,800-character error message: the ill-formed branch called Render
+    /// with no cap while the over-long branch capped at 64. The message was
+    /// safely escaped — this is log bloat, not a leak — but an error message
+    /// whose size is attacker-controlled is still wrong. Kills the mutant
+    /// "Render(subjectId)" (uncapped) on either branch.</summary>
+    [Theory]
+    [InlineData("ill-formed")]
+    [InlineData("over-long")]
+    public void ARefusalMessageStaysSmallHoweverLargeTheOffendingId(string clause)
+    {
+        var id = clause switch
+        {
+            // Built inline, not via MemberData: a lone surrogate does not
+            // survive xUnit's theory-argument serialisation.
+            "ill-formed" => "X\uD83D" + new string('Q', 100_000),
+            _ => new string('Q', 100_000),
+        };
+
+        var message = SubjectIdPolicy.Explain(id);
+
+        Assert.NotNull(message);
+        Assert.True(
+            message!.Length < 1_500,
+            $"refusal message is {message.Length} chars for a {id.Length}-unit id; " +
+            "the rendered id must be truncated, not echoed whole");
+        Assert.Contains("truncated", message);
+        Assert.DoesNotContain('\uD83D', message);                 // never raw
+    }
+
+    /// <summary>The ORDERING requirement, per clause: a rejected erase-subject
+    /// leaves EVERY file of the store byte-identical — no half-applied
+    /// suppression, no ledger entry, no scrubbed queue. Round 8's failure left
+    /// an erasure half-applied because AddSuppressedSubject had run before a
+    /// later step threw; validation now precedes ALL mutation.</summary>
+    [Theory]
+    [InlineData("lone-high")]
+    [InlineData("lone-low")]
+    [InlineData("over-long")]
+    public async Task ARejectedEraseLeavesTheStoreByteIdentical(string clause)
+    {
+        var id = OperatorId(clause);
+        if (clause is "lone-high") Assert.True(char.IsHighSurrogate(id[4]));
+        if (clause is "lone-low") Assert.True(char.IsLowSurrogate(id[4]));
+        if (clause is "over-long") Assert.True(id.Length > SubjectIdPolicy.MaxLength);
+
+        var (runtime, _, root) = NewRuntime("byte-identical");
+        using var _1 = runtime;
+        // A store with real content at rest, including a dead-letter record
+        // the scrub WOULD have rewritten had the command proceeded.
+        runtime.Identity.RecordIngestedItem(new IngestedItem("PersonProfile-X", Datasets.PersonProfile, "h", DateTime.UtcNow));
+        runtime.State.AddSuppressedSubject("ALT-ALREADY-ERASED");
+        runtime.State.AddDeadLetter(new DeadLetterRecord
+        {
+            ItemId = "queued-item", Dataset = "person", DeliveryId = "d-1",
+            Op = DeadLetterOps.Upsert, Error = "boom", PayloadJson = "{\"x\":1}",
+            FailedUtc = DateTime.UtcNow,
+        });
+
+        var before = Snapshot(root);
+        using (new StderrCapture())
+        {
+            var result = await CommandRegistry.ForgetSubjectAsync(runtime, id, null, "joseph", confirm: true);
+            Assert.Equal(false, result);
+        }
+        var after = Snapshot(root);
+
+        Assert.Equal(before.Keys.OrderBy(k => k, StringComparer.Ordinal),
+                     after.Keys.OrderBy(k => k, StringComparer.Ordinal));
+        foreach (var (path, bytes) in before)
+            Assert.True(bytes.AsSpan().SequenceEqual(after[path]),
+                $"file changed by a REJECTED erase-subject: {path}");
+    }
+
+    private static Dictionary<string, byte[]> Snapshot(string root) =>
+        Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+            .ToDictionary(p => p, File.ReadAllBytes, StringComparer.Ordinal);
+
+    [Fact]
+    public async Task TheDryRunRefusesTooRatherThanPreviewingAnErasureThatCannotExecute()
+    {
+        // Dry-run is how an operator previews a DSAR erasure; a preview that
+        // says "would erase" for an id the real run refuses wastes the legal
+        // clock. Validation sits before the dry-run branch.
+        var (runtime, _, _) = NewRuntime("dry-refuse");
+        using var _1 = runtime;
+
+        using var stderr = new StderrCapture();
+        var result = await CommandRegistry.ForgetSubjectAsync(
+            runtime, OperatorId("lone-high"), null, "joseph", confirm: false);
+
+        Assert.Equal(false, result);
+        Assert.Contains("forget-subject refused", stderr.Text);
+    }
+
     [Fact]
     public void AWellFormedSupplementaryIdStillRoundTripsExactly()
     {
@@ -672,6 +840,141 @@ public class SuppressionSurrogateTests
 
         Assert.True(store.IsSubjectSuppressed(id));
         Assert.Equal(id, Assert.Single(store.ListSuppressedSubjects()));
+    }
+
+    [Fact]
+    public async Task AWellFormedSupplementaryIdErasesEndToEnd()
+    {
+        // And through the whole command: a surrogate PAIR is valid operator
+        // input, passes validation, and files exactly.
+        var id = "ALT-😀-9001";
+        Assert.True(StateContract.IsWellFormedUtf16(id));
+
+        var (runtime, _, _) = NewRuntime("astral-ok");
+        using var _1 = runtime;
+        var result = await CommandRegistry.ForgetSubjectAsync(runtime, id, null, "joseph", confirm: true);
+
+        Assert.Equal(true, result);
+        Assert.True(runtime.State.IsSubjectSuppressed(id));
+        Assert.Equal(id, Assert.Single(runtime.State.ListSuppressedSubjects()));
+    }
+
+    [Fact]
+    public async Task AnEmailResolvedLegacyIdIsReplayOfStoredStateAndIsNotValidated()
+    {
+        // The caller-audit line that decides WHERE the validation lives:
+        // `forget-subject --email` resolves subject ids from the CROSSWALK —
+        // state written at ingest time, not operator input. A legacy
+        // out-of-domain id stored there must remain erasable, or the DSAR for
+        // that person can never complete (the round-8 wedge, one layer up).
+        var legacyId = new string('L', SubjectIdPolicy.MaxLength + 44);
+        var (runtime, _, _) = NewRuntime("email-replay");
+        using var _1 = runtime;
+        runtime.Identity.ReplaceCrmContacts(new[] { new CrmContact { Id = "C1", Email = "ada@x.com" } });
+        runtime.Identity.UpsertCrosswalk(new CrosswalkEntry(legacyId, "C1", "email", DateTime.UtcNow));
+
+        var result = await CommandRegistry.ForgetSubjectAsync(runtime, null, "ada@x.com", "joseph", confirm: true);
+
+        Assert.Equal(true, result);                                // erasure COMPLETED
+        Assert.True(runtime.State.IsSubjectSuppressed(legacyId));  // filed as stored
+        Assert.Single(runtime.Erasure.ReadAll());
+    }
+
+    [Fact]
+    public async Task UnsuppressSubjectCanRemoveALegacyOutOfDomainEntry()
+    {
+        // RemoveSuppressedSubject must never validate: inspecting and removing
+        // a legacy bad entry is the operator's only way OUT of one.
+        var legacyId = new string('L', SubjectIdPolicy.MaxLength + 44);
+        var (runtime, _, _) = NewRuntime("unsuppress-legacy");
+        using var _1 = runtime;
+        runtime.State.AddSuppressedSubject(legacyId);              // store tolerates (replay shape)
+        Assert.True(runtime.State.IsSubjectSuppressed(legacyId));
+
+        var result = await CommandRegistry.UnsuppressSubjectAsync(runtime, legacyId, "joseph", confirm: true);
+
+        Assert.Equal(true, result);
+        Assert.False(runtime.State.IsSubjectSuppressed(legacyId));
+    }
+
+    [Fact]
+    public async Task APaddedOperatorIdIsTrimmedNotRefused()
+    {
+        // The whitespace DECISION, pinned: forget-subject has always trimmed
+        // `--id`, so padding is normalised rather than refused — there is no
+        // whitespace clause in the policy, and no padded variant is ever filed
+        // from operator input. Blank padding of LEGACY state stays open
+        // (SQL_CONTRACT.md divergence (c)).
+        var (runtime, _, _) = NewRuntime("trim");
+        using var _1 = runtime;
+
+        var result = await CommandRegistry.ForgetSubjectAsync(runtime, "  ALT-TRIM-1  ", null, "joseph", confirm: true);
+
+        Assert.Equal(true, result);
+        Assert.Equal("ALT-TRIM-1", Assert.Single(runtime.State.ListSuppressedSubjects()));
+    }
+
+    [Fact]
+    public async Task AnIdAtExactlyTheColumnBoundIsAcceptedAndOneOverIsNot()
+    {
+        // The boundary itself, both sides: NVARCHAR(n) holds exactly n UTF-16
+        // code units, so an id of exactly MaxLength must erase and one of
+        // MaxLength + 1 must be refused. Also pins that the LENGTH checked is
+        // the TRIMMED id's — the stored form — not the padded raw argument:
+        // the at-bound id is passed wrapped in spaces.
+        var atBound = new string('B', SubjectIdPolicy.MaxLength);
+        var (runtime, _, _) = NewRuntime("bound-exact");
+        using var _1 = runtime;
+
+        var ok = await CommandRegistry.ForgetSubjectAsync(
+            runtime, "  " + atBound + "  ", null, "joseph", confirm: true);
+        Assert.Equal(true, ok);
+        Assert.True(runtime.State.IsSubjectSuppressed(atBound));
+
+        var oneOver = new string('B', SubjectIdPolicy.MaxLength + 1);
+        using var stderr = new StderrCapture();
+        var refused = await CommandRegistry.ForgetSubjectAsync(
+            runtime, oneOver, null, "joseph", confirm: true);
+        Assert.Equal(false, refused);
+        Assert.False(runtime.State.IsSubjectSuppressed(oneOver));
+        Assert.Contains("forget-subject refused", stderr.Text);
+    }
+
+    [Fact]
+    public void ThePolicyBoundIsTheDdlsBoundNotASecondConstant()
+    {
+        // SubjectIdPolicy.MaxLength is parsed from SqlStateStore.SchemaScript
+        // at runtime. StateContract.SubjectIdMax is pinned to the same DDL via
+        // the ScriptDom AST (EveryBoundedColumnMatchesTheContractConstant), so
+        // equality here chains policy == constant == shipped DDL: widening the
+        // column cannot leave the validator behind.
+        Assert.Equal(StateContract.SubjectIdMax, SubjectIdPolicy.MaxLength);
+    }
+
+    [Fact]
+    public void TheStoreItselfStillToleratesWhatTheCommandRefuses()
+    {
+        // The store-level halves of the ORIGINAL open-defect pins, kept
+        // deliberately: IStateStore.AddSuppressedSubject remains
+        // NON-VALIDATING (replay tolerance — see
+        // LegacyStateReadModifyWriteTests), so the file backend still rewrites
+        // an unpaired surrogate to U+FFFD and still accepts an over-long id.
+        // That behaviour is now UNREACHABLE from operator input — the command
+        // layer refuses first — but pinning it keeps the tolerance deliberate
+        // rather than accidental. SQL (NVARCHAR, UCS-2) would store the lone
+        // surrogate verbatim; that half needs a live server and is NOT
+        // executed here.
+        var store = File_("store-tolerates");
+        var surrogateId = "ALT-\uD83D-9001";
+        Assert.False(StateContract.IsWellFormedUtf16(surrogateId));
+
+        store.AddSuppressedSubject(surrogateId);                   // accepted, rewritten
+        Assert.Equal("ALT-�-9001", Assert.Single(store.ListSuppressedSubjects()));
+        Assert.False(store.IsSubjectSuppressed(surrogateId));      // inherent JSON limit, store-level
+
+        var overLongId = new string('A', SubjectIdPolicy.MaxLength + 48);
+        store.AddSuppressedSubject(overLongId);                    // accepted, unbounded
+        Assert.True(store.IsSubjectSuppressed(overLongId));
     }
 }
 
@@ -854,10 +1157,14 @@ public class LegacyStateReadModifyWriteTests
         // invisible. It is asserted only for values the FILE backend can
         // actually store: for the ill-formed clauses the backend rewrites the
         // key to U+FFFD on save, so the value genuinely is not there under the
-        // id it was filed with. That is open defect (a) — the delivery-ledger
-        // and KV namespaces have the same shape as the suppression list — and
-        // it is pinned in SuppressionSurrogateTests, not silently tolerated
-        // here.
+        // id it was filed with. That store-level rewrite is inherent to the
+        // JSON backend and remains — the delivery-ledger and KV namespaces
+        // have the same shape as the suppression list — but for SUBJECT IDS it
+        // is no longer reachable from operator input: forget-subject validates
+        // `--id` at the command entry (SubjectIdPolicy). The store tolerance
+        // itself is pinned in
+        // SuppressionSurrogateTests.TheStoreItselfStillToleratesWhatTheCommandRefuses,
+        // not silently assumed here.
         if (StateContract.IsWellFormedUtf16(value))
         {
             Assert.True(store.IsDeliveryProcessed(value));
@@ -866,7 +1173,7 @@ public class LegacyStateReadModifyWriteTests
         }
         else
         {
-            Assert.False(store.IsDeliveryProcessed(value));   // open defect (a)
+            Assert.False(store.IsDeliveryProcessed(value));   // inherent JSON-backend rewrite (unguarded namespace)
         }
     }
 }

@@ -11,6 +11,11 @@
 //     That set is the whole of it: those four files are the only `config/`
 //     paths in the source. The invariant: no config, in any file, may pass
 //     `validate-config --strict` green and then fail at crawl time.
+//   • graph-schema.json declares every Graph property the object list PRODUCES
+//     (selectedFields-mapped names as the production converter actually emits
+//     them — drop/mask/_bdh_ aware — plus the always-emitted set, including the
+//     classifier pair regardless of CLASSIFICATION). Undeclared ⇒ ERROR: Graph
+//     rejects the item at push time, so the config cannot work.
 //   • the fail-closed scale guard: objects with NO filter and no exemption
 //     are a warning — and an ERROR under --strict (deploying an unfiltered
 //     150M-row object is an outage waiting to happen)
@@ -24,6 +29,7 @@ using HadoopConnector.Filters;
 using HadoopConnector.Graph;
 using HadoopConnector.Hdfs;
 using HadoopConnector.Infrastructure;
+using HadoopConnector.Item;
 
 namespace HadoopConnector.Commands;
 
@@ -149,6 +155,10 @@ public static class ValidateConfig
         // graph-schema.json
         var graphPropertyTypes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var graphSchemaFile = graphSchemaPath ?? ConnectionManager.DefaultGraphSchemaPath;
+        // The produced-vs-declared cross-check below must only read a file this
+        // block fully accepted — a partially parsed declaration would make the
+        // drift report half-true. Tracked by error count, not by assumption.
+        var graphSchemaErrorsBefore = result.Errors.Count;
         if (!File.Exists(graphSchemaFile))
         {
             result.Errors.Add($"Missing config file: {graphSchemaFile}");
@@ -160,6 +170,19 @@ public static class ValidateConfig
                 if (JsonNode.Parse(File.ReadAllText(graphSchemaFile)) is not JsonArray properties)
                 {
                     result.Errors.Add("graph-schema.json must be a JSON array of property definitions.");
+                }
+                else if (properties.Count == 0)
+                {
+                    // Degenerate but well-formed JSON. Without this, an empty
+                    // array used to sail through this block and the connection
+                    // would be registered with NO properties — every item push
+                    // then fails. (The Clarizen connector shipped exactly this
+                    // hole behind a blanket catch; error, never silence.)
+                    result.Errors.Add(
+                        "graph-schema.json declares no properties at all (empty array). The "
+                        + "connector emits properties on every item (at minimum "
+                        + $"{string.Join(", ", AlwaysEmittedProperties.Names)}), so a "
+                        + "connection registered from this file rejects every item at push time.");
                 }
                 else
                 {
@@ -182,6 +205,17 @@ public static class ValidateConfig
                             result.Errors.Add(
                                 $"graph-schema.json: property 'name' must be a string, but "
                                 + $"{property["name"]!.ToJsonString()} is not.");
+                            break;
+                        }
+                        // "" and "   " ARE strings, so they pass the check above
+                        // — and Graph would reject the registration. Catch them
+                        // here rather than at connection setup.
+                        if (string.IsNullOrWhiteSpace(propertyName))
+                        {
+                            result.Errors.Add(
+                                "graph-schema.json: a property has an empty or whitespace-only "
+                                + "'name'. Graph property names must be non-empty; remove or name "
+                                + "the entry.");
                             break;
                         }
                         if (property["type"] is not JsonValue typeValue
@@ -215,6 +249,30 @@ public static class ValidateConfig
                 result.Errors.Add($"graph-schema.json invalid: {exc.Message}");
             }
         }
+        var graphSchemaUsable = result.Errors.Count == graphSchemaErrorsBefore;
+
+        // ── Produced-vs-declared cross-check ─────────────────────────────────
+        // graph-schema.json must declare every Graph property the object list
+        // PRODUCES on external items — Graph REJECTS an item carrying an
+        // undeclared property, so a gap here is not a style issue, it is a
+        // config that cannot work. What "produces" means is answered by
+        // ProducedGraphProperties, which executes the production converter and
+        // reads the always-emitted registry rather than restating either
+        // (restated rule sets drift; see that file's header). The always-emitted
+        // set — including the classifier pair SensitivityLabel and
+        // DetectedCategories — is required UNCONDITIONALLY, CLASSIFICATION on or
+        // off: same rationale as the unconditional classification.json load
+        // above, because the flag is what operators flip last.
+        //
+        // Runs only when BOTH files parsed clean: a produced-set computed from a
+        // half-loaded schema, or diffed against a half-parsed declaration, would
+        // report drift that is not real (and the parse failure is already an
+        // error above — checked by counting, not assumed). No blanket
+        // catch-and-return around the computation either: a failure to compute
+        // the produced set is itself reported as an ERROR. Both lessons are
+        // inherited from the Clarizen connector's drift-check history.
+        if (schema is not null && graphSchemaUsable)
+            AddGraphSchemaDriftFindings(result, schema, graphPropertyTypes);
 
         // filters.json — THE scale control. Malformed → error. Missing → every
         // object is unfiltered (guard applies below).
@@ -280,13 +338,23 @@ public static class ValidateConfig
                 // but it is also a total detection gap, so — exactly as
                 // schema.json's empty objectList is judged after normalisation —
                 // say so rather than let it pass silently.
-                if (classificationEnabled && classifier.Categories.Count == 0)
+                //
+                // UNCONDITIONAL, exactly like the load above and for the same
+                // reason: this used to be guarded by `classificationEnabled &&`,
+                // which made the --strict verdict depend on the flag — green with
+                // it off, red with it on — one line below the comment explaining
+                // why that asymmetry is a time bomb. A file that EXISTS is judged
+                // as it is, whatever the flag currently says.
+                // Pinned by EmptyCategorySet_IsReported_EvenWhenClassificationOff.
+                if (classifier.Categories.Count == 0)
                 {
                     result.Warnings.Add(
-                        $"CLASSIFICATION=true but {classificationFile} yields NO usable categories "
-                        + "(categories is null, empty, or every category has no valid pattern). "
-                        + "Nothing will ever be detected and no item will be labelled Restricted — "
-                        + "classification is on in name only.");
+                        $"{classificationFile} yields NO usable categories (categories is null, "
+                        + "empty, or every category has no valid pattern). Under CLASSIFICATION=true "
+                        + "nothing will ever be detected and no item will be labelled Restricted — "
+                        + "classification on in name only. Reported whether or not the flag is "
+                        + "currently set: the flag is what operators flip last, and this file is "
+                        + "validated as it exists.");
                 }
             }
             catch (Exception exc)
@@ -504,6 +572,74 @@ public static class ValidateConfig
                 + "crawls may miss late-arriving partitions.");
 
         return result;
+    }
+
+    /// <summary>
+    /// The produced-vs-declared diff itself, callable only once BOTH files have
+    /// parsed clean (the caller checks that by error count, not by assumption).
+    /// <list type="bullet">
+    ///   <item>produced but undeclared → ERROR. Graph rejects an item carrying
+    ///   an undeclared property, so every affected record fails at push time —
+    ///   the config cannot work.</item>
+    ///   <item>declared but never produced → NOTICE, never gating. Dead schema
+    ///   is harmless (pre-declaring ahead of a config rollout is exactly the
+    ///   over-declaring this check encourages), but it is the usual trace of a
+    ///   one-sided rename, so it must be visible.</item>
+    /// </list>
+    /// <para>
+    /// A failure to COMPUTE the produced set is an ERROR, not silence — the
+    /// Clarizen connector wrapped its drift computation in a blanket
+    /// <c>catch {}</c> and a degenerate file passed --strict green while the
+    /// crawl threw. <paramref name="producedCollector"/> exists so a test can
+    /// force that path (DriftComputationFailure_IsAnError_NeverSilence);
+    /// production always uses <see cref="ProducedGraphProperties.Collect"/>.
+    /// </para>
+    /// </summary>
+    internal static void AddGraphSchemaDriftFindings(
+        Result result,
+        SchemaConfig schema,
+        IReadOnlyDictionary<string, string> declaredTypes,
+        Func<SchemaConfig, IReadOnlyCollection<string>>? producedCollector = null)
+    {
+        try
+        {
+            var produced = (producedCollector ?? ProducedGraphProperties.Collect)(schema);
+            var undeclared = produced
+                .Where(name => !declaredTypes.ContainsKey(name))
+                .ToList();
+            if (undeclared.Count > 0)
+            {
+                result.Errors.Add(
+                    "graph-schema.json does not declare Graph property name(s) this "
+                    + $"configuration emits on external items: {string.Join(", ", undeclared)}. "
+                    + "Graph rejects an item carrying an undeclared property, so every affected "
+                    + "record would fail at push time — add the declaration(s) to "
+                    + "config/graph-schema.json. Note that the always-emitted properties "
+                    + $"({string.Join(", ", AlwaysEmittedProperties.Names)}) are required "
+                    + "whether or not CLASSIFICATION is currently enabled: the flag is what "
+                    + "operators flip last, and declaring a property costs nothing while "
+                    + "discovering it missing on flag-flip day costs an incident.");
+            }
+
+            var unproduced = declaredTypes.Keys
+                .Where(name => !produced.Contains(name, StringComparer.OrdinalIgnoreCase))
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (unproduced.Count > 0)
+            {
+                result.Notices.Add(
+                    "graph-schema.json declares property name(s) nothing in schema.json "
+                    + $"produces: {string.Join(", ", unproduced)}. Harmless dead schema — but "
+                    + "if one of these was recently renamed, check the rename reached both "
+                    + "files.");
+            }
+        }
+        catch (Exception exc)
+        {
+            result.Errors.Add(
+                "Could not determine which Graph properties this configuration emits, so the "
+                + $"graph-schema.json cross-check could not run: {exc.Message}");
+        }
     }
 
     /// <summary>

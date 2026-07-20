@@ -72,8 +72,17 @@ public class ConfigPreflightClosureTests : IDisposable
         }]}
         """);
 
+    // Mapped property + the always-emitted set — required by the
+    // produced-vs-declared cross-check for any green-path run.
     private string GraphSchemaPath => Write("graph-schema.json", """
-        [{"name": "Title", "type": "String", "isSearchable": true}]
+        [{"name": "Title", "type": "String", "isSearchable": true},
+         {"name": "ObjectName", "type": "String"},
+         {"name": "Url", "type": "String"},
+         {"name": "IconUrl", "type": "String"},
+         {"name": "SourceSystem", "type": "String"},
+         {"name": "DataAsOf", "type": "String"},
+         {"name": "SensitivityLabel", "type": "String"},
+         {"name": "DetectedCategories", "type": "StringCollection"}]
         """);
 
     private string FiltersPath => Write("filters.json", """
@@ -236,6 +245,70 @@ public class ConfigPreflightClosureTests : IDisposable
         Assert.Contains(result.Warnings, w => w.Contains("NO usable categories", StringComparison.Ordinal));
         // and it really does load as empty rather than throwing
         Assert.Empty(ContentClassifier.Load(path).Categories);
+    }
+
+    /// <summary>
+    /// …and the SAME finding with the flag OFF. The guard used to read
+    /// `classificationEnabled && classifier.Categories.Count == 0` — one line
+    /// below the comment explaining why flag-conditional validation is a time
+    /// bomb — so `{"categories": []}` was --strict GREEN with CLASSIFICATION
+    /// unset and RED with it set (probe B2, round 11). The flag is what
+    /// operators flip last: the asymmetry converts a green change ticket into a
+    /// silent-detection-gap deployment on the day classification is enabled.
+    /// Removing the guard is mutant M16; this test is what kills it.
+    /// </summary>
+    [Fact]
+    public void EmptyCategorySet_IsReported_EvenWhenClassificationOff()
+    {
+        using var env = ClassificationEnv(classification: null);
+        var path = Write("classification-empty-off.json", """{"categories": []}""");
+
+        var result = ValidateConfig.ValidateCore(
+            SchemaPath, GraphSchemaPath, FiltersPath, path, strict: true);
+
+        Assert.False(
+            result.Ok(strict: true),
+            "an empty category set passed --strict green with CLASSIFICATION unset "
+            + "(the probe-B2 flag-flip asymmetry)");
+        Assert.Contains(result.Warnings,
+            w => w.Contains("NO usable categories", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// THE round-11 invariant, executed across every file-present shape: the
+    /// --strict verdict must be identical with CLASSIFICATION unset and set.
+    /// (The one ruled exception is an ABSENT file, which is a valid deployment
+    /// with the feature off and a startup crash with it on — see
+    /// AbsentClassificationConfig_IsNotAnError_WhenClassificationOff; enabling
+    /// classification requires AUTHORING the file as part of that same change,
+    /// so no latent artifact is blessed.)
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ClassificationShapes))]
+    [InlineData("categories-empty", """{"categories": []}""")]
+    public void StrictVerdict_IsInvariantUnderClassificationFlag_WhenFileExists(
+        string label, string? content)
+    {
+        if (content is null)
+            return;     // file-absent: the ruled exception, pinned elsewhere
+        var path = Path.Combine(_dir.Path, $"invariant-{label}.json");
+        File.WriteAllText(path, content);
+
+        bool okFlagOff, okFlagOn;
+        using (ClassificationEnv(classification: null))
+        {
+            okFlagOff = ValidateConfig.ValidateCore(
+                SchemaPath, GraphSchemaPath, FiltersPath, path, strict: true).Ok(strict: true);
+        }
+        using (ClassificationEnv(classification: "true"))
+        {
+            okFlagOn = ValidateConfig.ValidateCore(
+                SchemaPath, GraphSchemaPath, FiltersPath, path, strict: true).Ok(strict: true);
+        }
+
+        Assert.True(okFlagOff == okFlagOn,
+            $"'{label}': --strict verdict depends on the CLASSIFICATION flag "
+            + $"(off={okFlagOff}, on={okFlagOn}) — the flag-flip time bomb.");
     }
 
     /// <summary>

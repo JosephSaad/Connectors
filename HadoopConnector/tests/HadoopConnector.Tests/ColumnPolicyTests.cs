@@ -374,8 +374,18 @@ public class ColumnPolicyTests : IDisposable
         ("LOG_FORMAT", null),
         (ShardingConfig.EnvVar, null));
 
+    // Mapped properties + the always-emitted set — required by the
+    // produced-vs-declared cross-check for any green-path run.
     private string GraphSchemaPath => Write("graph-schema.json", """
-        [{"name": "Title", "type": "String", "isSearchable": true}]
+        [{"name": "Title", "type": "String", "isSearchable": true},
+         {"name": "Ssn", "type": "String"},
+         {"name": "ObjectName", "type": "String"},
+         {"name": "Url", "type": "String"},
+         {"name": "IconUrl", "type": "String"},
+         {"name": "SourceSystem", "type": "String"},
+         {"name": "DataAsOf", "type": "String"},
+         {"name": "SensitivityLabel", "type": "String"},
+         {"name": "DetectedCategories", "type": "StringCollection"}]
         """);
 
     private string FiltersPath => Write("filters.json", """
@@ -419,7 +429,14 @@ public class ColumnPolicyTests : IDisposable
         using var scope = GoodEnv();
         var graphSchema = Write("gs-typed.json", """
             [{"name": "Title", "type": "String", "isSearchable": true},
-             {"name": "Amount", "type": "Int64", "isRefinable": true}]
+             {"name": "Amount", "type": "Int64", "isRefinable": true},
+             {"name": "ObjectName", "type": "String"},
+             {"name": "Url", "type": "String"},
+             {"name": "IconUrl", "type": "String"},
+             {"name": "SourceSystem", "type": "String"},
+             {"name": "DataAsOf", "type": "String"},
+             {"name": "SensitivityLabel", "type": "String"},
+             {"name": "DetectedCategories", "type": "StringCollection"}]
             """);
         var schema = Write("cp-typed.json", """
             {"objectList": [{
@@ -443,7 +460,14 @@ public class ColumnPolicyTests : IDisposable
         using var scope = GoodEnv();
         var graphSchema = Write("gs-typed2.json", """
             [{"name": "Title", "type": "String", "isSearchable": true},
-             {"name": "Amount", "type": "Int64", "isRefinable": true}]
+             {"name": "Amount", "type": "Int64", "isRefinable": true},
+             {"name": "ObjectName", "type": "String"},
+             {"name": "Url", "type": "String"},
+             {"name": "IconUrl", "type": "String"},
+             {"name": "SourceSystem", "type": "String"},
+             {"name": "DataAsOf", "type": "String"},
+             {"name": "SensitivityLabel", "type": "String"},
+             {"name": "DetectedCategories", "type": "StringCollection"}]
             """);
         var schema = Write("cp-typed2.json", """
             {"objectList": [{

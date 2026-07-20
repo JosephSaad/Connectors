@@ -67,11 +67,11 @@ Identity (`SqlServerIdentityStore`):
   untouched.
 * File-mode equivalents (JSON/JSONL/SQLite under `logs/` and `data/`) carry
   identical semantics **only over the values both backends can store, return
-  and compare identically** — which is NOT every .NET string, and is NOT
-  enforced anywhere. Read *Value domain* below before switching: the
-  divergences there are OPEN, and two of them affect DSAR erasure. Switching
-  backends is a config change, not a code change — but state does NOT migrate
-  automatically between backends.
+  and compare identically** — which is NOT every .NET string. Read *Value
+  domain* below before switching: operator-supplied subject ids are validated
+  at the erase-subject entry point, but the other divergences there are OPEN.
+  Switching backends is a config change, not a code change — but state does
+  NOT migrate automatically between backends.
 
 
 ## Value domain
@@ -87,12 +87,19 @@ and the difference is absorbed silently by whichever backend is configured:
 | Trailing spaces / empty string | ordinal — `ALT-1` ≠ `ALT-1 `, `''` ≠ `' '` | `=` blank-pads — `ALT-1` **=** `ALT-1 `, `''` **=** `' '` |
 | `DateTimeKind` on a timestamp | round-trips `Utc` through ISO-8601 `o` | `DATETIME2` carries no Kind; `GetDateTime` returns `Unspecified` |
 
-### These divergences are OPEN. Nothing validates or rejects.
+### Where each divergence stands
 
-A previous round closed them by stating the domain once in
-`State/StateContract.cs` and having **both** backends REJECT an out-of-domain
-value at their boundary, before any I/O. **That validation has been withdrawn**,
-because it was a regression that was worse than the defects it closed:
+For **subject ids** the surrogate and length rows are now guarded — **at the
+erase-subject entry point, not on state writes**: `forget-subject` validates
+the operator-supplied `--id` (well-formed UTF-16; length against the DDL's
+declared `subject_id` width, parsed from the shipped schema at runtime) at the
+very start of the command, before any mutation, and refuses with an actionable
+error (`Commands/SubjectIdPolicy.cs`). Ids replayed from stored state — the
+crosswalk via `--email`, legacy suppression entries, every dead-letter field —
+are deliberately **not** validated, and the state stores themselves still
+validate nothing. Do not read this as the earlier write-side validation
+reinstated; that validation was withdrawn because it was a regression worse
+than the defects it closed:
 
 > Reads are deliberately unfiltered — a dead-letter line written before the
 > validation existed must still read back, or a legacy value becomes a LOST
@@ -106,21 +113,19 @@ because it was a regression that was worse than the defects it closed:
 > Nothing under `src/` caught `StateContractViolation`. `retry-failed`'s
 > finalize and attempt-bump wedged identically.
 
-**Operators must treat the following as live, unfixed issues.** They are not
-closed, and no code path guards against them:
+Issue status, per shape:
 
-| # | Open issue | Effect |
+| # | Issue | Status |
 |---|---|---|
-| **(a)** | An unpaired UTF-16 surrogate in a **subject id** is silently rewritten to U+FFFD by the **file** backend (`System.Text.Json` on save) | The DSAR erasure is filed under a **different id**. `IsSubjectSuppressed` with the same string returns **false** on the same store instance, so **the subject stays ingestible** while the erasure reports success. SQL stores the code unit verbatim and answers **true**. |
-| **(b)** | `subject_id` and `item_id` are `NVARCHAR(256)` on SQL with **no bound on file** | An over-long id **erases successfully on file** and raises **SQL error 8152** on SQL. 8152 is not in `TransientErrorNumbers`, so it is rethrown without retry and **the erasure FAILS**. |
-| **(c)** | Blank padding: SQL's `=` folds trailing spaces, ordinal comparison does not | `ALT-1` and `ALT-1 ` may be one subject on SQL and are always two on file; `''` and `' '` likewise. |
+| **(a)** | An unpaired UTF-16 surrogate in a **subject id** is silently rewritten to U+FFFD by the **file** backend (`System.Text.Json` on save): the erasure would be filed under a **different id**, `IsSubjectSuppressed` with the same string would return **false**, and the subject would stay ingestible while SQL stored the code unit verbatim and answered **true**. | **Closed for operator input**: `forget-subject` refuses an ill-formed `--id` before any mutation. The **store-level rewrite still exists** for ids replayed from stored state (pinned by `SuppressionSurrogateTests.TheStoreItselfStillToleratesWhatTheCommandRefuses`), and the delivery-ledger/KV namespaces share the same JSON-backend shape with no guard. |
+| **(b)** | `NVARCHAR` bounds on SQL, **no bound on file**: an over-long value succeeds on file and raises **SQL error 8152** on SQL (not in `TransientErrorNumbers`, rethrown without retry). | **Closed for operator-supplied subject ids**: `forget-subject` refuses an `--id` over the DDL's declared `subject_id` width before any mutation. **OPEN for everything else** — `item_id`, `delivery_id`, `[key]`, `dataset` and replayed subject ids remain unvalidated on every path. |
+| **(c)** | Blank padding: SQL's `=` folds trailing spaces, ordinal comparison does not. | **OPEN.** `ALT-1` and `ALT-1 ` may be one subject on SQL and are always two on file; `''` and `' '` likewise. Operator-typed ids are trimmed by the commands (a normalisation, not a rejection); values already in state are untouched. |
 
-Mitigation available today is operational, not code: **normalise subject ids
-upstream** of the connector — reject or repair ids that are over 256 UTF-16
-code units, contain unpaired surrogates, or carry leading/trailing whitespace —
-before issuing a `forget-subject`. Verify an erasure with
-`list-suppressed-subjects` and confirm the id listed is byte-identical to the
-one you submitted; under (a) it will not be.
+Upstream normalisation is still worth doing for ids that reach the connector by
+**replay** rather than by an operator (`--email` resolution files whatever the
+crosswalk stored). Verifying an erasure with `list-suppressed-subjects` remains
+good practice; with the entry-point validation in place the listed id is the id
+you submitted, byte for byte, or the command refused.
 
 What DOES still happen at the boundary, and cannot fail:
 
@@ -137,7 +142,10 @@ The `StateContract` constants remain, and every bounded `NVARCHAR` column in
 the schema must still have a matching one, read off the parsed AST, so widening
 a column without widening the constant fails the suite. Note what this is and
 is not: the constants **document** the SQL schema and are checked against it.
-They are **not** enforced against any value — see open issue (b).
+They are not enforced against values on any state write. The one place a bound
+IS enforced — the erase-subject operator entry — parses its width off the
+shipped DDL itself (`SubjectIdPolicy.MaxLength`), and a test pins it equal to
+`StateContract.SubjectIdMax`, so the validator cannot drift from the schema.
 
 ### What is NOT verified here
 
@@ -146,12 +154,14 @@ start one, so **no test executes a query against a live server**. The SQL side
 of every claim above is verified against the parsed DDL and the parsed
 statements — real artefacts. The file backend is executed for real, on disk:
 the read-modify-write regression above is covered per rejected clause by
-`LegacyStateReadModifyWriteTests`, and open issues (a) and (b) are pinned by
-`SuppressionSurrogateTests.OPEN_DEFECT_A` / `OPEN_DEFECT_B`, which assert the
-defective behaviour they currently have so this document stays checkable.
+`LegacyStateReadModifyWriteTests`; the entry-point validation is covered by
+`SuppressionSurrogateTests.FIXED_DEFECT_A` / `FIXED_DEFECT_B` (refusal, per
+clause, with byte-identical state proven after a rejected erase) and the
+store-level tolerance by `TheStoreItselfStillToleratesWhatTheCommandRefuses`,
+so this document stays checkable.
 
 What remains unproven: that a live server behaves as its declared collation and
-declared widths say, and **the SQL half of open issues (a), (b) and (c)** — the
+declared widths say, and **the SQL half of issues (a), (b) and (c)** — the
 verbatim-surrogate storage, the 8152 rethrow, and blank padding are all stated
 from SQL Server semantics and the declared DDL, not executed. That needs an
 integration environment.

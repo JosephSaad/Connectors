@@ -260,6 +260,14 @@ non-`String` in `graph-schema.json`. The marker is a string, so Graph rejects
 every such item and the records are not indexed at all — use `drop`, or
 redeclare the property as `String`.
 
+Column policies also interact with the `graph-schema.json` cross-check
+(`validate-config` derives the produced property set from the converter
+itself): a **`drop`**ped column emits nothing, so its mapped Graph property
+does not need declaring — if it stays declared, that is reported as a harmless
+dead-schema notice. A **`mask`**ed column still emits its property (carrying
+the marker), so its declaration is still **required**; removing it is a
+preflight ERROR, not a way to retire the column.
+
 ## Dead-letter payloads are already covered
 
 `DEADLETTER_PAYLOAD_MODE=full` stores the failed request body verbatim, which

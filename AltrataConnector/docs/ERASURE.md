@@ -62,42 +62,50 @@ reconciles cleanly and is marked processed. Derived items of a suppressed person
 `unsuppress-subject --id X --confirm` lifts the block (and ledgers it) so the
 person may be ingested again on the next crawl.
 
-### KNOWN OPEN ISSUE: the subject id is NOT validated, and two shapes break erasure
+### The subject id IS validated — at the erase-subject entry point, not on state writes
 
 Filing a suppression is the point where an id's exact bytes decide whether a
-person is erased. **Nothing validates the id.** A round that did validate it —
-refusing empty, padded, over-256-code-unit and ill-formed-UTF-16 ids on both
-backends — wedged read-modify-write over legacy dead-letter state and left
-erasures HALF-APPLIED (subject marked suppressed, payload still on disk), so the
-validation was withdrawn. See *Value domain* in `docs/SQL_CONTRACT.md`.
+person is erased. Two id shapes used to break `forget-subject` silently: an
+**unpaired UTF-16 surrogate** (the file backend's JSON writer rewrote it to
+U+FFFD, so the suppression list held a *different id* than the one erased, the
+id did not match itself, `forget-subject` reported success and **the subject
+stayed ingestible** — while SQL stored it verbatim and disagreed) and an **id
+longer than the SQL column** (`subject_id` is `NVARCHAR(256)`; the insert
+raised **SQL error 8152**, not transient, not retried, so the erasure failed on
+SQL and succeeded on file).
 
-Two shapes therefore break `forget-subject` today. Neither is guarded, and
-neither reports an error:
+**Both are now refused up front.** `forget-subject` validates the
+operator-supplied `--id` — well-formed UTF-16, and length against the DDL's
+declared `subject_id` width — at the **very start of the command, before any
+state is mutated**, so a refused erasure changes nothing: no suppression entry,
+no ledger entry, no withdrawals, no dead-letter scrub (test-proven
+byte-identical state). The refusal names what was wrong, renders the offending
+id safely (escaped, never raw surrogates on your console), and says what to do
+next. Leading/trailing whitespace on `--id` is trimmed, not refused.
 
-* **An unpaired UTF-16 surrogate in the id, on the FILE backend.** The JSON
-  writer rewrites it to U+FFFD, so the suppression list holds a **different id**
-  than the one erased and it *does not match itself*: `forget-subject` reports
-  success and **the subject stays ingestible**. The SQL backend stores the id
-  verbatim and answers "suppressed", so the two backends also disagree.
-* **An id longer than 256 UTF-16 code units, on the SQL backend.**
-  `subject_id` is `NVARCHAR(256)`; the insert raises **SQL error 8152**, which
-  is not in `TransientErrorNumbers` and is rethrown without retry, so **the
-  erasure FAILS**. The same id erases successfully on the file backend.
+**Where the validation deliberately does NOT sit** (this is the lesson of a
+withdrawn earlier fix that validated every state write and wedged
+read-modify-write over legacy state, leaving erasures HALF-APPLIED):
 
-**Operator mitigation, required until this is closed:** normalise subject ids
-upstream — reject or repair ids over 256 UTF-16 code units, ids containing
-unpaired surrogates, and ids with leading/trailing whitespace — before issuing
-`forget-subject`. Then **verify every erasure**: run `list-suppressed-subjects`
-and confirm the listed id is byte-identical to the one you submitted. Under the
-surrogate defect it will not be, and that mismatch is the only signal you get.
+* Ids resolved from the **crosswalk via `--email`** are replay of stored state
+  and are **not** validated — a legacy out-of-domain id that was ingested must
+  remain erasable, or that person's DSAR can never complete. Such an id files
+  as stored; on the file backend that reproduces the store-level behaviours
+  above, which is why upstream normalisation is still worth doing.
+* `unsuppress-subject`, `list-suppressed-subjects` and every dead-letter path
+  are **not** validated — inspecting and removing a legacy bad entry must
+  always work.
+* The state stores themselves (`AddSuppressedSubject` and every other write)
+  validate nothing. See *Value domain* in `docs/SQL_CONTRACT.md`.
 
-Leading/trailing whitespace and the empty string are a third, lesser divergence:
-SQL's `=` blank-pads, ordinal comparison does not, so `ALT-1` and `ALT-1 ` may
-be one subject on SQL and are always two on file.
+Well-formed non-BMP ids (emoji, other supplementary-plane characters) are valid
+operator input, pass validation and round-trip exactly on both backends — the
+surrogate check is about ill-formed UTF-16, not non-ASCII.
 
-Well-formed non-BMP ids (emoji, other supplementary-plane characters) round-trip
-exactly on the file backend — the surrogate defect is about ill-formed UTF-16,
-not non-ASCII.
+Still open, and unaffected by this validation: blank padding of values already
+in state (SQL's `=` blank-pads, ordinal comparison does not, so `ALT-1` and
+`ALT-1 ` may be one subject on SQL and two on file) — see divergence (c) in
+`docs/SQL_CONTRACT.md`.
 
 ## Tamper-evident erasure ledger
 

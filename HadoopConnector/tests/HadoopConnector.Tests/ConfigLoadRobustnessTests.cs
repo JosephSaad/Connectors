@@ -58,10 +58,19 @@ public class ConfigLoadRobustnessTests : IDisposable
         ("LOG_FORMAT", null),
         (ShardingConfig.EnvVar, null));
 
+    // Mapped properties + the always-emitted set — required by the
+    // produced-vs-declared cross-check for any green-path run.
     private string GraphSchemaPath => Write("graph-schema.json", """
         [{"name": "Title", "type": "String", "isSearchable": true},
          {"name": "RecordId", "type": "String", "isSearchable": false},
-         {"name": "Other", "type": "String", "isSearchable": false}]
+         {"name": "Other", "type": "String", "isSearchable": false},
+         {"name": "ObjectName", "type": "String"},
+         {"name": "Url", "type": "String"},
+         {"name": "IconUrl", "type": "String"},
+         {"name": "SourceSystem", "type": "String"},
+         {"name": "DataAsOf", "type": "String"},
+         {"name": "SensitivityLabel", "type": "String"},
+         {"name": "DetectedCategories", "type": "StringCollection"}]
         """);
 
     private string FiltersPath => Write("filters.json", """

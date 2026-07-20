@@ -1102,6 +1102,25 @@ public static class CommandRegistry
             return false;
         }
 
+        // OPERATOR-INPUT VALIDATION — command layer ONLY, and FIRST, before the
+        // shard fan-out and before ANY state mutation, so a refused erasure
+        // leaves every store byte-identical. `--id` is the one place a NEW
+        // subject id enters the system from an operator; ids resolved from
+        // `--email` via the crosswalk below are REPLAY of already-stored state
+        // and are deliberately NOT validated — rejecting stored state on its
+        // way back through a write is the round-8 wedge (see the history in
+        // State/StateContract.cs). The IStateStore write methods stay
+        // non-validating for the same reason.
+        if (!string.IsNullOrWhiteSpace(altrataId))
+        {
+            var refusal = SubjectIdPolicy.Explain(altrataId.Trim());
+            if (refusal != null)
+            {
+                Logger.Error("forget-subject refused: " + refusal);
+                return false;
+            }
+        }
+
         // One correlation id + span for the erasure cycle. PII CAUTION: the
         // span tags the resolution MODE (id/email) and counts only — never the
         // email address or any profile field.
