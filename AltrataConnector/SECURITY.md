@@ -116,8 +116,10 @@ continues), so still apply the tier ACLs above out of band.
 
 ## DEADLETTER_PAYLOAD_MODE — decision record
 
-**Decision: this connector defaults to `redacted`.** Its siblings default to
-`full`; Altrata deliberately deviates.
+**Decision: this connector defaults to `redacted`.** When this record was
+written its siblings defaulted to `full` and Altrata deliberately deviated;
+the hardening programme has since made `redacted` the fleet-wide default, so
+the deviation is now the norm. The rationale below still stands.
 
 Rationale:
 

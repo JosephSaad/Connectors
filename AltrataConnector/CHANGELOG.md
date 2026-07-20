@@ -124,6 +124,14 @@ Mitigation is operational: normalise subject ids upstream of the connector, and
 verify an erasure with `list-suppressed-subjects` — under (a) the id listed is
 not the id submitted.
 
+Also known and open, predating the revert: the **connector-id identity
+divergence** — file-mode state paths are built from `CONNECTOR_ID` with no
+sanitisation, so on a case-insensitive filesystem two ids differing only by
+case share one state set (and one's `WipeAll()` destroys the other's DSAR
+suppression state) while SQL's BIN2 `connector_id` keeps them separate, and an
+id containing a path separator escapes the data directory. See *Known
+residuals* in `docs/SQL_CONTRACT.md`.
+
 Covered by test: the regression itself, per rejected clause and per write path
 (`LegacyStateReadModifyWriteTests`). (a) and (b) were pinned as
 `SuppressionSurrogateTests.OPEN_DEFECT_A` / `OPEN_DEFECT_B`, asserting the

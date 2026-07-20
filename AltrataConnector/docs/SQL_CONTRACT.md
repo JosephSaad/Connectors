@@ -283,6 +283,25 @@ during DR.
     `Microsoft.Data.Sqlite` in `TransactionRollbackMaskingTests`, whose
     transaction semantics reproduce it but which is a different provider.
 
+* **Connector-id identity divergence between the backends — OPEN.**
+  `FileStateStore` builds every state path as
+  `Path.Combine(dataDir, connectorId + suffix)` with **no sanitisation**
+  (`{CONNECTOR_ID}_state.json`, `checkpoint_{CONNECTOR_ID}.json`,
+  `failed_records_{CONNECTOR_ID}.jsonl`). On a case-insensitive filesystem —
+  Windows, the shipped service target, and macOS — the connector ids `Altrata`
+  and `altrata` therefore resolve to the **same files**: one suppression list,
+  one delivery ledger, one KV store, one dead-letter queue and one checkpoint
+  for what the operator believes are two connectors — and one id's `WipeAll()`
+  destroys the other's DSAR suppression state. On SQL the `connector_id`
+  columns are BIN2, so the same two ids are two **independent** connectors.
+  Additionally, a connector id containing a path separator escapes the data
+  directory outright: `../evil` resolves to `<dataDir>/../evil_state.json`,
+  and `a/b` to a subdirectory. Mitigation is operational: `CONNECTOR_ID` is
+  operator-set — keep one canonical casing everywhere (config, service
+  definitions, scripts, both backends) and never derive it from untrusted
+  input. Candidate fix: startup validation that rejects path separators and
+  pins a canonical case; not built today, so this entry is the disclosure.
+
 ## Minimum permissions
 
 `CREATE TABLE` on first run (or pre-create the tables above), then
