@@ -13,7 +13,7 @@
   <!-- ======================= titles ======================= -->
   <text x="40" y="52" font-size="26" font-weight="bold" fill="#1F3864">Microsoft 365 Copilot Connectors — Deployment &amp; Data Flow</text>
   <text x="40" y="78" font-size="13" fill="#595959">Five standalone C#/.NET&#160;10 services on Windows Server  →  Microsoft Graph external connections  →  Copilot semantic index · security-trimmed at query time</text>
-  <text x="1880" y="52" font-size="11" fill="#8A8A8A" text-anchor="end">v3 · 18 Jul 2026 · five connectors · bank-grade hardening</text>
+  <text x="1880" y="52" font-size="11" fill="#8A8A8A" text-anchor="end">v4 · 20 Jul 2026 · five connectors · adversarial hardening release</text>
 
   <text x="60" y="122" font-size="15" font-weight="bold" fill="#2E5496">Source systems</text>
   <text x="500" y="122" font-size="15" font-weight="bold" fill="#2E5496">Connector tier — Windows Server VMs (active-active HA)</text>
@@ -63,16 +63,16 @@
     <rect x="500" y="160" width="600" height="138" rx="8" fill="#EEF2F8" stroke="#2E5496" stroke-width="1.3"/>
     <circle cx="522" cy="182" r="11" fill="#1F3864"/><text x="522" y="187" font-size="13" font-weight="bold" fill="#FFFFFF" text-anchor="middle">1</text>
     <text x="540" y="187" font-size="13" font-weight="bold" fill="#1F3864">SalesforceConnector</text>
-    <text x="1084" y="187" font-size="11" fill="#595959" text-anchor="end">975 tests</text>
+    <text x="1084" y="187" font-size="11" fill="#595959" text-anchor="end">1,206 tests</text>
     <text x="522" y="212" font-size="11" fill="#333333">Sharing-model ACLs: org-wide defaults · role hierarchy · sharing rules · groups · queues</text>
-    <text x="522" y="230" font-size="11" fill="#333333">Standard + custom objects · sovereign-cloud ready · large-group ACL scale guard</text>
+    <text x="522" y="230" font-size="11" fill="#333333">Standard + custom objects · field-level security on by default · large-group ACL scale guard</text>
     <text x="522" y="248" font-size="10.5" font-style="italic" fill="#595959">No circuit breaker by design — adaptive concurrency + exact Retry-After</text>
 
     <!-- 2 Clarizen -->
     <rect x="500" y="316" width="600" height="138" rx="8" fill="#EEF2F8" stroke="#2E5496" stroke-width="1.3"/>
     <circle cx="522" cy="338" r="11" fill="#1F3864"/><text x="522" y="343" font-size="13" font-weight="bold" fill="#FFFFFF" text-anchor="middle">2</text>
     <text x="540" y="343" font-size="13" font-weight="bold" fill="#1F3864">ClarizenConnector</text>
-    <text x="1084" y="343" font-size="11" fill="#595959" text-anchor="end">654 tests</text>
+    <text x="1084" y="343" font-size="11" fill="#595959" text-anchor="end">877 tests</text>
     <text x="522" y="368" font-size="11" fill="#333333">REST v2 + CZQL · TDW bulk export for full crawls · daily API-budget governor</text>
     <text x="522" y="386" font-size="11" fill="#333333">Financial-field governance: FINANCIAL_DATA_MODE = filter (default) | tag | acl</text>
     <text x="522" y="404" font-size="10.5" font-style="italic" fill="#595959">Dual circuit breakers · HMAC webhooks fail-closed + signed-timestamp anti-replay</text>
@@ -81,7 +81,7 @@
     <rect x="500" y="472" width="600" height="138" rx="8" fill="#EEF2F8" stroke="#2E5496" stroke-width="1.3"/>
     <circle cx="522" cy="494" r="11" fill="#1F3864"/><text x="522" y="499" font-size="13" font-weight="bold" fill="#FFFFFF" text-anchor="middle">3</text>
     <text x="540" y="499" font-size="13" font-weight="bold" fill="#1F3864">SeismicConnector</text>
-    <text x="1084" y="499" font-size="11" fill="#595959" text-anchor="end">541 tests</text>
+    <text x="1084" y="499" font-size="11" fill="#595959" text-anchor="end">1,017 tests</text>
     <text x="522" y="524" font-size="11" fill="#333333">Version-aware ingest — supersede on new version · withdraw on unpublish / expiry</text>
     <text x="522" y="542" font-size="11" fill="#333333">No-MNE exclusion filter (fail-closed) · permission re-ACL by fingerprint · webhook anti-replay</text>
     <text x="522" y="560" font-size="10.5" font-style="italic" fill="#595959">Never widens access when an identity is unresolved or classification-locked</text>
@@ -90,7 +90,7 @@
     <rect x="500" y="628" width="600" height="138" rx="8" fill="#EEF2F8" stroke="#2E5496" stroke-width="1.3"/>
     <circle cx="522" cy="650" r="11" fill="#1F3864"/><text x="522" y="655" font-size="13" font-weight="bold" fill="#FFFFFF" text-anchor="middle">4</text>
     <text x="540" y="655" font-size="13" font-weight="bold" fill="#1F3864">AltrataConnector</text>
-    <text x="1084" y="655" font-size="11" fill="#595959" text-anchor="end">517 tests</text>
+    <text x="1084" y="655" font-size="11" fill="#595959" text-anchor="end">743 tests</text>
     <text x="522" y="680" font-size="11" fill="#333333">Licensed feed: SFTP drop + manifest SHA-256 + count reconciliation · purpose-of-use authz</text>
     <text x="522" y="698" font-size="11" fill="#333333">Seat-only entitlement (never 'everyone') · DSAR forget-subject + hash-chained ledger</text>
     <text x="522" y="716" font-size="10.5" font-weight="bold" fill="#C77700">Personal data — DSAR/GDPR in scope · PII-safe logs · dead-letter redacted by default</text>
@@ -99,7 +99,7 @@
     <rect x="500" y="784" width="600" height="138" rx="8" fill="#EEF2F8" stroke="#2E5496" stroke-width="1.3"/>
     <circle cx="522" cy="806" r="11" fill="#1F3864"/><text x="522" y="811" font-size="13" font-weight="bold" fill="#FFFFFF" text-anchor="middle">5</text>
     <text x="540" y="811" font-size="13" font-weight="bold" fill="#1F3864">HadoopConnector (BDH)</text>
-    <text x="1084" y="811" font-size="11" fill="#595959" text-anchor="end">702 tests</text>
+    <text x="1084" y="811" font-size="11" fill="#595959" text-anchor="end">981 tests</text>
     <text x="522" y="836" font-size="11" fill="#333333">Filter-first: Hive partition pruning (dt=/region=) + 14 record predicates + row cap</text>
     <text x="522" y="854" font-size="11" fill="#333333">Fail-closed full-scan guard · 24 h dt-watermark incrementals</text>
     <text x="522" y="872" font-size="10.5" font-weight="bold" fill="#C77700">Separate Graph connection (item id = Salesforce record Id)</text>
@@ -260,6 +260,6 @@
   <text x="1646" y="1074" font-size="10.5" fill="#333333">identity, secrets, state</text>
   <line x1="1576" y1="1096" x2="1636" y2="1096" stroke="#C77700" stroke-width="1.6" stroke-dasharray="7 5" marker-end="url(#arrA)"/>
   <text x="1646" y="1100" font-size="10.5" fill="#333333">Upstream sync (out of scope)</text>
-  <text x="1576" y="1128" font-size="10.5" fill="#595959">3,389 automated tests — all green</text>
+  <text x="1576" y="1128" font-size="10.5" fill="#595959">4,824 automated tests — all green · adversarially verified</text>
   <text x="1576" y="1146" font-size="10.5" fill="#595959">github.com/JosephSaad/Connectors</text>
 </svg>
