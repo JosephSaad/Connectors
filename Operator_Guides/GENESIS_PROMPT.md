@@ -136,6 +136,59 @@ The five connectors and their signature features:
   delegation-token query strings; Altrata additions must stay PII-safe.
   Logging only — no behavioural change.
 
+### 2b. Adversarial assurance — fix, then have someone else try to break it (rounds 7–10)
+
+The reviews and stress rounds above make the code *pass its own tests*; they do
+not prove a control *holds*. They don't: two adversarial passes found real
+defects in **10 of 10** connector-controls examined while every suite was green
+and builds were at 0 warnings. So run further **adversarial assurance rounds**
+until each control survives a hostile attempt to break it. Per round:
+
+- **Split fixer from verifier.** One agent FIXES; a separate, INDEPENDENT agent
+  VERIFIES, shown only the *claim* — never the fixer's reasoning. Verification
+  written by a fix's author cannot see its blind spots (a real example: the
+  only test asserting cross-backend agreement compared production against a
+  20-line model the fixer wrote himself, and a rollback guard asserted on
+  compiled source layout the defect trivially reformatted around).
+- **Claim audit first.** The verifier rules every claim TRUE / FALSE /
+  OVERSTATED / UNVERIFIABLE with an executed proof *before* probing — a false
+  claim about code (an untested fix; a doc guarantee a single flipped byte
+  disproves) is invisible to a code probe. This caught 8–10 false/overstated
+  claims per late round.
+- **Attack with NEW probe code**, never the existing suite. Techniques that
+  repeatedly worked here: the **dual-loop trap** (items are assembled twice —
+  Graph properties AND the searchable content body — so a gate in one loop
+  leaks through the other; probe both); **sentinel probes** (put a unique token
+  in a restricted field, assert it appears nowhere in the fully serialized
+  item); **mutation testing** (reinstate the exact defect, confirm a test goes
+  red; then reformat/relocate it to defeat any source-text or IL assertion);
+  **exhaustive, not sampled, sweeps** (a five-value byte alphabet hid a
+  backslash-JSON-escape data-loss bug for a whole round — sweep all 256 × every
+  offset or state precisely what you skipped); **config-reality checks** (does
+  the SHIPPED config actually exercise the fixed path?).
+- **Fix the CLASS, not the instance.** Rounds that patched reported instances
+  one at a time did not converge (Seismic yielded a 3rd tear shape, then a 4th,
+  then a 5th; a null fix was applied to one of six vulnerable properties). The
+  controls that closed did so structurally: Salesforce **removed** name-derived
+  compound-field inference outright (it dropped `Account.Name` for every account
+  on Person-Accounts orgs *and* leaked) and now selects address components
+  individually so each carries real `FieldPermissions`; Seismic replaced
+  shape-by-shape ledger-tear rescues with **resynchronisation + a byte-prefix
+  write discriminator** (an interrupted write can only stop early, never alter a
+  byte); Hadoop closed null-handling across **every** config file, not one. The
+  recurring lesson: **subtraction beats addition** — every connector that added
+  machinery kept a hole; the one that removed a feature closed cleanly first.
+- **Mind the failure posture where it matters.** DSAR erasure validates
+  operator input at the **entry point only** — reject a malformed (unpaired
+  surrogate) or over-long `--id` before any mutation, but *tolerate replayed
+  legacy state*; a prior round validated on every write, which wedged the
+  forget-subject scrub and left an erasure half-applied, and had to be reverted.
+- **Disclose, don't bury.** Carry a **known-open ledger** in every release; a
+  revert that re-opens a defect documents it as OPEN in the tree; correct any
+  doc that overstates a guarantee. Re-measure every quantitative claim after a
+  fix — the number changes when you fix things, and a copied number becomes
+  three false claims in three documents.
+
 ### 3. Enterprise pack (per connector, uniform names)
 
 `docs/THREAT_MODEL.md` (STRIDE per trust boundary, citing real mitigations,
@@ -227,6 +280,12 @@ Note/Important/Tip/**Information to request**, glossary layout).
   up to date; push at each explicit checkpoint.
 - Every defect fix ships with a regression test proven red→green. Every
   bounded scope (top-N, sampling) is logged, never silent.
+- **Never trust an agent's *claim* either, not just its build.** For hardening
+  work, separate the fixer from an independent verifier shown only the claim;
+  run a claim audit (TRUE/FALSE/OVERSTATED) before any code probe; mutation-test
+  every fix (a guard the defect can reformat around is not a test); sweep
+  exhaustively rather than sampling; and treat an overstated doc or a
+  copied-not-measured number as a defect.
 
 ---
 
@@ -239,3 +298,23 @@ Seismic MNPI fail-closed, webhook signed-timestamp anti-replay — plus opt-in
 classification ACL enforcement, item TTL, purpose-of-use authorization and a
 tamper-evident decision ledger), 12 operator documents, the architecture SVG,
 the FTE model and the bank-realistic programme plan.*
+
+*Refreshed 20-Jul-2026. Since genesis the session ran **adversarial assurance
+rounds 7–10** (fix → independent hostile verify → claim audit → mutation test →
+re-attack), taking the fleet from 3,389 to **4,824 green tests at 0 warnings**
+(Salesforce 1,206 · Clarizen 877 · Seismic 1,017 · Altrata 743 · Hadoop 930).
+Defects were closed as CLASSES: Salesforce field-level security with
+name-derived compound inference **removed** (components indexed individually);
+Clarizen schema-drift enforcement moved to the write path (an undeclared
+property aborts the crawl with zero PUTs) and unscannable binaries stamped
+`incomplete:`, never `clean`; Seismic decision-ledger tear shapes closed by
+resynchronisation with a byte-prefix discriminator, plus a Seq-range guard —
+the guarantee is "nothing is ever lost quietly", not "nothing is ever lost";
+Altrata DSAR subject-id validation added at the erase-subject entry point (after
+reverting a write-side attempt that wedged the scrub), with the surrogate/length
+and connector-id divergences documented OPEN; Hadoop null-handling closed across
+all four config files and the `validate-config --strict` verdict made invariant
+under the `CLASSIFICATION` flag, with a produced-but-undeclared Graph property
+now a preflight ERROR. Documentation refreshed to match: operator guides v1.2,
+release notes v2.0, quick-reference PDFs, architecture SVG v4. Each connector
+carries a disclosed known-open ledger rather than a silent gap.*

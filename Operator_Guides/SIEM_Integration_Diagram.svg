@@ -1,0 +1,167 @@
+<svg viewBox="0 0 1480 1200" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah" markerWidth="11" markerHeight="11" refX="8.5" refY="5" orient="auto"><path d="M0,0 L9,5 L0,10 z" fill="#2E5496"/></marker><marker id="ahm" markerWidth="11" markerHeight="11" refX="8.5" refY="5" orient="auto"><path d="M0,0 L9,5 L0,10 z" fill="#8A93A6"/></marker></defs>
+<rect x="0" y="0" width="1480" height="1200" rx="0" fill="#ffffff" stroke="none" stroke-width="1" opacity="1"/>
+<rect x="0" y="0" width="1480" height="60" rx="0" fill="#1F3864" stroke="none" stroke-width="1" opacity="1"/>
+<rect x="0" y="60" width="1480" height="2" fill="#2E5496"/>
+<text x="36" y="38" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="21" fill="#fff" text-anchor="start" font-weight="800">Connector → SIEM Integration</text>
+<text x="1444" y="26" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.5" fill="#AFC0DE" text-anchor="end" letter-spacing="0.5">Microsoft 365 Copilot Connectors</text>
+<text x="1444" y="44" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.5" fill="#AFC0DE" text-anchor="end">per docs/SIEM.md · all five connectors</text>
+<text x="36" y="88" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="12.5" fill="#595959" text-anchor="start">Three telemetry feeds ship into the SIEM; Prometheus metrics and OTLP traces are observability, NOT SIEM (stated in SIEM.md). Set the parameters in the table below to turn each feed on.</text>
+<text x="60" y="118" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#2E5496" text-anchor="start" font-weight="700" letter-spacing="0.8">CONNECTOR NODE</text>
+<text x="430" y="118" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#2E5496" text-anchor="start" font-weight="700" letter-spacing="0.8">TELEMETRY FEED  (set to enable)</text>
+<text x="880" y="118" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#2E5496" text-anchor="start" font-weight="700" letter-spacing="0.8">COLLECTION AGENT</text>
+<text x="1230" y="118" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#2E5496" text-anchor="start" font-weight="700" letter-spacing="0.8">SIEM</text>
+<rect x="40" y="140" width="300" height="360" rx="12" fill="#EEF2F8" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<text x="60" y="170" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="14.5" fill="#1F3864" text-anchor="start" font-weight="800">Connector service</text>
+<text x="60" y="190" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#595959" text-anchor="start">Windows Server (SCM) · .NET 10</text>
+<text x="60" y="210" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#595959" text-anchor="start" font-style="italic">one per connector</text>
+<rect x="1180" y="150" width="264" height="390" rx="12" fill="#1F3864" stroke="#1F3864" stroke-width="1" opacity="1"/>
+<text x="1198" y="180" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="14.5" fill="#fff" text-anchor="start" font-weight="800">Microsoft Sentinel</text>
+<text x="1198" y="198" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="12" fill="#AFC0DE" text-anchor="start">/ Splunk / any SIEM</text>
+<line x1="1196" y1="212" x2="1428" y2="212" stroke="#3A548A" stroke-width="1"/>
+<text x="1198" y="236" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.8" fill="#DCE6F7" text-anchor="start">• Correlate 3 feeds by host + run-dir</text>
+<text x="1198" y="262" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.8" fill="#DCE6F7" text-anchor="start">• Id==3000 → incident → RUNBOOKS.md</text>
+<text x="1198" y="288" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.8" fill="#DCE6F7" text-anchor="start">• exit code 1 → pre-restart alert</text>
+<text x="1198" y="314" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.8" fill="#DCE6F7" text-anchor="start">• No events &gt; crawl interval → stalled</text>
+<text x="1198" y="340" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.8" fill="#DCE6F7" text-anchor="start">• dead_letter over threshold → page</text>
+<text x="1198" y="494" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10" fill="#9FB2D6" text-anchor="start" font-style="italic">Detections key on id + source,</text>
+<text x="1198" y="508" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10" fill="#9FB2D6" text-anchor="start" font-style="italic">never message text.</text>
+<rect x="380" y="150" width="410" height="104" rx="10" fill="#F7F9FC" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<rect x="380" y="150" width="5" height="104" rx="2.5" fill="#1F3864"/>
+<text x="398" y="176" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="13.5" fill="#1F3864" text-anchor="start" font-weight="800">Windows Event Log</text>
+<text x="398" y="194" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">Application log · Source = &lt;Connector&gt;</text>
+<text x="398" y="214" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#202020" text-anchor="start">• WARNING+ &amp; lifecycle only</text>
+<text x="398" y="229" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#202020" text-anchor="start">• Event ids 1000 / 2000 / 3000 (stable)</text>
+<rect x="558" y="230" width="224" height="20" rx="6" fill="#1F3864" stroke="none" stroke-width="0" opacity="1"/>
+<text x="670.0" y="243.6" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10" fill="#fff" text-anchor="middle" font-weight="700" letter-spacing="0.4">EVENTLOG_ENABLED=true</text>
+<rect x="840" y="150" width="300" height="104" rx="10" fill="#fff" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<text x="856" y="184" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="13" fill="#1F3864" text-anchor="start" font-weight="700">Agent-based pickup</text>
+<text x="856" y="206" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Sentinel AMA · Splunk UF · SCOM</text>
+<line x1="340" y1="202" x2="380" y2="202" stroke="#2E5496" stroke-width="2.4" marker-end="url(#ah)"/>
+<line x1="790" y1="202" x2="840" y2="202" stroke="#2E5496" stroke-width="2.4" marker-end="url(#ah)"/>
+<line x1="1140" y1="202" x2="1180" y2="202" stroke="#2E5496" stroke-width="2.4" marker-end="url(#ah)"/>
+<rect x="380" y="280" width="410" height="104" rx="10" fill="#F7F9FC" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<rect x="380" y="280" width="5" height="104" rx="2.5" fill="#2E5496"/>
+<text x="398" y="306" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="13.5" fill="#1F3864" text-anchor="start" font-weight="800">JSON log files</text>
+<text x="398" y="324" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">logs/{prefix}_{ts}/*.log</text>
+<text x="398" y="344" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#202020" text-anchor="start">• One JSON object per line (INFO+)</text>
+<text x="398" y="359" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#202020" text-anchor="start">• Fields: level, logger, timestamp, message</text>
+<rect x="558" y="360" width="224" height="20" rx="6" fill="#2E5496" stroke="none" stroke-width="0" opacity="1"/>
+<text x="670.0" y="373.6" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10" fill="#fff" text-anchor="middle" font-weight="700" letter-spacing="0.4">LOG_FORMAT=json</text>
+<rect x="840" y="280" width="300" height="104" rx="10" fill="#fff" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<text x="856" y="314" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="13" fill="#1F3864" text-anchor="start" font-weight="700">File-tail collector</text>
+<text x="856" y="336" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">AMA custom-text-log · Splunk UF · Fluent Bit</text>
+<line x1="340" y1="332" x2="380" y2="332" stroke="#2E5496" stroke-width="2.4" marker-end="url(#ah)"/>
+<line x1="790" y1="332" x2="840" y2="332" stroke="#2E5496" stroke-width="2.4" marker-end="url(#ah)"/>
+<line x1="1140" y1="332" x2="1180" y2="332" stroke="#2E5496" stroke-width="2.4" marker-end="url(#ah)"/>
+<rect x="380" y="410" width="410" height="104" rx="10" fill="#F7F9FC" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<rect x="380" y="410" width="5" height="104" rx="2.5" fill="#C77700"/>
+<text x="398" y="436" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="13.5" fill="#1F3864" text-anchor="start" font-weight="800">Webhook alerts</text>
+<text x="398" y="454" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">HTTP POST, pre-digested envelopes</text>
+<text x="398" y="474" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#202020" text-anchor="start">• kinds: crawl_failed · dead_letter</text>
+<text x="398" y="489" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#202020" text-anchor="start">• · deletion_sweep_skipped</text>
+<rect x="558" y="490" width="224" height="20" rx="6" fill="#C77700" stroke="none" stroke-width="0" opacity="1"/>
+<text x="670.0" y="503.6" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10" fill="#fff" text-anchor="middle" font-weight="700" letter-spacing="0.4">ALERT_WEBHOOK_URL=https://…</text>
+<rect x="840" y="410" width="300" height="104" rx="10" fill="#fff" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<text x="856" y="444" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="13" fill="#1F3864" text-anchor="start" font-weight="700">HTTP intake</text>
+<text x="856" y="466" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Sentinel Logic App · Splunk HEC · SOAR</text>
+<line x1="340" y1="462" x2="380" y2="462" stroke="#2E5496" stroke-width="2.4" marker-end="url(#ah)"/>
+<line x1="790" y1="462" x2="840" y2="462" stroke="#2E5496" stroke-width="2.4" marker-end="url(#ah)"/>
+<line x1="1140" y1="462" x2="1180" y2="462" stroke="#2E5496" stroke-width="2.4" marker-end="url(#ah)"/>
+<rect x="58" y="180" width="264" height="54" rx="8" fill="#fff" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<text x="70" y="202" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11.5" fill="#1F3864" text-anchor="start" font-weight="700">Event source</text>
+<text x="70" y="220" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="9.6" fill="#595959" text-anchor="start">reg by MSI / install-service.ps1</text>
+<rect x="58" y="310" width="264" height="54" rx="8" fill="#fff" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<text x="70" y="332" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11.5" fill="#1F3864" text-anchor="start" font-weight="700">JSON writer</text>
+<text x="70" y="350" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="9.6" fill="#595959" text-anchor="start">LOG_FORMAT</text>
+<rect x="58" y="440" width="264" height="54" rx="8" fill="#fff" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<text x="70" y="462" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11.5" fill="#1F3864" text-anchor="start" font-weight="700">Alerter</text>
+<text x="70" y="480" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="9.6" fill="#595959" text-anchor="start">on failure / threshold</text>
+<rect x="40" y="560" width="1400" height="110" rx="12" fill="#F1F3F7" stroke="#8A93A6" stroke-width="1" stroke-dasharray="6 5" opacity="1"/>
+<text x="60" y="586" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11.5" fill="#8A93A6" text-anchor="start" font-weight="800" letter-spacing="0.6">OBSERVABILITY — NOT shipped to the SIEM</text>
+<text x="60" y="606" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#8A93A6" text-anchor="start">SIEM.md: “Prometheus metrics are for dashboards / alerting (ops/), not SIEM — don’t ship scrapes into the SIEM.”</text>
+<rect x="70" y="618" width="300" height="40" rx="8" fill="#fff" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<text x="84" y="636" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11.5" fill="#595959" text-anchor="start" font-weight="700">Prometheus /metrics</text>
+<text x="84" y="652" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="9.6" fill="#8A93A6" text-anchor="start">HEALTH_PORT=8080</text>
+<line x1="370" y1="638" x2="430" y2="638" stroke="#8A93A6" stroke-width="2" marker-end="url(#ah)" stroke-dasharray="4 4"/>
+<rect x="432" y="618" width="150" height="40" rx="8" fill="#fff" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<text x="442" y="642" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#595959" text-anchor="start" font-weight="700">Grafana</text>
+<rect x="640" y="618" width="300" height="40" rx="8" fill="#fff" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<text x="654" y="636" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11.5" fill="#595959" text-anchor="start" font-weight="700">OpenTelemetry traces</text>
+<text x="654" y="652" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="9.6" fill="#8A93A6" text-anchor="start">OTEL_EXPORTER_OTLP_ENDPOINT</text>
+<line x1="940" y1="638" x2="1000" y2="638" stroke="#8A93A6" stroke-width="2" marker-end="url(#ah)" stroke-dasharray="4 4"/>
+<rect x="1002" y="618" width="150" height="40" rx="8" fill="#fff" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<text x="1012" y="642" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#595959" text-anchor="start" font-weight="700">OTLP collector</text>
+<text x="1170" y="642" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.5" fill="#8A93A6" text-anchor="start" font-style="italic">traces: 4 of 5 (not Salesforce)</text>
+<text x="40" y="710" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="16" fill="#1F3864" text-anchor="start" font-weight="800">Setup parameters</text>
+<text x="40" y="730" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#595959" text-anchor="start">Defaults are the shipped values; “Set for SIEM” is what turns the feed on. Every connector reads these (OTEL_* on all but Salesforce; EVENTLOG_LEVEL on all but Altrata).</text>
+<rect x="40" y="752" width="1400" height="30" rx="6" fill="#1F3864" stroke="none" stroke-width="1" opacity="1"/>
+<text x="50" y="772" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.5" fill="#fff" text-anchor="start" font-weight="700" letter-spacing="0.5">PARAMETER</text>
+<text x="350" y="772" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.5" fill="#fff" text-anchor="start" font-weight="700" letter-spacing="0.5">DEFAULT</text>
+<text x="540" y="772" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.5" fill="#fff" text-anchor="start" font-weight="700" letter-spacing="0.5">SET FOR SIEM</text>
+<text x="760" y="772" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.5" fill="#fff" text-anchor="start" font-weight="700" letter-spacing="0.5">FEED / NOTE</text>
+<text x="1180" y="772" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.5" fill="#fff" text-anchor="start" font-weight="700" letter-spacing="0.5">SET BY</text>
+<text x="50" y="803" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="11" fill="#1F3864" text-anchor="start" font-weight="700">EVENTLOG_ENABLED</text>
+<text x="350" y="803" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">false</text>
+<text x="540" y="803" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#2F7A5B" text-anchor="start" font-weight="700">true</text>
+<text x="760" y="803" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.6" fill="#202020" text-anchor="start">Windows Event Log — Application, source=&lt;Connector&gt;</text>
+<text x="1180" y="803" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Server / AD team</text>
+<rect x="40" y="814" width="1400" height="32" rx="0" fill="#F7F9FC" stroke="none" stroke-width="1" opacity="1"/>
+<text x="50" y="835" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="11" fill="#1F3864" text-anchor="start" font-weight="700">EVENTLOG_LEVEL</text>
+<text x="350" y="835" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">warning+</text>
+<text x="540" y="835" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#2F7A5B" text-anchor="start" font-weight="700">warning+ (info = verbose)</text>
+<text x="760" y="835" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.6" fill="#202020" text-anchor="start">Event ids 1000/2000/3000 · not on Altrata</text>
+<text x="1180" y="835" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Server / AD team</text>
+<text x="50" y="867" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="11" fill="#1F3864" text-anchor="start" font-weight="700">LOG_FORMAT</text>
+<text x="350" y="867" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">text</text>
+<text x="540" y="867" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#2F7A5B" text-anchor="start" font-weight="700">json</text>
+<text x="760" y="867" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.6" fill="#202020" text-anchor="start">JSON log files — one object per line</text>
+<text x="1180" y="867" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Connector operator</text>
+<rect x="40" y="878" width="1400" height="32" rx="0" fill="#F7F9FC" stroke="none" stroke-width="1" opacity="1"/>
+<text x="50" y="899" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="11" fill="#1F3864" text-anchor="start" font-weight="700">LOG_RETENTION_DAYS</text>
+<text x="350" y="899" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">0 = keep forever</text>
+<text x="540" y="899" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#2F7A5B" text-anchor="start" font-weight="700">30–90 per policy</text>
+<text x="760" y="899" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.6" fill="#202020" text-anchor="start">Prunes run dirs + SQL history</text>
+<text x="1180" y="899" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Data governance / DPO</text>
+<text x="50" y="931" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="11" fill="#1F3864" text-anchor="start" font-weight="700">ALERT_WEBHOOK_URL</text>
+<text x="350" y="931" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">unset</text>
+<text x="540" y="931" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#2F7A5B" text-anchor="start" font-weight="700">https intake URL</text>
+<text x="760" y="931" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.6" fill="#202020" text-anchor="start">Webhook alerts — JSON envelopes</text>
+<text x="1180" y="931" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Network / firewall</text>
+<rect x="40" y="942" width="1400" height="32" rx="0" fill="#F7F9FC" stroke="none" stroke-width="1" opacity="1"/>
+<text x="50" y="963" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="11" fill="#1F3864" text-anchor="start" font-weight="700">ALERT_DEADLETTER_THRESHOLD</text>
+<text x="350" y="963" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">0 = off</text>
+<text x="540" y="963" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#2F7A5B" text-anchor="start" font-weight="700">e.g. 100</text>
+<text x="760" y="963" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.6" fill="#202020" text-anchor="start">Fires the dead_letter alert kind</text>
+<text x="1180" y="963" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Connector operator</text>
+<text x="50" y="995" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="11" fill="#8A93A6" text-anchor="start" font-weight="700">HEALTH_PORT</text>
+<text x="350" y="995" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">0 = disabled</text>
+<text x="540" y="995" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#8A93A6" text-anchor="start" font-weight="700">8080</text>
+<text x="760" y="995" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.6" fill="#8A93A6" text-anchor="start">/metrics (dashboards) — NOT SIEM</text>
+<text x="1180" y="995" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Connector operator</text>
+<rect x="40" y="1006" width="1400" height="32" rx="0" fill="#F7F9FC" stroke="none" stroke-width="1" opacity="1"/>
+<text x="50" y="1027" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="11" fill="#8A93A6" text-anchor="start" font-weight="700">OTEL_EXPORTER_OTLP_ENDPOINT</text>
+<text x="350" y="1027" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">off</text>
+<text x="540" y="1027" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#8A93A6" text-anchor="start" font-weight="700">collector URL</text>
+<text x="760" y="1027" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.6" fill="#8A93A6" text-anchor="start">Traces → OTLP (not SIEM); 4/5 conn.</text>
+<text x="1180" y="1027" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Network / firewall</text>
+<text x="50" y="1059" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="11" fill="#1F3864" text-anchor="start" font-weight="700">OTEL_EXPORTER_OTLP_PROTOCOL</text>
+<text x="350" y="1059" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">grpc</text>
+<text x="540" y="1059" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#2F7A5B" text-anchor="start" font-weight="700">grpc | http/protobuf</text>
+<text x="760" y="1059" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.6" fill="#202020" text-anchor="start">Trace export protocol</text>
+<text x="1180" y="1059" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Network / firewall</text>
+<rect x="40" y="1070" width="1400" height="32" rx="0" fill="#F7F9FC" stroke="none" stroke-width="1" opacity="1"/>
+<text x="50" y="1091" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="11" fill="#1F3864" text-anchor="start" font-weight="700">OTEL_EXPORTER_OTLP_HEADERS</text>
+<text x="350" y="1091" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">unset</text>
+<text x="540" y="1091" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#2F7A5B" text-anchor="start" font-weight="700">authorization: …</text>
+<text x="760" y="1091" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.6" fill="#202020" text-anchor="start">Trace export auth headers</text>
+<text x="1180" y="1091" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Network / firewall</text>
+<text x="50" y="1123" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="11" fill="#1F3864" text-anchor="start" font-weight="700">OTEL_SERVICE_NAME</text>
+<text x="350" y="1123" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#595959" text-anchor="start">= CONNECTOR_NAME</text>
+<text x="540" y="1123" font-family='"SFMono-Regular","SF Mono",Menlo,Consolas,monospace' font-size="10.6" fill="#2F7A5B" text-anchor="start" font-weight="700">per-node name</text>
+<text x="760" y="1123" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.6" fill="#202020" text-anchor="start">service.name on spans</text>
+<text x="1180" y="1123" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.4" fill="#595959" text-anchor="start">Connector operator</text>
+<rect x="40" y="752" width="1400" height="382" rx="6" fill="none" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
+<text x="40" y="1160" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10" fill="#595959" text-anchor="start">Source: each connector’s docs/SIEM.md + docs/OBSERVABILITY.md and env/.env.local.example. Event-log source is registered by the MSI / install-windows-service.ps1 (the service needs no admin).</text>
+<text x="40" y="1176" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10" fill="#595959" text-anchor="start">Feeds are independent — use any combination. Webhook alerts are pre-digested (alert-worthy only); JSON files carry everything; Event Log carries WARNING+ for agent fleets.</text>
+</svg>
