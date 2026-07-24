@@ -1,0 +1,15 @@
+# Repository-root ignores. Each connector additionally carries its own
+# .gitignore for its build output.
+
+# Package output from `dotnet pack ... -o artifacts` (see .github/workflows/chassis.yml)
+artifacts/
+
+# Build output
+bin/
+obj/
+
+# Editor / OS
+.vs/
+.idea/
+*.user
+.DS_Store
