@@ -51,6 +51,9 @@ jobs:
   build-test:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The suite takes ~10 min on Linux but 50+ min on the Windows runner. Bound
+    # it so a stuck run cannot occupy a runner for the 6-hour default.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -82,6 +85,7 @@ jobs:
   docker:
     name: Docker image
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v7
