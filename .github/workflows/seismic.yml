@@ -17,8 +17,10 @@ on:
       - "SeismicConnector/**"
       - "Connector.Chassis/**"
       - ".github/workflows/seismic.yml"
+  # Deliberately NOT filtered by base branch: the connectors are migrated onto
+  # the chassis as a stack of dependent PRs, and a base-branch filter would skip
+  # checks on every PR that targets another PR's branch rather than main.
   pull_request:
-    branches: [main]
     paths:
       - "SeismicConnector/**"
       - "Connector.Chassis/**"
