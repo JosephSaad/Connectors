@@ -1,0 +1,101 @@
+name: Chassis
+
+# Build, verify and pack the shared Connector.Chassis package.
+#
+# Path-filtered: this only runs when the chassis (or this workflow) changes, so
+# doc-only and connector-only commits don't pay for it.
+#
+# NOTE: GitHub Actions only executes workflows found in `.github/workflows` at
+# the *repository root*. The per-connector `<Connector>/.github/workflows/*.yml`
+# files are inert in this monorepo — they are left over from when each connector
+# was its own repository. This is the first workflow in this repo that actually
+# runs.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Connector.Chassis/**"
+      - ".github/workflows/chassis.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "Connector.Chassis/**"
+      - ".github/workflows/chassis.yml"
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+concurrency:
+  group: chassis-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+  CHASSIS_PROJECT: "Connector.Chassis/Connector.Chassis.csproj"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build on both targets. windows-latest is not a nicety: Windows Server is the
+  # primary deployment target (Windows service mode), and the chassis carries the
+  # Windows-specific surface (EventLog, Hosting.WindowsServices), so it must
+  # compile there and not only on the Linux CI/dev machines.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore ${{ env.CHASSIS_PROJECT }}
+
+      - name: Build
+        run: dotnet build ${{ env.CHASSIS_PROJECT }} -c Release --no-restore
+
+  # ---------------------------------------------------------------------------
+  # Pack once (the package is platform-neutral) and publish the .nupkg as a build
+  # artifact. Connectors consume the chassis by PackageReference, so this artifact
+  # is what makes a consolidated connector buildable off a clean clone — today by
+  # download, and as the connectors move onto the chassis, as the CI feed.
+  # ---------------------------------------------------------------------------
+  pack:
+    name: Pack
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Pack
+        run: dotnet pack ${{ env.CHASSIS_PROJECT }} -c Release -o artifacts
+
+      - name: Report package version
+        run: ls -l artifacts
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: connector-chassis-nupkg
+          path: artifacts/*.nupkg
+          if-no-files-found: error
