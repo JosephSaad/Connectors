@@ -520,8 +520,8 @@ public sealed class PdfTextExtractor : IContentExtractor
 /// <summary>Routes to the first extractor that understands the format.</summary>
 public sealed class CompositeExtractor : IContentExtractor
 {
-    private static readonly Infrastructure.IAppLogger Logger =
-        Infrastructure.Logging.GetLogger("seismic_connector.extract");
+    private static readonly IAppLogger Logger =
+        Logging.GetLogger("seismic_connector.extract");
 
     private readonly IReadOnlyList<IContentExtractor> _extractors;
 
@@ -563,7 +563,7 @@ public sealed class CompositeExtractor : IContentExtractor
                 var text = extractor.Extract(payload);
                 if (!string.IsNullOrWhiteSpace(text))
                 {
-                    Infrastructure.Metrics.RecordExtraction(format, success: true);
+                    Metrics.RecordExtraction(format, success: true);
                     return text;
                 }
             }
@@ -572,14 +572,14 @@ public sealed class CompositeExtractor : IContentExtractor
                 // extraction must never fail an item — fall through. Debug-gated
                 // breadcrumb so "why is this doc metadata-only?" is answerable
                 // (the per-format failure metric records the miss either way).
-                if (Logger.IsEnabledFor(Infrastructure.LogLevels.Debug))
+                if (Logger.IsEnabledFor(LogLevels.Debug))
                     Logger.Debug(
                         $"Extractor {extractor.GetType().Name} threw on a '{format}' payload "
                         + $"({ex.GetType().Name}: {ex.Message}) — falling through to metadata-only.");
             }
         }
         if (attempted)
-            Infrastructure.Metrics.RecordExtraction(format, success: false);
+            Metrics.RecordExtraction(format, success: false);
         return string.Empty;
     }
 }

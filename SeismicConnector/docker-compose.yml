@@ -72,7 +72,11 @@ services:
 
   # ---- Connector (primary node) --------------------------------------------
   connector:
-    build: .
+    build:
+      # Build context is the repository root: the connector references the
+      # shared Connector.Chassis project, which lives beside this directory.
+      context: ..
+      dockerfile: SeismicConnector/Dockerfile
     depends_on:
       mssql:
         condition: service_healthy
@@ -106,7 +110,9 @@ services:
   # heartbeats; the crawl closes even if some claims failed — see docs/HA.md).
   #
   # connector2:
-  #   build: .
+  #   build:
+  #     context: ..
+  #     dockerfile: SeismicConnector/Dockerfile
   #   depends_on:
   #     mssql:
   #       condition: service_healthy

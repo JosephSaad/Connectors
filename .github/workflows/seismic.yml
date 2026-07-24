@@ -1,0 +1,96 @@
+name: Seismic
+
+# Build and test the Seismic connector, which consumes the shared
+# Connector.Chassis project.
+#
+# Path-filtered on the connector AND the chassis: a chassis change can break a
+# consumer, so it must re-run this suite.
+#
+# NOTE: workflows only execute from `.github/workflows` at the repository root.
+# SeismicConnector/.github/workflows/*.yml is inert and is left in place
+# untouched by this change.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "SeismicConnector/**"
+      - "Connector.Chassis/**"
+      - ".github/workflows/seismic.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "SeismicConnector/**"
+      - "Connector.Chassis/**"
+      - ".github/workflows/seismic.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: seismic-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+  TEST_PROJECT: "SeismicConnector/tests/SeismicConnector.Tests/SeismicConnector.Tests.csproj"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build + unit/integration tests (no external services). SQL/HA and other
+  # network-gated tests self-skip because their *_TEST_* env vars are unset, so
+  # this job stays hermetic. windows-latest is not a nicety: Windows Server is
+  # the primary deployment target (Windows service mode).
+  # ---------------------------------------------------------------------------
+  build-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore ${{ env.TEST_PROJECT }}
+
+      - name: Build
+        run: dotnet build ${{ env.TEST_PROJECT }} -c Release --no-restore
+
+      - name: Test
+        run: dotnet test ${{ env.TEST_PROJECT }} -c Release --no-build
+
+  # ---------------------------------------------------------------------------
+  # Build the container image. This exists because the connector now references
+  # the chassis project, so the image can only build with the REPOSITORY ROOT as
+  # its context (a Docker build cannot reach outside its context). Building here
+  # keeps that wiring honest — the image is built, not pushed.
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image (context = repository root)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: SeismicConnector/Dockerfile
+          push: false
+          tags: seismic-connector:ci

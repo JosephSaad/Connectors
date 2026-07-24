@@ -8,7 +8,12 @@
 # config/, env/, logs/ and data/ against the working directory (/app), exactly
 # like the console/Windows-service hosts do.
 #
-# Build:   docker build -t seismic-connector:latest .
+# IMPORTANT: the build context is the REPOSITORY ROOT, not this directory. The
+# connector references the shared Connector.Chassis project, which lives beside
+# it, and a Docker build cannot reach outside its context.
+#
+# Build:   docker build -f SeismicConnector/Dockerfile -t seismic-connector:latest .
+#              (run from the repository root)
 # Run:     docker run --rm -e SEISMIC_CONNECTOR_HOME=/app \
 #              -v "$PWD/config:/app/config" -v "$PWD/env:/app/env" \
 #              -v "$PWD/logs:/app/logs"     -v "$PWD/data:/app/data" \
@@ -19,19 +24,22 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /source
 
-# Restore first (better layer caching): copy the solution + project files, then
-# restore, then copy the rest of the tree.
-COPY SeismicConnector.sln ./
-COPY src/SeismicConnector/SeismicConnector.csproj src/SeismicConnector/
-COPY tests/SeismicConnector.Tests/SeismicConnector.Tests.csproj tests/SeismicConnector.Tests/
-RUN dotnet restore src/SeismicConnector/SeismicConnector.csproj
+# Restore first (better layer caching): copy the solution + project files —
+# including the chassis project the connector references — then restore, then
+# copy the rest of the tree.
+COPY SeismicConnector/SeismicConnector.sln SeismicConnector/
+COPY SeismicConnector/src/SeismicConnector/SeismicConnector.csproj SeismicConnector/src/SeismicConnector/
+COPY SeismicConnector/tests/SeismicConnector.Tests/SeismicConnector.Tests.csproj SeismicConnector/tests/SeismicConnector.Tests/
+COPY Connector.Chassis/Connector.Chassis.csproj Connector.Chassis/
+RUN dotnet restore SeismicConnector/src/SeismicConnector/SeismicConnector.csproj
 
 # Copy the remaining sources and publish the connector only (Release,
 # framework-dependent, portable — the runtime stage already ships the .NET
 # runtime; the portable publish carries native assets (e.g. SQLite) under
 # runtimes/).
-COPY . .
-RUN dotnet publish src/SeismicConnector/SeismicConnector.csproj \
+COPY Connector.Chassis/ Connector.Chassis/
+COPY SeismicConnector/ SeismicConnector/
+RUN dotnet publish SeismicConnector/src/SeismicConnector/SeismicConnector.csproj \
         -c Release \
         --no-restore \
         -o /app/publish

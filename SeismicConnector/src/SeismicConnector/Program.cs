@@ -33,6 +33,23 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        // Install this connector's identity into the shared chassis before any
+        // logging / event-log / ledger use, and give the chassis the connector's
+        // correlation-id source. The three strings reproduce exactly what the
+        // pre-extraction code hardcoded, so log/metric/event output is unchanged.
+        Chassis.Init(new ChassisIdentity("seismic_connector", "SeismicConnector", "seismic_connector"));
+        Chassis.CorrelationIdProvider = () => Tracing.CurrentCorrelationId;
+
+        // The chassis HA coordinator records claim metrics through host hooks so
+        // the chassis references no connector type; wire them to this connector's
+        // metrics facade (byte-identical to the pre-facade in-registry behaviour).
+        HaCoordinator.ClaimAcquiredHook = () =>
+        {
+            Metrics.IncHaClaimsAcquired();
+            Metrics.AddHaClaimsHeld(1);
+        };
+        HaCoordinator.ClaimReleasedHook = () => Metrics.AddHaClaimsHeld(-1);
+
         if (WindowsServiceHelpers.IsWindowsService())
             return await ServiceHost.RunAsync(args, ExecuteAsync);
 

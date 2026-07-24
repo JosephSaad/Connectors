@@ -257,6 +257,13 @@ state — `docs/HA.md`). Enable `GRAPH_RETRY_JITTER=true` on every HA node
 (`docs/RETRY.md`). `docker-compose.yml` spins up the full SQL-backed topology
 locally.
 
+> **Container builds use the repository root as their context.** The connector
+> references the shared `Connector.Chassis` project alongside it, and a Docker
+> build cannot reach outside its context. Build with
+> `docker build -f SeismicConnector/Dockerfile -t seismic-connector:latest .`
+> from the repository root. `docker compose` is unaffected — it sets the
+> context itself, so `docker compose up --build` still works from here.
+
 ## Throughput & sharding
 
 `GRAPH_BATCH_WORKERS` (alias `GRAPH_CONCURRENT_BATCHES`, which wins) caps the

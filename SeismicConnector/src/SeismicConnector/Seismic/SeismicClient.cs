@@ -78,7 +78,7 @@ public class SeismicClient
             : new HttpClient(handler);
         _http.Timeout = TimeSpan.FromSeconds(120);
         _breaker = breaker ?? CircuitBreakerRegistry.Register(
-            new CircuitBreaker(CircuitBreakerRegistry.SeismicName, CircuitBreakerOptions.FromEnv(), critical: true));
+            new CircuitBreaker(SeismicBreakerNames.Source, CircuitBreakerOptions.FromEnv(), critical: true));
     }
 
     /// <summary>
