@@ -98,6 +98,11 @@ public sealed class SqliteIdentityStore : IIdentityStore
     private readonly SqliteConnection _connection;
 
     /// <summary>
+    /// How long a contended write waits for the lock before giving up, in ms.
+    /// </summary>
+    private const int BusyTimeoutMs = 10_000;
+
+    /// <summary>
     /// Serializes ALL access to the single shared SqliteConnection.
     /// Microsoft.Data.Sqlite connections are not thread-safe, and the ingest
     /// pipeline dispatches several concurrent $batch workers that upsert/read
@@ -111,6 +116,18 @@ public sealed class SqliteIdentityStore : IIdentityStore
     {
         _connection = new SqliteConnection($"Data Source={dbPath}");
         _connection.Open();
+        // Wait for a contended write lock instead of failing immediately. The
+        // _gate below serialises access within ONE store, but nothing coordinates
+        // SEPARATE stores on the same database file — several connector nodes
+        // sharing one SQLite state file, and every failover reopening a fresh
+        // connection (each of which re-runs the CREATE TABLE statements below and
+        // so needs a write lock). SQLite's default busy timeout is 0, i.e. return
+        // SQLITE_BUSY at the first contention.
+        using (var pragma = _connection.CreateCommand())
+        {
+            pragma.CommandText = $"PRAGMA busy_timeout={BusyTimeoutMs};";
+            pragma.ExecuteNonQuery();
+        }
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS principals (
