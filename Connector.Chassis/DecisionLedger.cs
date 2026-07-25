@@ -1289,7 +1289,17 @@ public sealed class DecisionLedger : IDisposable
 
             if (_writer is not null)
             {
-                _writer.WriteLine(JsonSerializer.Serialize(entry, JsonOptions));
+                // Write the terminator explicitly as a bare LF — never WriteLine,
+                // which emits Environment.NewLine and so writes CRLF on Windows.
+                // This ledger is an LF-delimited format: the reader scans for '\n'
+                // and treats a lone CR between two records as DAMAGE (the
+                // mangled-separator shape), because a CR there means the '\n' was
+                // overwritten. Emitting CRLF on Windows therefore made every record
+                // boundary look one byte different from the format the recovery
+                // path expects. Matches the bare '\n' the constructor's repair path
+                // already writes.
+                _writer.Write(JsonSerializer.Serialize(entry, JsonOptions));
+                _writer.Write('\n');
                 _writer.Flush();
             }
             return entry;
