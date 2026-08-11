@@ -319,13 +319,17 @@ public class Round2ResolverChurnTests
             {
                 Round2Support.ClearGroupCache(resolver);
                 Interlocked.Increment(ref clears);
-                try
-                {
-                    await Task.Delay(1, stop.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                }
+                // Yield rather than Task.Delay(1). The point is to clear the cache
+                // CONSTANTLY underneath in-flight resolves; the 1 ms only avoided
+                // monopolising a core. But Windows' default timer resolution is
+                // ~15.6 ms, so Delay(1) slept ~15 ms there and, with eight hammer
+                // tasks saturating the pool, measured ~47 ms per iteration - about
+                // 32 clears in the 1500 ms window against an assertion demanding
+                // more than 100. The threshold was unreachable on Windows purely
+                // because of timer granularity, not because churn had stopped.
+                // Yielding paces the loop off the scheduler, not the clock, so it
+                // behaves the same on every platform.
+                await Task.Yield();
             }
         });
 
