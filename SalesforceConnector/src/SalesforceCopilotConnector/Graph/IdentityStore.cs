@@ -236,6 +236,11 @@ CREATE TABLE IF NOT EXISTS fls_cache (
         _conn = new SqliteConnection($"Data Source={_dbPath}");
         _conn.Open();
         Execute("PRAGMA journal_mode=WAL");
+        // Contended writes wait rather than failing immediately. WAL above
+        // removes the SHARED->RESERVED upgrade that returns SQLITE_BUSY without
+        // consulting the busy handler; this covers the write-write contention
+        // that remains, which does honour it.
+        Execute("PRAGMA busy_timeout=10000");
         Execute("PRAGMA foreign_keys=ON");
         InitSchema();
     }
