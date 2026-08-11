@@ -1,31 +1,23 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
 // Infrastructure/Metrics.cs
 // -------------------------
-// Process-wide metrics registry for the observability surface (#9).
-//
-// A tiny, allocation-free set of thread-safe counters and gauges tracked as
-// plain `long`s (via Interlocked) plus a Prometheus text-exposition renderer.
-// The increment/set methods are the seams the ingestion pipeline (Wave 2) calls;
-// they are harmless no-ops in the sense that if nobody ever calls them the
-// counters simply read zero. `RenderPrometheus()` is served by
-// `HealthEndpoint` on the `/metrics` route.
-//
-// No external dependencies — this is intentionally the simplest thing that
-// produces valid Prometheus exposition format so scraping works without a
-// client library.
+// Seismic-side metrics facade: the process-wide registry of this connector's
+// counters/gauges (thread-safe Interlocked longs + concurrent labelled maps)
+// plus the Prometheus text-exposition renderer served by HealthEndpoint on
+// /metrics. The reusable rendering mechanism lives in the chassis
+// (Connector.Chassis.MetricsRenderer); this type owns only Seismic's series and
+// its exact exposition. Byte-identical to the pre-facade output.
 
 using System.Collections.Concurrent;
-using System.Globalization;
 using System.Text;
+using static Connector.Chassis.MetricsRenderer;
 
 namespace SeismicConnector.Infrastructure;
 
 /// <summary>
-/// Static registry of process counters/gauges rendered in Prometheus text
-/// exposition format. All mutation is via <see cref="System.Threading.Interlocked"/>
-/// so the increment/set methods are safe to call from any pipeline thread.
+/// Static registry of Seismic's process counters/gauges rendered in Prometheus
+/// text exposition format. All mutation is via
+/// <see cref="System.Threading.Interlocked"/> so the increment/set methods are
+/// safe to call from any pipeline thread.
 /// </summary>
 public static class Metrics
 {
@@ -266,17 +258,19 @@ public static class Metrics
         ExtractionSuccesses.Clear();
         ClassifiedByLabel.Clear();
         DetectionsByCategory.Clear();
+        ContentGateBlocked.Clear();
+        ContentGateScannerUnavailable.Clear();
     }
 
     // ── Prometheus rendering ─────────────────────────────────────────────────
 
-    private const string Prefix = "seismic_connector_";
-
     /// <summary>
     /// Render the registry in Prometheus text exposition format (v0.0.4): a
     /// <c># HELP</c> and <c># TYPE</c> line per metric followed by the sample
-    /// line. Metric names are prefixed <c>seismic_connector_</c>. Uptime is
-    /// computed at render time.
+    /// line. Metric names are prefixed <c>seismic_connector_</c>, label values
+    /// escaped, a labelled <c>tracing_enabled</c> gauge, and circuit breakers
+    /// rendered over the chassis <see cref="Connector.Chassis.CircuitBreakerRegistry"/>.
+    /// Uptime is computed at render time.
     /// </summary>
     public static string RenderPrometheus()
     {
@@ -302,21 +296,21 @@ public static class Metrics
         RenderCircuitBreakers(sb);
 
         LabeledCounter(sb, "extraction_attempts_total",
-            "Content-extraction attempts per payload format.", ExtractionAttempts);
+            "Content-extraction attempts per payload format.", "format", ExtractionAttempts, escape: true);
         LabeledCounter(sb, "extraction_success_total",
-            "Content extractions that produced non-empty text, per payload format.", ExtractionSuccesses);
+            "Content extractions that produced non-empty text, per payload format.", "format", ExtractionSuccesses, escape: true);
 
         LabeledCounter(sb, "items_classified_total",
-            "Items classified, by unified sensitivity label.", ClassifiedByLabel, "label");
+            "Items classified, by unified sensitivity label.", "label", ClassifiedByLabel, escape: true);
         LabeledCounter(sb, "sensitive_detections_total",
-            "Sensitive-data detections, by category (PII/PCI/secret/MNE-adjacent).", DetectionsByCategory, "category");
+            "Sensitive-data detections, by category (PII/PCI/secret/MNE-adjacent).", "category", DetectionsByCategory, escape: true);
 
         LabeledCounter(sb, "content_gate_blocked_total",
             "Items quarantined by the ContentGate stage, by category (malware/injection/scan-unavailable).",
-            ContentGateBlocked, "category");
+            "category", ContentGateBlocked, escape: true);
         LabeledCounter(sb, "content_gate_scanner_unavailable_total",
             "ContentGate scans that could not complete because the scanner was unavailable, by channel.",
-            ContentGateScannerUnavailable, "channel");
+            "channel", ContentGateScannerUnavailable, escape: true);
 
         Gauge(sb, "dead_letter_depth", "Current number of records in the dead-letter queue.", DeadLetterDepth);
         Gauge(sb, "webhook_queue_depth", "Current undrained webhook event queue depth.", WebhookQueueDepth);
@@ -337,78 +331,5 @@ public static class Metrics
             .Append(Tracing.Enabled ? "1" : "0").Append('\n');
 
         return sb.ToString();
-    }
-
-    /// <summary>Escape a Prometheus label value (backslash, quote, newline).</summary>
-    private static string EscapeLabel(string value) =>
-        value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n");
-
-    /// <summary>Render the per-dependency circuit-breaker state gauge + trip/reset counters.</summary>
-    private static void RenderCircuitBreakers(StringBuilder sb)
-    {
-        var breakers = CircuitBreakerRegistry.All;
-
-        sb.Append("# HELP ").Append(Prefix)
-            .Append("circuit_breaker_state Circuit-breaker state per dependency (0=closed, 1=open, 2=half-open).\n");
-        sb.Append("# TYPE ").Append(Prefix).Append("circuit_breaker_state gauge\n");
-        foreach (var breaker in breakers)
-        {
-            sb.Append(Prefix).Append("circuit_breaker_state{dependency=\"")
-                .Append(EscapeLabel(breaker.Name)).Append("\"} ")
-                .Append((int)breaker.State).Append('\n');
-        }
-
-        sb.Append("# HELP ").Append(Prefix)
-            .Append("circuit_breaker_trips_total Times a dependency breaker opened (closed→open).\n");
-        sb.Append("# TYPE ").Append(Prefix).Append("circuit_breaker_trips_total counter\n");
-        foreach (var breaker in breakers)
-        {
-            sb.Append(Prefix).Append("circuit_breaker_trips_total{dependency=\"")
-                .Append(EscapeLabel(breaker.Name)).Append("\"} ")
-                .Append(breaker.TripCount.ToString(CultureInfo.InvariantCulture)).Append('\n');
-        }
-
-        sb.Append("# HELP ").Append(Prefix)
-            .Append("circuit_breaker_resets_total Times a dependency breaker recovered (half-open→closed).\n");
-        sb.Append("# TYPE ").Append(Prefix).Append("circuit_breaker_resets_total counter\n");
-        foreach (var breaker in breakers)
-        {
-            sb.Append(Prefix).Append("circuit_breaker_resets_total{dependency=\"")
-                .Append(EscapeLabel(breaker.Name)).Append("\"} ")
-                .Append(breaker.ResetCount.ToString(CultureInfo.InvariantCulture)).Append('\n');
-        }
-    }
-
-    private static void LabeledCounter(
-        StringBuilder sb, string name, string help, ConcurrentDictionary<string, long> values,
-        string labelName = "format")
-    {
-        var full = Prefix + name;
-        sb.Append("# HELP ").Append(full).Append(' ').Append(help).Append('\n');
-        sb.Append("# TYPE ").Append(full).Append(' ').Append("counter").Append('\n');
-        foreach (var (label, value) in values.OrderBy(kv => kv.Key, StringComparer.Ordinal))
-        {
-            sb.Append(full).Append('{').Append(labelName).Append("=\"").Append(EscapeLabel(label)).Append("\"} ")
-                .Append(value.ToString(CultureInfo.InvariantCulture)).Append('\n');
-        }
-    }
-
-    private static void Counter(StringBuilder sb, string name, string help, long value) =>
-        Metric(sb, name, help, "counter", value.ToString(CultureInfo.InvariantCulture));
-
-    private static void Gauge(StringBuilder sb, string name, string help, long value) =>
-        Metric(sb, name, help, "gauge", value.ToString(CultureInfo.InvariantCulture));
-
-    private static void GaugeDouble(StringBuilder sb, string name, string help, double value) =>
-        Metric(sb, name, help, "gauge", value.ToString("0.###", CultureInfo.InvariantCulture));
-
-    private static void Metric(StringBuilder sb, string name, string help, string type, string value)
-    {
-        var full = Prefix + name;
-        // '\n' line endings; HELP text needs backslash and newline escaping per
-        // the exposition format, but our help strings contain neither.
-        sb.Append("# HELP ").Append(full).Append(' ').Append(help).Append('\n');
-        sb.Append("# TYPE ").Append(full).Append(' ').Append(type).Append('\n');
-        sb.Append(full).Append(' ').Append(value).Append('\n');
     }
 }

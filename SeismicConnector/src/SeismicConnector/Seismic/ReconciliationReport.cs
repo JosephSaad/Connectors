@@ -92,7 +92,7 @@ public sealed class ReconciliationReport : IDisposable
                 ["reason"] = reason,
                 ["timestamp"] = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture),
             };
-            var correlationId = Infrastructure.Tracing.CurrentCorrelationId;
+            var correlationId = Tracing.CurrentCorrelationId;
             if (correlationId is not null)
                 entry["correlation_id"] = correlationId;
             _writer.WriteLine(JsonSerializer.Serialize(entry, JsonOptions));

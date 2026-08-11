@@ -12,6 +12,25 @@
     <InternalsVisibleTo Include="SeismicConnector.Tests" />
   </ItemGroup>
 
+  <!-- Shared connector chassis: pure infrastructure (logging, secrets, circuit
+       breaker, decision ledger, Windows-service host, ...). Types resolve via
+       the global using below so the consuming files need no per-file namespace
+       edits. -->
+  <ItemGroup>
+    <Using Include="Connector.Chassis" />
+    <!-- The connector-side metrics facade (Infrastructure/Metrics.cs) resolves
+         by simple name (`Metrics`) across the tree, mirroring the chassis global
+         using above; the reusable render mechanism lives in the chassis. -->
+    <Using Include="SeismicConnector.Infrastructure" />
+  </ItemGroup>
+
+  <!-- The chassis lives in this repository, so it is referenced as a project
+       rather than a published package: a clean clone builds with no feed, no
+       pack step and no version to keep in sync. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\Connector.Chassis\Connector.Chassis.csproj" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
     <PackageReference Include="Azure.Security.KeyVault.Secrets" Version="4.11.0" />

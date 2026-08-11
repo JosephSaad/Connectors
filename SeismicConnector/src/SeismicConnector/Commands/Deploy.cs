@@ -180,7 +180,7 @@ public static class Deploy
             return;
         }
         if (shardError is not null)
-            throw new Seismic.ConfigException(shardError);
+            throw new ConfigException(shardError);
         await runtime.Connection.EnsureConnectionAsync(ServiceStop.Token);
         await runtime.Connection.EnsureSchemaAsync(ServiceStop.Token);
     }

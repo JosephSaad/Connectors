@@ -141,8 +141,8 @@ public readonly record struct ClassificationResult(
 /// </summary>
 public sealed class ContentClassifier
 {
-    private static readonly Infrastructure.IAppLogger Logger =
-        Infrastructure.Logging.GetLogger("seismic_connector.classify");
+    private static readonly IAppLogger Logger =
+        Logging.GetLogger("seismic_connector.classify");
 
     private static readonly TimeSpan DefaultMatchTimeout = TimeSpan.FromSeconds(2);
 

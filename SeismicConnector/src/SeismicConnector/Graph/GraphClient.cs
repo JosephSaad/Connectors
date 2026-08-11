@@ -87,7 +87,7 @@ public class GraphClient
             : new HttpClient(handler);
         _http.Timeout = TimeSpan.FromSeconds(120);
         _breaker = breaker ?? CircuitBreakerRegistry.Register(
-            new CircuitBreaker(CircuitBreakerRegistry.GraphName, CircuitBreakerOptions.FromEnv(), critical: true));
+            new CircuitBreaker(SeismicBreakerNames.Graph, CircuitBreakerOptions.FromEnv(), critical: true));
     }
 
     /// <summary>

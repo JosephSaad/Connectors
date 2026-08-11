@@ -27,7 +27,9 @@ public sealed class Runtime : IDisposable
         var config = AppConfig.Load();
         Alerting.ConnectorId = config.Connector.Id;
         // Register OTLP export when OTEL_EXPORTER_OTLP_ENDPOINT is set; inert otherwise.
-        Tracing.Initialize(config);
+        // The chassis tracing layer is connector-neutral, so the OTEL_*/AppConfig
+        // resolution happens here (SeismicTracing) and rides in as options.
+        Tracing.Initialize(SeismicTracing.OptionsFrom(config));
         var seismic = new SeismicClient(config.Seismic);
         var graph = new GraphClient(config.Graph);
         var store = IdentityStoreFactory.Open(config.Connector.Id);

@@ -169,7 +169,7 @@ public class WebhookReceiverTests : IDisposable
     [Fact]
     public async Task Metrics_AcceptedAndRejectedCounters_And_QueueDepthGauge()
     {
-        SeismicConnector.Infrastructure.Metrics.ResetForTests();
+        Metrics.ResetForTests();
         try
         {
             var port = FreePort();
@@ -179,16 +179,16 @@ public class WebhookReceiverTests : IDisposable
             Assert.Equal(HttpStatusCode.Accepted, await PostAsync(port, body, Sign(body)));
             Assert.Equal(HttpStatusCode.Unauthorized, await PostAsync(port, body, "sha256=deadbeef"));
 
-            Assert.Equal(1, SeismicConnector.Infrastructure.Metrics.WebhookAccepted);
-            Assert.Equal(1, SeismicConnector.Infrastructure.Metrics.WebhookRejected);
-            Assert.Equal(1, SeismicConnector.Infrastructure.Metrics.WebhookQueueDepth);
+            Assert.Equal(1, Metrics.WebhookAccepted);
+            Assert.Equal(1, Metrics.WebhookRejected);
+            Assert.Equal(1, Metrics.WebhookQueueDepth);
 
             receiver!.DrainEvents();
-            Assert.Equal(0, SeismicConnector.Infrastructure.Metrics.WebhookQueueDepth);
+            Assert.Equal(0, Metrics.WebhookQueueDepth);
         }
         finally
         {
-            SeismicConnector.Infrastructure.Metrics.ResetForTests();
+            Metrics.ResetForTests();
         }
     }
 

@@ -369,7 +369,7 @@ public class TracingInitTests : IDisposable
     {
         Environment.SetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT", null);
         Tracing.Shutdown();
-        Tracing.Initialize(AppConfig.Load(_configDir));
+        Tracing.Initialize(SeismicTracing.OptionsFrom(AppConfig.Load(_configDir)));
         Assert.False(Tracing.Enabled);
         Assert.Null(Tracing.ExporterEndpoint);
     }
@@ -379,7 +379,7 @@ public class TracingInitTests : IDisposable
     {
         Environment.SetEnvironmentVariable("OTEL_SERVICE_NAME", null);
         Tracing.Shutdown();
-        Tracing.Initialize(AppConfig.Load(_configDir));
+        Tracing.Initialize(SeismicTracing.OptionsFrom(AppConfig.Load(_configDir)));
         Assert.Equal("Seismic Trace Connector", Tracing.ServiceName);
     }
 
@@ -388,7 +388,7 @@ public class TracingInitTests : IDisposable
     {
         Environment.SetEnvironmentVariable("OTEL_SERVICE_NAME", "custom-svc");
         Tracing.Shutdown();
-        Tracing.Initialize(AppConfig.Load(_configDir));
+        Tracing.Initialize(SeismicTracing.OptionsFrom(AppConfig.Load(_configDir)));
         Assert.Equal("custom-svc", Tracing.ServiceName);
     }
 
@@ -400,7 +400,7 @@ public class TracingInitTests : IDisposable
         // swallowed — see UnreachableCollector test below.
         Environment.SetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318");
         Tracing.Shutdown();
-        Tracing.Initialize(AppConfig.Load(_configDir));
+        Tracing.Initialize(SeismicTracing.OptionsFrom(AppConfig.Load(_configDir)));
         Assert.True(Tracing.Enabled);
         Assert.Equal("http://127.0.0.1:4318", Tracing.ExporterEndpoint);
 
@@ -424,8 +424,8 @@ public class TracingInitTests : IDisposable
     {
         Environment.SetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318");
         Tracing.Shutdown();
-        Tracing.Initialize(AppConfig.Load(_configDir));
-        Tracing.Initialize(AppConfig.Load(_configDir));  // second call is a no-op
+        Tracing.Initialize(SeismicTracing.OptionsFrom(AppConfig.Load(_configDir)));
+        Tracing.Initialize(SeismicTracing.OptionsFrom(AppConfig.Load(_configDir)));  // second call is a no-op
         Assert.True(Tracing.Enabled);
     }
 }
@@ -448,7 +448,7 @@ public class TracingResilienceTests : IDisposable
         // the crawl must complete normally and quickly.
         Environment.SetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9");
         Tracing.Shutdown();
-        Tracing.Initialize(TestConfig.Build());
+        Tracing.Initialize(SeismicTracing.OptionsFrom(TestConfig.Build()));
         Assert.True(Tracing.Enabled);
 
         using var harness = new PipelineHarness();

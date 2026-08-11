@@ -20,6 +20,9 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="Connector.Chassis" />
+    <!-- Metrics now resolves to the connector-side facade (src Infrastructure). -->
+    <Using Include="SeismicConnector.Infrastructure" />
   </ItemGroup>
 
   <ItemGroup>

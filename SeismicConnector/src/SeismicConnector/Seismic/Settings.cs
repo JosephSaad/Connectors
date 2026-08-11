@@ -17,15 +17,6 @@ using SeismicConnector.Infrastructure;
 
 namespace SeismicConnector.Seismic;
 
-/// <summary>Thrown when required configuration is missing or invalid.</summary>
-public sealed class ConfigException : Exception
-{
-    public ConfigException(string message)
-        : base(message)
-    {
-    }
-}
-
 public static class Settings
 {
     private static readonly object LoadLock = new();
