@@ -809,7 +809,23 @@ public class SuppressionSurrogateTests
 
     private static Dictionary<string, byte[]> Snapshot(string root) =>
         Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
-            .ToDictionary(p => p, File.ReadAllBytes, StringComparer.Ordinal);
+            .ToDictionary(p => p, ReadAllBytesShared, StringComparer.Ordinal);
+
+    /// <summary>
+    /// Read a file that another handle may still hold open. The runtime under test
+    /// keeps its SQLite connection open, and on Windows — which enforces share
+    /// modes, unlike POSIX — <see cref="File.ReadAllBytes"/> opens as
+    /// <see cref="FileShare.Read"/>, which does not permit that writer's access, so
+    /// snapshotting the store threw "the process cannot access the file".
+    /// </summary>
+    private static byte[] ReadAllBytesShared(string path)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var memory = new MemoryStream();
+        stream.CopyTo(memory);
+        return memory.ToArray();
+    }
 
     [Fact]
     public async Task TheDryRunRefusesTooRatherThanPreviewingAnErasureThatCannotExecute()

@@ -120,10 +120,21 @@ public abstract class HashChainedLedger<TEntry> where TEntry : class
             var entry = buildEntry(seq, timestamp, correlationId, prevHash);
 
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
-            using (var stream = new FileStream(Path, FileMode.Append, FileAccess.Write, FileShare.Read))
+            // FileShare.ReadWrite so a concurrent reader (Verify, or an operator
+            // tailing the ledger) is not refused: Windows enforces share modes, and
+            // FileShare.Read does not permit the Write access this handle holds.
+            //
+            // The terminator is written as an explicit bare LF, never WriteLine,
+            // which emits Environment.NewLine and so CRLF on Windows. This is an
+            // LF-delimited JSONL format: readers split on '\n', and byte offsets
+            // into the file (tamper detection, torn-tail recovery) assume a
+            // one-byte terminator. CRLF silently shifted every offset after the
+            // first line by one byte per preceding line.
+            using (var stream = new FileStream(Path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
             using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
             {
-                writer.WriteLine(JsonSerializer.Serialize(entry, JsonlOptions));
+                writer.Write(JsonSerializer.Serialize(entry, JsonlOptions));
+                writer.Write('\n');
             }
             _tail = (seq, HashOf(entry), new FileInfo(Path).Length);
             return entry;
@@ -162,7 +173,7 @@ public abstract class HashChainedLedger<TEntry> where TEntry : class
         if (!File.Exists(Path))
             return entries;
         var lineNumber = 0;
-        foreach (var line in File.ReadLines(Path))
+        foreach (var line in ReadLinesShared(Path))
         {
             lineNumber++;
             if (string.IsNullOrWhiteSpace(line))
@@ -228,6 +239,24 @@ public abstract class HashChainedLedger<TEntry> where TEntry : class
             brokenAtSeq = 0;
             Metrics.Set(BrokenMetricName, 0);
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Read the ledger tolerating a concurrent appender. Not
+    /// <see cref="File.ReadLines(string)"/>, which opens as
+    /// <see cref="FileShare.Read"/> — a share mode that does not permit the Write
+    /// access an appending writer holds, so on Windows (which enforces share
+    /// modes, unlike POSIX) verifying the ledger during a crawl is refused.
+    /// </summary>
+    private static IEnumerable<string> ReadLinesShared(string path)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream, new UTF8Encoding(false));
+        while (reader.ReadLine() is { } line)
+        {
+            yield return line;
         }
     }
 }
