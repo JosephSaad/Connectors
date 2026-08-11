@@ -313,25 +313,23 @@ public class Round2ResolverChurnTests
         var clears = 0;
         using var stop = new CancellationTokenSource(TimeSpan.FromMilliseconds(1500));
 
-        var churn = Task.Run(async () =>
+        // A DEDICATED thread, not a pool task. The eight hammers below saturate
+        // the thread pool, so a pool-scheduled churn loop measures scheduling
+        // rather than churn: Task.Delay(1) actually slept ~15 ms (Windows' default
+        // timer resolution is ~15.6 ms) for ~32 clears in the 1500 ms window, and
+        // Task.Yield() was worse still at 1, because yielding parks the
+        // continuation behind eight busy hammers. Its own thread lets the loop
+        // pace itself, and Sleep(0) hands the rest of the timeslice to any ready
+        // thread of equal priority so the hammers are not starved.
+        var churn = Task.Factory.StartNew(() =>
         {
             while (!stop.IsCancellationRequested)
             {
                 Round2Support.ClearGroupCache(resolver);
                 Interlocked.Increment(ref clears);
-                // Yield rather than Task.Delay(1). The point is to clear the cache
-                // CONSTANTLY underneath in-flight resolves; the 1 ms only avoided
-                // monopolising a core. But Windows' default timer resolution is
-                // ~15.6 ms, so Delay(1) slept ~15 ms there and, with eight hammer
-                // tasks saturating the pool, measured ~47 ms per iteration - about
-                // 32 clears in the 1500 ms window against an assertion demanding
-                // more than 100. The threshold was unreachable on Windows purely
-                // because of timer granularity, not because churn had stopped.
-                // Yielding paces the loop off the scheduler, not the clock, so it
-                // behaves the same on every platform.
-                await Task.Yield();
+                Thread.Sleep(0);
             }
-        });
+        }, TaskCreationOptions.LongRunning);
 
         var hammers = Enumerable.Range(0, 8).Select(worker => Task.Run(async () =>
         {
