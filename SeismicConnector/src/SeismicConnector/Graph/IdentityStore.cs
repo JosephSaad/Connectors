@@ -116,16 +116,35 @@ public sealed class SqliteIdentityStore : IIdentityStore
     {
         _connection = new SqliteConnection($"Data Source={dbPath}");
         _connection.Open();
-        // Wait for a contended write lock instead of failing immediately. The
-        // _gate below serialises access within ONE store, but nothing coordinates
-        // SEPARATE stores on the same database file — several connector nodes
-        // sharing one SQLite state file, and every failover reopening a fresh
-        // connection (each of which re-runs the CREATE TABLE statements below and
-        // so needs a write lock). SQLite's default busy timeout is 0, i.e. return
-        // SQLITE_BUSY at the first contention.
+        // The _gate below serialises access within ONE store, but nothing
+        // coordinates SEPARATE connections to the same database file — a restart
+        // or failover overlapping the outgoing process, and every reopen re-running
+        // the CREATE TABLE statements below, which need a write lock.
+        //
+        // busy_timeout: SQLite's default is 0 — return SQLITE_BUSY at the first
+        // contention rather than waiting.
+        //
+        // WAL: required, and not merely nicer. Writes here are autocommit
+        // statements, so in the default rollback journal each takes a SHARED lock
+        // and then upgrades to RESERVED. When another connection already holds
+        // RESERVED, SQLite returns SQLITE_BUSY on that upgrade *immediately and
+        // deliberately without consulting the busy handler*, because blocking
+        // mid-upgrade would deadlock — so busy_timeout alone cannot fix it (measured:
+        // it took the Windows failure from 4 failing writers to 3). WAL removes the
+        // upgrade entirely: readers never block the writer, and the write-write
+        // contention that remains DOES honour the busy handler.
+        //
+        // WAL needs shared memory and so is unsuitable on network filesystems; this
+        // database is per-node state next to the executable, and multi-node HA shares
+        // state through SQL Server, not this file (docs/HA.md).
+        //
+        // journal_mode is persisted in the database file, so this is a no-op after
+        // the first connection; it is issued on every open so a file created by an
+        // older build is upgraded in place.
         using (var pragma = _connection.CreateCommand())
         {
-            pragma.CommandText = $"PRAGMA busy_timeout={BusyTimeoutMs};";
+            pragma.CommandText =
+                $"PRAGMA busy_timeout={BusyTimeoutMs}; PRAGMA journal_mode=WAL;";
             pragma.ExecuteNonQuery();
         }
         using var cmd = _connection.CreateCommand();
