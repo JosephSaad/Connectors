@@ -1918,7 +1918,7 @@ public class SharedSqliteInventoryStressTests
         var dbPath = Path.Combine(dir.Path, "shared_inventory.db");
         const string connector = "HaShared";
         const int nodeCount = 6;
-        const int iterations = 60;
+        const int iterations = 250;
         const int batch = 20;
 
         long lockErrors = 0;
