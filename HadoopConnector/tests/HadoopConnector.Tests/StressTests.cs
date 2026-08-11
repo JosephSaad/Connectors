@@ -23,6 +23,7 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using Microsoft.Data.Sqlite;
 using System.Globalization;
 using System.Net;
 using System.Text;
@@ -1891,5 +1892,68 @@ public class WatermarkLagEdgeStressTests
         Assert.Equal(new[] { "2026-07-16" }, result.Records.Select(r => r.DataAsOf).ToArray());
         Assert.Equal(9, result.Stats.PartitionsPruned);        // 8 watermark + 1 filter
         Assert.Equal(1, result.Stats.PartitionsScanned);
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Shared SQLite inventory — several node connections on ONE database file
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// <summary>
+/// Coverage this connector previously lacked entirely: every other inventory test
+/// drives ONE connection, and a single connection cannot contend with itself.
+/// Two HA crawl nodes sharing a state database each hold their own connection,
+/// and that is the only shape that produces "database is locked".
+///
+/// The gap mattered. This connector's whole Windows suite was green while the
+/// same SQLite misconfiguration was failing the equivalent test in Clarizen,
+/// Salesforce and Altrata — it simply had no test that contended.
+/// </summary>
+public class SharedSqliteInventoryStressTests
+{
+    [Fact]
+    public void SharedSqliteInventory_MultiNodeWriters_NoLockErrors_NoLoss()
+    {
+        using var dir = new TempDir();
+        var dbPath = Path.Combine(dir.Path, "shared_inventory.db");
+        const string connector = "HaShared";
+        const int nodeCount = 6;
+        const int iterations = 60;
+        const int batch = 20;
+
+        long lockErrors = 0;
+
+        Parallel.For(0, nodeCount, n =>
+        {
+            // Each node holds its OWN connection to the SAME file.
+            using var inventory = new ItemInventory(connector, dbPath);
+            for (var iter = 0; iter < iterations; iter++)
+            {
+                try
+                {
+                    inventory.RecordSeen(
+                        Enumerable.Range(0, batch).Select(k => ($"n{n}_i{iter}_k{k}", "Task")),
+                        DateTime.UtcNow);
+                    if (iter % 5 == 4)
+                    {
+                        inventory.Remove(
+                            Enumerable.Range(0, 10).Select(k => $"n{n}_i{iter - 4}_k{k}"));
+                    }
+                }
+                catch (SqliteException exc) when (exc.SqliteErrorCode is 5 or 6)
+                {
+                    // 5 = SQLITE_BUSY, 6 = SQLITE_LOCKED.
+                    Interlocked.Increment(ref lockErrors);
+                }
+            }
+        });
+
+        Assert.Equal(0, Interlocked.Read(ref lockErrors));
+
+        // Exact bookkeeping: nothing lost, nothing phantom.
+        const int removedPerNode = (iterations / 5) * 10;
+        var expected = nodeCount * (iterations * batch - removedPerNode);
+        using var check = new ItemInventory(connector, dbPath);
+        Assert.Equal(expected, check.Count());
     }
 }

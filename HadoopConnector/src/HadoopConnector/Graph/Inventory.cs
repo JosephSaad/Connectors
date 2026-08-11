@@ -58,6 +58,23 @@ public sealed class ItemInventory : IItemInventory
 
         _connection = new SqliteConnection($"Data Source={path}");
         _connection.Open();
+        // Contended writes must wait, not fail. Writes here are autocommit
+        // statements, so under the default rollback journal each takes a SHARED
+        // lock then upgrades to RESERVED; when another connection holds RESERVED,
+        // SQLite returns SQLITE_BUSY on that upgrade immediately and deliberately
+        // WITHOUT consulting the busy handler, because blocking mid-upgrade would
+        // deadlock. busy_timeout alone therefore cannot fix it. WAL removes the
+        // upgrade - readers never block the writer - and the write-write
+        // contention that remains does honour the busy handler.
+        //
+        // Windows enforces the locking that exposes this; POSIX hides it.
+        // journal_mode is persisted in the database file, so the pragma is a no-op
+        // after the first connection and upgrades a file made by an older build.
+        using (var pragma = _connection.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA busy_timeout=10000; PRAGMA journal_mode=WAL;";
+            pragma.ExecuteNonQuery();
+        }
         using var command = _connection.CreateCommand();
         command.CommandText =
             """
