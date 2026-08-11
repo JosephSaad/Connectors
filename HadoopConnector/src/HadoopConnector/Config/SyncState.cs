@@ -268,7 +268,17 @@ public static class SyncState
                 // EnsureCleanAppendBoundary. Best-effort and idempotent: a normal
                 // newline-terminated file is a no-op.
                 SealDeadLetterBoundary(path);
-                using var writer = new StreamWriter(path, append: true, Utf8NoBom);
+                // FileShare.ReadWrite, explicitly: on Windows the share mode is
+                // enforced, and StreamWriter(path, append:) opens the file as
+                // FileShare.Read. A concurrent reader (end-of-run dead-letter
+                // accounting, retry-failed) opens for read with its own share mode,
+                // which does not permit this handle's Write access — so the reader
+                // fails with a sharing violation while a crawl is appending. POSIX
+                // does not enforce share modes, which is why this only bites on
+                // Windows Server, the deployment target.
+                using var deadLetterStream = new FileStream(
+                    path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+                using var writer = new StreamWriter(deadLetterStream, Utf8NoBom);
                 var correlationId = Infrastructure.CorrelationContext.Current;
                 foreach (var (itemId, error) in failures)
                 {
@@ -309,7 +319,7 @@ public static class SyncState
         try
         {
             var lineNumber = 0;
-            foreach (var rawLine in File.ReadLines(path, Utf8NoBom))
+            foreach (var rawLine in ReadLinesShared(path))
             {
                 lineNumber++;
                 var line = rawLine.Trim();
@@ -338,6 +348,35 @@ public static class SyncState
         }
         return entries;
     }
+
+    /// <summary>
+    /// Enumerate the lines of <paramref name="path"/> tolerating a concurrent
+    /// appender.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not <see cref="File.ReadLines(string, System.Text.Encoding)"/>,
+    /// which opens the file as <see cref="FileShare.Read"/>. On Windows the share
+    /// mode is enforced: it does not permit the Write access an appending writer
+    /// holds, so reading the dead-letter queue while a crawl appends to it throws a
+    /// sharing violation. POSIX does not enforce share modes, so the defect is
+    /// invisible off Windows - while Windows Server is the primary deployment
+    /// target.
+    ///
+    /// A record still being written is simply not yet newline-terminated, so it is
+    /// either absent or skipped as malformed by the caller and picked up on the next
+    /// read - the queue is append-only, so no committed record is missed.
+    /// </remarks>
+    private static IEnumerable<string> ReadLinesShared(string path)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream, Utf8NoBom);
+        while (reader.ReadLine() is { } line)
+        {
+            yield return line;
+        }
+    }
+
 
     public static void ClearFailedRecords(string connectorId)
     {
@@ -369,7 +408,7 @@ public static class SyncState
             var info = new FileInfo(path);
             if (!info.Exists || info.Length == 0)
                 return;
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite);
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
             fs.Seek(-1, SeekOrigin.End);
             if (fs.ReadByte() != '\n')
                 fs.WriteByte((byte)'\n');

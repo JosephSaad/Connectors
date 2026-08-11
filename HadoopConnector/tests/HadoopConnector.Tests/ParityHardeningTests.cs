@@ -295,6 +295,53 @@ public class DeadLetterConcurrencyTests
 {
     private const string Connector = "StressConnector";
 
+
+    /// <summary>
+    /// Reading the queue WHILE a crawl appends to it must not throw.
+    ///
+    /// Distinct from the concurrent-writer test above, and the distinction is the
+    /// whole point: writers are serialised by the in-process dead-letter lock, so
+    /// only ever one write handle exists at a time. A READER takes its own handle.
+    /// On Windows, where share modes are enforced, a reader whose share mode
+    /// excludes Write is refused while an appending writer holds the file — so
+    /// end-of-run dead-letter accounting and retry-failed fail mid-crawl. POSIX
+    /// treats share modes as advisory, so this passes on Linux/macOS regardless
+    /// and only ever fails on Windows Server, the deployment target.
+    /// </summary>
+    [Fact]
+    public async Task ConcurrentAppendAndRead_ReaderNeverThrows()
+    {
+        using var scope = new SyncStateScope();
+        var stop = false;
+        var readerErrors = 0;
+
+        var reader = Task.Run(() =>
+        {
+            while (!Volatile.Read(ref stop))
+            {
+                try
+                {
+                    _ = SyncState.ReadFailedRecords(Connector);
+                }
+                catch
+                {
+                    Interlocked.Increment(ref readerErrors);
+                }
+            }
+        });
+
+        Parallel.For(0, 200, i =>
+            SyncState.AppendFailedRecords(
+                Connector,
+                new List<(string, string)> { ($"item-{i}", $"error {i}") },
+                "Task"));
+
+        Volatile.Write(ref stop, true);
+        await reader.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Equal(0, readerErrors);
+        Assert.Equal(200, SyncState.ReadFailedRecords(Connector).Count);
+    }
     [Fact]
     public async Task ConcurrentAppends_NoCorruptLines_NoLostRecords()
     {
