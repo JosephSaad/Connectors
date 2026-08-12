@@ -32,7 +32,7 @@ is N/A here.
 | **S**poofed Salesforce endpoint | TLS via `HttpClient`; instance URL pinned by `SALESFORCE_INSTANCE_URL`; `CA_BUNDLE_PATH` keeps validation strict (additive trust, never disabled — `Infrastructure/HttpClientFactory.cs`) | DNS/OS trust-store compromise on the host |
 | **T**ampered responses | TLS; per-field retry validates SOQL shape (`Salesforce/ApiClient.cs`) | A compromised org feeds poisoned content into the index — content is indexed as-is |
 | **R**epudiation | Every request/failure logged with timestamps (`Infrastructure/Logging.cs`); Salesforce login history on the org side | — |
-| **I**nfo disclosure (creds) | Client-credentials flow; consumer secret only in `env/.env.local.user` or Key Vault (`Infrastructure/SecretProvider.cs`); never logged | Secret file readable by anyone with file ACL access — lock down per [DEPLOYMENT_ENTERPRISE.md](DEPLOYMENT_ENTERPRISE.md) |
+| **I**nfo disclosure (creds) | Client-credentials flow; consumer secret only in `env/.env.local.user` or Key Vault (`Connector.Chassis/SecretProvider.cs`); never logged | Secret file readable by anyone with file ACL access — lock down per [DEPLOYMENT_ENTERPRISE.md](DEPLOYMENT_ENTERPRISE.md) |
 | **D**oS (self-inflicted) | Retry with backoff + cap, `SALESFORCE_QUERY_LIMIT`, chunked pagination (`docs/RETRY.md`) | Org API-limit exhaustion shared with other integrations |
 | **E**levation | Integration user is read-only scoped (deployment checklist, `docs/RUNBOOK.md` §1b) | Over-permissioned integration user indexes objects you did not intend — the ACL engine will faithfully mirror them |
 

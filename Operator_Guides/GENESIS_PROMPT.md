@@ -18,11 +18,24 @@ parallel work, and re-verify every agent's build/test claims by running
 `dotnet test` yourself before trusting them. Push to GitHub repo
 `<owner>/Connectors` as a monorepo of sibling top-level folders.
 
-### 1. Build five standalone connectors (C#/.NET 10, one folder each, NO shared components)
+### 1. Build five connectors (C#/.NET 10, one folder each) on ONE shared chassis
 
-Every connector is fully self-contained — own solution, tests, config, docs,
-Dockerfile, GitHub Actions (ci/codeql/release), LICENSE/NOTICE — and carries
-its own copy of a common **chassis**:
+Every connector has its own solution, tests, config, docs, Dockerfile and
+LICENSE/NOTICE, and all five consume one shared **chassis** project
+(`Connector.Chassis`, v1.13.1) by `<ProjectReference>` — never consumed as a
+NuGet package, so no version pin and no feed. (Chassis CI still runs
+`dotnet pack` to produce an inspectable artifact; nothing consumes it, and it
+is pushed nowhere.) Because each project
+references `../Connector.Chassis`, images build with the repository root as
+the context (`docker build -f <Connector>/Dockerfile .`), governed by a single
+root `.dockerignore`. The chassis owns identity/seams and service-stop for all
+five; logging and the secret provider for four apiece (Salesforce keeps its
+own CPython-style logging and bridges via `Chassis.LoggerFactory`; Altrata
+keeps its own secret provider); the SQL executor and metrics renderer for
+three; the SQL gateway and tracing for two. Everything else below — decision
+ledger, HA coordinator, SQL state store, alerting, Event Log sink, log pruner,
+service host, env flags, circuit breaker — is still implemented per connector.
+The common capability set:
 
 - Unified CLI (`guide`, `setup-connection`, `full-deployment`, `ingest`,
   `ingest-item`, `reconcile`, `retry-failed`, `validate-config`, …)
@@ -50,9 +63,12 @@ its own copy of a common **chassis**:
 - Dead-letter payload redaction (`DEADLETTER_PAYLOAD_MODE=full|redacted` —
   redacted keeps ids/hashes only; retry re-fetches from source)
 - SCM-aware Windows service + idempotent install script; WiX v5 MSI packaging
-- CI: coverage gate (measured−5), perf-smoke jobs with non-flaky thresholds;
-  release: CycloneDX SBOM + Authenticode/cosign signing gated on secrets;
-  CHANGELOG + semver
+- CI: six workflows at the repository root (`.github/workflows/`) — one per
+  connector plus the chassis — with a coverage gate (measured−5) and
+  perf-smoke jobs with non-flaky thresholds; release: CycloneDX SBOM +
+  Authenticode/cosign signing gated on secrets; CHANGELOG + semver. The
+  per-connector `.github/workflows/` files (ci/codeql/release) are inert
+  leftovers from when each connector was its own repo — GitHub never runs them
 
 The five connectors and their signature features:
 
@@ -302,7 +318,7 @@ the FTE model and the bank-realistic programme plan.*
 *Refreshed 20-Jul-2026. Since genesis the session ran **adversarial assurance
 rounds 7–10** (fix → independent hostile verify → claim audit → mutation test →
 re-attack), taking the fleet from 3,389 to **4,824 green tests at 0 warnings**
-(Salesforce 1,206 · Clarizen 877 · Seismic 1,017 · Altrata 743 · Hadoop 930).
+(Salesforce 1,206 · Clarizen 877 · Seismic 1,017 · Altrata 743 · Hadoop 981).
 Defects were closed as CLASSES: Salesforce field-level security with
 name-derived compound inference **removed** (components indexed individually);
 Clarizen schema-drift enforcement moved to the write path (an undeclared

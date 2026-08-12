@@ -11,7 +11,7 @@ contract), [RETRY.md](RETRY.md) (throttling), [CAPACITY.md](CAPACITY.md) (sizing
 [../env/.env.local.example](../env/.env.local.example).
 
 Commands below use `dotnet run --project src/SalesforceCopilotConnector -- <cmd>`
-from the repo root. On a published/installed node substitute
+from the `SalesforceConnector/` directory. On a published/installed node substitute
 `dotnet SalesforceCopilotConnector.dll <cmd>` from the install directory. All
 relative paths (`config/`, `env/`, `logs/`, `data/`) resolve against the current
 directory, or against `SFCONNECTOR_HOME` when it is set (service / container).
@@ -108,8 +108,13 @@ in `SFCONNECTOR_HOME\logs\`.
 `docker-compose.yml` (SQL Server 2022 + connector, dev/test topology) are
 provided. Mount `config/`, `env/`, `logs/`, `data/`.
 
+The build context is the **repository root**, not the connector directory — the
+project references `../Connector.Chassis` and a build cannot reach outside its
+context (compose sets `context: ..` for the same reason). Build from the repo
+root:
+
 ```bash
-docker build -t sfconnector:latest .
+docker build -f SalesforceConnector/Dockerfile -t sfconnector:latest .
 docker run --rm -e SFCONNECTOR_HOME=/app \
   -v "$PWD/config:/app/config" -v "$PWD/env:/app/env" \
   -v "$PWD/logs:/app/logs"     -v "$PWD/data:/app/data" \

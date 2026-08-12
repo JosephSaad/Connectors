@@ -280,6 +280,28 @@ Enterprise hardening package.
   certificate is configured.
 - Test suite grown from 516 to 575+ offline tests; two xUnit analyzer warnings
   in existing tests fixed (build is warning-clean on full rebuild).
+- **Shared chassis.** The connector now consumes `Connector.Chassis` (1.13.1)
+  via `<ProjectReference>` to
+  `../../../Connector.Chassis/Connector.Chassis.csproj` for its identity/seam
+  init, `ServiceStop`, logging, secret provider, SQL executor/gateway and
+  metrics renderer; the connector-local copies of those were removed. It is
+  **not** a NuGet package — no `PackageReference`, no version pin, no feed, and
+  the connector's `nuget.config` (which hardcoded an absolute local path) was
+  deleted. The decision ledger, HA coordinator, SQL state store, alerting,
+  Event Log sink, log pruner, service host, env flags and circuit breaker
+  remain connector-local.
+- **CI moved to the repository root.** GitHub only executes workflows found in
+  the root `.github/workflows/`; the Clarizen job is `clarizen.yml` there
+  (build + test on ubuntu-latest and windows-latest, plus a Docker image
+  build). The `ci.yml`, `codeql.yml` and `release.yml` files under
+  `ClarizenConnector/.github/workflows/` are inert leftovers from when this
+  connector was its own repository and are left in place untouched.
+- **Docker builds from the repository root.** Because the project references
+  `../Connector.Chassis` and a build cannot reach outside its context, the
+  image is built as `docker build -f ClarizenConnector/Dockerfile .` from the
+  repo root; `docker-compose.yml` sets `context: ..`. A single root
+  `.dockerignore` governs the build (the per-connector one was removed).
+- Test suite at 878 offline tests, green on ubuntu-latest and windows-latest.
 
 ### Security
 - FIPS audit: no MD5/SHA1/DES/RC4/3DES anywhere in the codebase; HMAC-SHA256

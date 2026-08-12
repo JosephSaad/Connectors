@@ -7,7 +7,11 @@ install: `README.md` "Running as a Windows service".
 
 ## Packaging & distribution (SCCM / Intune)
 
-Artifacts per release (all from `release.yml`, checksummed, SBOM attached):
+Artifacts per release (all defined by `release.yml`, checksummed, SBOM
+attached — note that `release.yml` sits under this connector's own
+`.github/workflows/` and is an inert leftover from when it was a separate
+repository: GitHub executes only the workflows at the repository root, so this
+pipeline no longer runs automatically):
 
 | Artifact | Use |
 |---|---|

@@ -79,9 +79,9 @@ With Key Vault, steps "update every node" collapse to one write:
    automation needs `set`; nobody needs `purge`.
 
 Also rotate on: staff departure with vault/env access, any node compromise,
-`SIGNING_*` CI secrets on repository-access changes (see
+`SIGNING_*` CI secrets on repository-access changes (see the connector's
 `.github/workflows/release.yml` — signing is skipped, never failed, while
-absent).
+absent; that workflow is currently inert, so no signing runs today).
 
 ## Vulnerability reporting
 
@@ -96,9 +96,12 @@ absent).
   the fix is out).
 - Upstream code inherited from Microsoft's Python original: report here first;
   we coordinate upstream if it applies there too.
-- Dependency CVEs: Dependabot + CodeQL run on the repo; the release SBOM
-  (`sbom.cdx.json`, CycloneDX) is attached to every release for your own
-  scanners.
+- Dependency CVEs: the Dependabot and CodeQL configs under
+  `SalesforceConnector/.github/` are leftovers from when this connector was its
+  own repository — GitHub reads neither from a subdirectory, so neither runs
+  today. Scan dependencies yourself until they are re-established at the
+  repository root; the CycloneDX SBOM (`sbom.cdx.json`) is produced by the
+  release workflow, which is likewise inert.
 
 ## Data-at-rest inventory
 

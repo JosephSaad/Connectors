@@ -21,12 +21,14 @@ env/
   .env.local.example     every knob, documented (copy to .env.local / .env.local.user)
 scripts/
   install-windows-service.ps1
-  sql/create-database.sql       idempotent schema provisioning (validated offline + live in CI)
+  sql/create-database.sql       idempotent schema provisioning (validated offline in CI)
   sql/create-login.sql          least-privilege app login
 Dockerfile / docker-compose.yml container image + local SQL-backed dev topology
-.github/workflows/              ci.yml (build/test on ubuntu+windows, live SQL
-                                idempotency, docker validate), codeql.yml,
-                                release.yml (test-gated, checksummed bundles + GHCR image)
+.github/workflows/              inert leftovers from when this connector was its
+                                own repository (ci.yml, codeql.yml, release.yml);
+                                GitHub only runs workflows at the REPOSITORY ROOT
+                                — ../.github/workflows/seismic.yml builds and
+                                tests on ubuntu+windows and builds the image
 src/SeismicConnector/
   Program.cs             unified CLI entry point (SCM-aware)
   Dashboard.cs           Spectre.Console live dashboard (--continuous)
@@ -34,13 +36,16 @@ src/SeismicConnector/
                          ingest-object, ingest-item, retry-failed,
                          identity-dry-run, validate-config
   Config/                AppConfig (env layering), SyncState (checkpoints,
-                         sync cursor, dead-letter), SqlStateStore
+                         sync cursor, dead-letter)
   Graph/                 GraphClient (retry/backoff/$batch), Connection,
                          Ingest pipeline, IdentityStore (SQLite/SQL Server),
                          IdentitySync, RetryDelay
-  Infrastructure/        Logging, Metrics, Alerting, HealthEndpoint,
-                         SecretProvider (Key Vault), SqlExecutor, HaCoordinator,
-                         LogPruner, ServiceHost/ServiceStop
+  Infrastructure/        Metrics facade, HealthEndpoint, tracing and breaker
+                         seams. The reusable infrastructure — logging, secrets
+                         (Key Vault), SqlExecutor/SqlStateStore, alerting,
+                         HaCoordinator, LogPruner, decision ledger, circuit
+                         breaker, ServiceHost/ServiceStop — comes from the
+                         shared Connector.Chassis project at the repository root
   Seismic/               SeismicClient (OAuth2 CC), Models, ExclusionFilter,
                          ReconciliationReport, AclMapper, ContentExtractor,
                          ItemTransformer, WebhookReceiver, Settings,
@@ -248,7 +253,7 @@ saved, then the process exits — identical to Ctrl+C in a console.
 `USE_SQL_SERVER=true` moves all state (identity store, tracked items,
 checkpoints, sync cursor, dead-letter queue) into a shared SQL Server database
 (`docs/SQL_CONTRACT.md`); provision with `scripts/sql/create-database.sql`
-(idempotent — CI proves the re-run path live) or let the connector
+(idempotent — the offline SQL suite pins re-run safety) or let the connector
 auto-provision. `HA_MODE=true` (SQL required) adds active-active multi-node
 crawling: nodes open/join a shared crawl session, claim teamsites with
 heartbeats and stale-claim takeover, and the crawl **closes even when some

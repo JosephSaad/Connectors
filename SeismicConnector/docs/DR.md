@@ -64,8 +64,8 @@ everything from source truth. Expect one full-crawl duration.
 2. Stop the service (graceful — finishes the chunk, saves the checkpoint).
    HA: rolling — one node at a time; the others keep crawling.
 3. Replace binaries (zip: overwrite dir; MSI: MajorUpgrade in place).
-4. SQL backend: run `scripts/sql/create-database.sql` (safe re-run — proven
-   twice-run in CI every build).
+4. SQL backend: run `scripts/sql/create-database.sql` (safe re-run — the
+   offline SQL suite proves idempotency by construction every build).
 5. Start; verify `/health`, `/ready`, one `validate-config`, and the next
    run summary.
 
@@ -89,9 +89,9 @@ SQLite DB; unknown JSON keys are ignored).
 
 * **SQL**: `scripts/sql/create-database.sql` is the single versioned contract
   (docs/SQL_CONTRACT.md); every statement is guarded (`IF NOT EXISTS`) so any
-  older database upgrades by re-running the current script. CI provisions it
-  twice per build to prove re-run safety; the offline suite pins script ⇄
-  in-code DDL ⇄ contract-doc agreement in all directions.
+  older database upgrades by re-running the current script. The offline SQL
+  suite proves that re-run safety by construction and pins script ⇄ in-code
+  DDL ⇄ contract-doc agreement in all directions.
 * **SQLite**: opened databases migrate in code
   (`MigrateAclFingerprintColumn`-style additive migrations) — no manual step.
 * **JSON state**: parse-tolerant; unknown keys ignored, missing files treated

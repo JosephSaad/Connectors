@@ -328,6 +328,28 @@ All notable changes to the Seismic Copilot Connector. Versions follow
   in naming only), NOT a Purview-enforced sensitivity label. The shipped Graph
   schema property name is unchanged (wire back-compat).
 
+### Build
+
+* **The connector consumes the shared `Connector.Chassis` project (1.13.1).**
+  The reusable infrastructure — logging, secrets, `SqlExecutor`/`SqlStateStore`,
+  alerting, `HaCoordinator`, `LogPruner`, the decision ledger, the circuit
+  breaker and `ServiceHost`/`ServiceStop` — now lives in one project at the
+  repository root instead of a per-connector copy. It is referenced by
+  `<ProjectReference>`, **not** as a NuGet package: there is no feed, no pack
+  step and no version to keep in sync, so a clean clone builds as-is. Two
+  consequences for anyone building or shipping this connector:
+  * **Container builds need the repository root as their context** — a Docker
+    build cannot reach outside its context, and the project reference points
+    above the connector directory. Use
+    `docker build -f SeismicConnector/Dockerfile .` from the repository root;
+    `docker-compose.yml` already sets `context: ..` so `docker compose up
+    --build` is unchanged.
+  * **CI runs from the repository root.** `.github/workflows/seismic.yml` at
+    the root builds and tests on ubuntu-latest and windows-latest (1017 tests
+    green on both) and builds the container image. The connector's own
+    `.github/workflows/` files are inert leftovers from when this was its own
+    repository — GitHub never executes them.
+
 ## 1.0.0 — 2026-07-18
 
 First versioned release: the connector chassis plus the enterprise-grade

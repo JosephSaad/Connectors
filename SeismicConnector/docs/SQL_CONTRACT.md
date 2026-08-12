@@ -10,10 +10,11 @@ connection string sets `Encrypt` explicitly.
 ## Schema
 
 Provision ahead of time with `scripts/sql/create-database.sql` (idempotent —
-safe to re-run; CI runs it twice against a live engine to prove it) plus
-`scripts/sql/create-login.sql` for a least-privilege app login. The connector
-also auto-provisions the same tables on first use (`SqlExecutor.SchemaDdl`);
-the offline SQL validation suite fails the build if the two drift.
+safe to re-run; every statement is guarded, and the offline SQL suite proves
+it by construction) plus `scripts/sql/create-login.sql` for a least-privilege
+app login. The connector also auto-provisions the same tables on first use
+(`SqlExecutor.SchemaDdl`); the offline SQL validation suite fails the build if
+the two drift.
 
 | Table | Replaces | Key |
 | --- | --- | --- |

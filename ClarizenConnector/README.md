@@ -10,8 +10,14 @@ connection.
 
 Architecture and operational features mirror the Salesforce Copilot Connector
 (same chassis: unified CLI, checkpointed crawls, dead-letter + retry, SQL/HA
-backends, Key Vault, health/metrics/alerting, Windows-service mode) — carried
-here as an independent, self-contained copy.
+backends, Key Vault, health/metrics/alerting, Windows-service mode). The shared
+identity/seam init, `ServiceStop`, logging, secret provider, SQL
+executor/gateway and metrics renderer come from the `Connector.Chassis` project
+(1.13.1) at the repository root, consumed by `<ProjectReference>` to
+`../../../Connector.Chassis/Connector.Chassis.csproj` — not as a NuGet package.
+The connector-specific machinery (HA coordinator, SQL state store, decision
+ledger, alerting, Event Log sink, log pruner, service host, circuit breakers)
+still lives here.
 
 ## Layout
 
@@ -25,14 +31,14 @@ here as an independent, self-contained copy.
 | `src/ClarizenConnector/Webhook/` | event-driven incremental: receiver, HMAC validation, debouncer, processor |
 | `src/ClarizenConnector/Config/` | env config, `schema.json` models, sync state (files or SQL) |
 | `src/ClarizenConnector/Commands/` + `Program.cs` | CLI |
-| `src/ClarizenConnector/Infrastructure/` | logging, metrics, health endpoint, alerting, Key Vault secrets, env loading, log pruning, Windows-service host, SQL executor, HA coordinator, OpenTelemetry tracing + correlation ids, circuit breakers + degraded mode |
+| `src/ClarizenConnector/Infrastructure/` | metrics, health endpoint, alerting, env loading, log pruning, Windows-service host, HA coordinator, decision ledger, OpenTelemetry tracing + correlation ids, circuit breakers + degraded mode (logging, Key Vault secrets and the SQL executor/gateway come from `Connector.Chassis`) |
 | `config/` | `schema.json` (Clarizen object list, fields, financial fields, ACL modes), `graph-schema.json` (connection schema) |
 | `env/.env.local.example` | every knob, documented |
 | `docs/` | `HA.md`, `RETRY.md`, `OBSERVABILITY.md`, `SQL_CONTRACT.md`, `SHARDING.md`, `DELETION_SYNC.md`, `ATTACHMENTS.md`, `WEBHOOKS.md`, `TRACING.md`, `RESILIENCE.md` |
 | `scripts/` | `install-windows-service.ps1`, `sql/create-database.sql` |
-| `tests/ClarizenConnector.Tests/` | xUnit suite (877 tests, mock HTTP — no network) |
-| `Dockerfile` / `docker-compose.yml` | container image + local SQL/HA dev topology |
-| `.github/workflows/` | `ci.yml` (ubuntu + windows, SQL provisioning, docker), `codeql.yml`, `release.yml` (test-gated, checksummed bundles + GHCR image) |
+| `tests/ClarizenConnector.Tests/` | xUnit suite (878 tests, mock HTTP — no network) |
+| `Dockerfile` / `docker-compose.yml` | container image (built with the repository root as context) + local SQL/HA dev topology |
+| `.github/workflows/` | `ci.yml`, `codeql.yml`, `release.yml` — **inert** leftovers from when this connector was its own repository; GitHub only runs the workflows at the repository root (`.github/workflows/clarizen.yml`) |
 
 ## Requirements
 
@@ -101,8 +107,8 @@ property to `graph-schema.json`.
 
 ## Usage
 
-Run from the repository root (`logs/`, `data/`, `config/`, `env/` resolve
-against the current directory):
+Run from the `ClarizenConnector/` directory (`logs/`, `data/`, `config/`,
+`env/` resolve against the current directory):
 
 ```bash
 dotnet run --project src/ClarizenConnector -- guide
@@ -291,20 +297,24 @@ A multi-stage image (`mcr.microsoft.com/dotnet/sdk:10.0` build →
 `mcr.microsoft.com/dotnet/runtime:10.0` runtime, non-root) ships in
 `Dockerfile`; `docker-compose.yml` brings up a local SQL Server 2022 +
 schema-provisioning one-shot + the connector wired to the SQL state backend
-(dev topology — real deployments point at a hardened SQL Server/AG listener):
+(dev topology — real deployments point at a hardened SQL Server/AG listener).
+
+The build context is the **repository root**, not the connector directory: the
+project references `../Connector.Chassis` and a build cannot reach outside its
+context. A single root `.dockerignore` governs the build; `docker-compose.yml`
+sets `context: ..` accordingly.
 
 ```bash
-docker build -t clarizenconnector:latest .
-docker compose up --build           # SQL + connector, continuous crawl
+docker build -f ClarizenConnector/Dockerfile -t clarizenconnector:latest .   # from the repo root
+docker compose up --build           # from ClarizenConnector/: SQL + connector, continuous crawl
 ```
 
-CI (`.github/workflows/ci.yml`) builds + tests on ubuntu and windows (Windows
-Server is the deployment target), provisions the SQL schema twice against a
-live SQL Server 2022 (proving the idempotent re-run path), and validates the
-Docker image build. `release.yml` is test-gated and publishes checksummed
-self-contained bundles (win-x64/linux-x64) plus a GHCR container image on
-`v*` tags; `codeql.yml` runs the security-and-quality suite weekly and on
-every push/PR.
+CI is the repository-root workflow `.github/workflows/clarizen.yml`: it builds
+and tests the solution on ubuntu-latest and windows-latest (Windows Server is
+the deployment target) and builds the Docker image with the repository root as
+context. The `ci.yml`, `codeql.yml` and `release.yml` files under
+`ClarizenConnector/.github/workflows/` are inert leftovers from when this
+connector was its own repository — GitHub never runs them.
 
 ## SQL Server backend & high availability
 
@@ -347,8 +357,9 @@ lives in `ops/` (`grafana-dashboard.json`, `prometheus-alerts.yml`,
 dotnet test
 ```
 
-877 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
-shape **and concurrency invariants** (16 parallel writers, zero corrupt lines),
+878 tests (green on ubuntu-latest and windows-latest): CLI parsing, checkpoint
+round-trip/resume, dead-letter write/retry shape **and concurrency
+invariants** (16 parallel writers, zero corrupt lines),
 retry/backoff math (numeric Retry-After, 60 s clamp, jitter), Graph client
 throttling/hardening (mock HTTP), adaptive concurrency, connection-sharding
 validation + end-to-end per-shard routing, sovereign-cloud endpoint/scope/

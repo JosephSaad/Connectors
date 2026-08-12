@@ -101,8 +101,10 @@ therefore backed up on a STRICTER tier than everything else:
   (`IF OBJECT_ID/COL_LENGTH` guards; e.g. 1.0.0 adds
   `dbo.altrata_deadletter.redacted/subject_ids/subject_hashes` with
   defaults). The connector auto-provisions on first touch; running
-  `scripts/sql/create-database.sql` by hand is equivalent (CI proves double-run
-  idempotency). Columns are never dropped or retyped in a minor/patch
+  `scripts/sql/create-database.sql` by hand is equivalent (the test suite pins
+  double-run idempotency offline; the live double-provision job sits in this
+  connector's own `.github/workflows/ci.yml`, inert since the move into the
+  connector monorepo). Columns are never dropped or retyped in a minor/patch
   release — that is what makes rollback safe.
 - **File-state versioning**: JSON/JSONL records tolerate unknown fields on
   read (older binaries ignore new fields; newer binaries default missing

@@ -12,9 +12,13 @@ state file below as sensitive by default; the threat model is
 | 1.0.x | security fixes |
 | < 1.0 (pre-release chassis) | not supported — upgrade; drain the dead-letter queue as part of the upgrade (pre-1.0 records predate DSAR subject stamping, `docs/RUNBOOKS.md#dead-letter-growth`) |
 
-Runtime: .NET 10 (current LTS-track SDK pinned in CI). Dependency inventory
-ships as a CycloneDX SBOM (`altrata-connector.cdx.json`) on every release;
-CodeQL runs on every push.
+Runtime: .NET 10 (current LTS-track SDK pinned in CI). A CycloneDX SBOM
+(`altrata-connector.cdx.json`) on every release and a CodeQL scan on every push
+are both configured, but they live in this connector's own
+`.github/workflows/`, which has been inert since the move into the connector
+monorepo — GitHub executes only the repository-root workflows, and for this
+connector that is `.github/workflows/altrata.yml` (build + test on ubuntu and
+windows, plus the Docker image build).
 
 ## Reporting a vulnerability
 

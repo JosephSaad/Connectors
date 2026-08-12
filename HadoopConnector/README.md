@@ -10,8 +10,14 @@ Microsoft Graph external connection.
 
 Architecture and operational features mirror the Salesforce Copilot Connector
 (same chassis: unified CLI, checkpointed crawls, dead-letter + retry, SQL/HA
-backends, Key Vault, health/metrics/alerting, Windows-service mode) — carried
-here as an independent, self-contained copy.
+backends, Key Vault, health/metrics/alerting, Windows-service mode) — and the
+shared seams are now literally shared: `Connector.Chassis` 1.13.1, consumed as
+a sibling `<ProjectReference>` to `../../../Connector.Chassis/Connector.Chassis.csproj`
+(not a NuGet package — no feed, no version pin) by all five connectors in this
+repository. This connector takes its logging, secret provider, SQL executor /
+SQL gateway, metrics renderer and service-stop seam from the chassis; the
+decision ledger, HA coordinator, SQL state store, alerting, event-log sink, log
+pruner, service host, env flags and circuit breaker remain its own.
 
 ## Why BDH? The cheap-path trade-off
 
@@ -46,14 +52,14 @@ Salesforce API call** — at the cost of freshness and ACL fidelity:
 | `src/HadoopConnector/Content/` | dependency-free content classifier (PII/PCI+Luhn/Secret regex set, timeout-bounded) |
 | `src/HadoopConnector/Config/` | env config, `schema.json` models, filters path, sync state (files or SQL) |
 | `src/HadoopConnector/Commands/` + `Program.cs` | CLI |
-| `src/HadoopConnector/Infrastructure/` | logging, metrics, health endpoint, alerting, Key Vault secrets, env loading, log pruning, Windows-service host, SQL executor, HA coordinator, OpenTelemetry tracing + correlation ids, circuit breakers + degraded mode |
+| `src/HadoopConnector/Infrastructure/` | metrics, health endpoint, alerting, env loading, log pruning, Windows-service host, HA coordinator, OpenTelemetry tracing + correlation ids, circuit breakers + degraded mode (logging, Key Vault secrets, the SQL executor/gateway and the metrics renderer come from `Connector.Chassis`) |
 | `config/` | `schema.json` (BDH object list, field → property map, ACL modes, sensitivity defaults), `filters.json` (**the scale control**), `graph-schema.json` (connection schema), `classification.json` (classifier patterns) |
 | `env/.env.local.example` | every knob, documented |
 | `docs/` | `FILTERS.md`, `HA.md`, `RETRY.md`, `OBSERVABILITY.md`, `SQL_CONTRACT.md`, `SHARDING.md`, `DELETION_SYNC.md`, `TRACING.md`, `RESILIENCE.md`, `CLASSIFICATION.md` |
 | `scripts/` | `install-windows-service.ps1`, `sql/create-database.sql` |
 | `tests/HadoopConnector.Tests/` | xUnit suite (mock HTTP / temp dirs — no network) |
 | `Dockerfile` / `docker-compose.yml` | container image + local SQL/HA dev topology |
-| `.github/workflows/` | `ci.yml`, `codeql.yml`, `release.yml` |
+| `.github/workflows/` | `ci.yml`, `codeql.yml`, `release.yml` — **inert leftovers** from when this connector was its own repository; GitHub executes only the workflows at the repository root, so the live pipeline is `../.github/workflows/hadoop.yml` |
 
 ## Requirements
 
@@ -111,8 +117,8 @@ Review the four config files:
 
 ## Usage
 
-Run from the repository root (`logs/`, `data/`, `config/`, `env/` resolve
-against the current directory):
+Run from the connector directory `HadoopConnector/` (`logs/`, `data/`,
+`config/`, `env/` resolve against the current directory):
 
 ```bash
 dotnet run --project src/HadoopConnector -- guide
@@ -426,17 +432,25 @@ schema-provisioning one-shot + the connector wired to the SQL state backend
 (dev topology — real deployments point at a hardened SQL Server/AG listener):
 
 ```bash
-docker build -t hadoopconnector:latest .
+# from the repository ROOT — the build context must contain Connector.Chassis,
+# which the connector references and a build cannot reach outside its context
+docker build -f HadoopConnector/Dockerfile -t hadoopconnector:latest .
+
+# from HadoopConnector/ — compose sets context: .. for the same reason
 docker compose up --build           # SQL + connector, continuous crawl
 ```
 
-CI (`.github/workflows/ci.yml`) builds + tests on ubuntu and windows (Windows
-Server is the deployment target), provisions the SQL schema twice against a
-live SQL Server 2022 (proving the idempotent re-run path), and validates the
-Docker image build. `release.yml` is test-gated and publishes checksummed
-self-contained bundles (win-x64/linux-x64) plus a GHCR container image on
-`v*` tags; `codeql.yml` runs the security-and-quality suite weekly and on
-every push/PR.
+A single `.dockerignore` at the repository root governs the build (Docker reads
+only the one at the context root).
+
+CI is `.github/workflows/hadoop.yml` **at the repository root** — the workflows
+GitHub executes all live there. It builds + tests the solution on
+ubuntu-latest and windows-latest (Windows Server is the deployment target) and
+builds the Docker image with the repository-root context (not pushed). The
+`ci.yml`, `release.yml` and `codeql.yml` under this connector's own
+`.github/workflows/` are inert leftovers from when it was a separate
+repository: GitHub never runs them, so no release bundle, GHCR image or CodeQL
+scan is produced from them.
 
 ## SQL Server backend & high availability
 
@@ -477,7 +491,8 @@ anchors and the actual `hadoop_connector_*` metric names.
 dotnet test
 ```
 
-981 tests: CLI parsing, checkpoint round-trip/resume, dead-letter write/retry
+983 tests (green on ubuntu-latest and windows-latest): CLI parsing, checkpoint
+round-trip/resume, dead-letter write/retry
 shape and concurrency invariants, dead-letter payload redaction
 (`DEADLETTER_PAYLOAD_MODE`), retry/backoff math (numeric Retry-After,
 60 s clamp, jitter), Graph client throttling/hardening (mock HTTP), Graph

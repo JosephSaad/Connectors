@@ -65,7 +65,8 @@ from the rotation runbooks in `SECURITY.md` if the vault is lost.
 - **Upgrade**: stop service (graceful) → deploy new bundle/MSI over the
   install dir (config/env preserved; MSI MajorUpgrade handles replacement) →
   run `scripts/sql/create-database.sql` on SQL backends (idempotent
-  re-run IS the upgrade path — proven twice against live SQL in CI) → start.
+  re-run IS the upgrade path — idempotency proven by the offline script
+  tests) → start.
   HA: upgrade node-by-node; claims from the stopped node expire and survivors
   carry the crawl.
 - **Rollback**: redeploy the previous bundle. State written by a newer
@@ -82,7 +83,8 @@ from the rotation runbooks in `SECURITY.md` if the vault is lost.
 - **`scripts/sql/create-database.sql` is the single migration vehicle** —
   idempotent by construction (guarded `CREATE`/`ALTER`), re-run on every
   upgrade, validated offline (ScriptDom grammar + idempotency + C#⇄schema
-  drift tests) and live (CI provisions twice).
+  drift tests; the live-SQL provisioning job is not part of the CI that runs
+  on this repository).
 - **Breaking state changes require a major version** and an explicit migration
   note in `CHANGELOG.md` with a tested fallback (documented rebuild path at
   minimum). Item-id shape is pinned forever — see `docs/THREAT_MODEL.md`

@@ -1,13 +1,15 @@
 # Connector.Chassis
 
-The shared infrastructure package the connectors are being consolidated onto —
-one implementation of the foundation that each connector previously carried its
-own copy of.
+The shared infrastructure project the connectors are consolidated onto — one
+implementation of the foundation that each connector previously carried its own
+copy of.
 
-**Nothing in `main` consumes this yet.** This folder and its CI job land first,
-on their own, so the package has a home and a build before any connector is
-changed to depend on it. Each connector in `main` still carries its own copy of
-the foundation; those are replaced one connector at a time, in later changes.
+**All five connectors in `main` consume it**, via a `<ProjectReference>` to
+`../../../Connector.Chassis/Connector.Chassis.csproj`. It is not a NuGet
+package: there is no `PackageReference`, no pinned version and no feed, so a
+clean clone of the repository builds every connector against the chassis
+sources in the tree. Consolidation is deliberately partial — the components
+listed under "Deliberately not shared" stay connector-side.
 
 ## Why
 
@@ -22,7 +24,7 @@ all five connectors. Consolidating means one fix, one review, one place to audit
 | Area | Types |
 |---|---|
 | Lifecycle | `Chassis` (identity), `ServiceHost`, `ServiceStop` |
-| Logging | `Logging`, `EventLogSink`, `LogPruner`, `Tracing` |
+| Logging | `Logging`, `StandardLogDialect`, `EventLogSink`, `LogPruner`, `Tracing` |
 | Resilience | `CircuitBreaker`, `CircuitBreakerRegistry`, `HttpTransport`, `Alerting` |
 | State | `SqlStateStore`, `SqlExecutor`, `SqlGateway`/`ISqlGateway`, `HaCoordinator` |
 | Security | `SecretProvider`, `SecureDirectory`, `DecisionLedger` |
@@ -42,7 +44,7 @@ a connector never widens a shared type.
 Connectors adopt it without touching call sites, by aliasing in the `.csproj`:
 
 ```xml
-<PackageReference Include="Connector.Chassis" Version="1.11.0" />
+<ProjectReference Include="../../../Connector.Chassis/Connector.Chassis.csproj" />
 <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
 ```
 
@@ -50,32 +52,40 @@ Connectors adopt it without touching call sites, by aliasing in the `.csproj`:
 
 Consolidation stopped where the connectors had diverged into different-but-correct
 implementations rather than duplicates — forcing those together would mean
-rewriting working, tested behaviour. Clarizen keeps its own `DecisionLedger`
-(already SHA-256 hash-chained and tamper-evident), `CircuitBreaker`,
-`HaCoordinator` and `DeadLetterRedactor`. See `CONSOLIDATION.md` for the full
-shared surface and the accepted divergences.
+rewriting working, tested behaviour. `DecisionLedger`, `HaCoordinator`,
+`SqlStateStore`, `Alerting`, `EventLogSink`, `LogPruner`, `ServiceHost`,
+`EnvFlags` and `CircuitBreaker` are therefore outside the consolidated surface —
+the chassis carries them, but the per-type migrations left them connector-side.
+Salesforce also keeps
+its own CPython-style logging (bridged in via `Chassis.LoggerFactory`) and
+Altrata its own `SecretProvider`. See `CONSOLIDATION.md` for the full shared
+surface and the accepted divergences.
 
 ## Build
 
 ```bash
 dotnet build Connector.Chassis/Connector.Chassis.csproj -c Release
-dotnet pack  Connector.Chassis/Connector.Chassis.csproj -c Release -o artifacts
 ```
 
-CI (`.github/workflows/chassis.yml`) builds it on Linux and Windows — Windows
-Server is the primary deployment target and the chassis carries the
-Windows-specific surface — then packs it and publishes the `.nupkg` as a build
-artifact.
+CI (`.github/workflows/chassis.yml`, at the *repository* root — the only place
+GitHub executes workflows from in this monorepo) builds it on Linux and Windows.
+Windows Server is the primary deployment target and the chassis carries the
+Windows-specific surface, so it has to compile there and not only on the Linux
+CI and dev machines. Connectors pick the chassis up from the tree by project
+reference, so nothing needs publishing for them to build.
 
 ## Status
 
-Version **1.11.0**. Verified green on the three connectors migrated so far, on
-their branches, with `/metrics` output byte-identical to before migration:
+Version **1.13.1**. All five connectors are migrated and green on both
+`ubuntu-latest` and `windows-latest`, with `/metrics` output byte-identical to
+before migration:
 
-| Connector | Tests | Branch |
-|---|---|---|
-| Seismic | 1017 | `seismic-connector` |
-| Clarizen | 877 | `clarizen-connector` |
-| Hadoop | 981 | `hadoop-connector` |
+| Connector | Tests |
+|---|---|
+| Salesforce | 1206 |
+| Seismic | 1017 |
+| Hadoop | 983 |
+| Clarizen | 878 |
+| Altrata | 743 |
 
-Altrata and Salesforce are not migrated yet.
+Total **4,827**.

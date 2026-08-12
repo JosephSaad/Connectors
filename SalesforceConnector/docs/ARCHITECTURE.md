@@ -70,7 +70,9 @@ flowchart LR
 
 ## 2. Components & responsibilities
 
-Namespaces map 1:1 to `src/SalesforceCopilotConnector/` folders.
+Namespaces map 1:1 to `src/SalesforceCopilotConnector/` folders; rows marked
+*shared chassis* live in the repository-root `Connector.Chassis/` project, which
+this connector consumes by `<ProjectReference>`.
 
 | Area | Namespace / key files | Responsibility |
 |---|---|---|
@@ -87,8 +89,8 @@ Namespaces map 1:1 to `src/SalesforceCopilotConnector/` folders.
 | State | `Config/SyncState.cs` (files), `Config/SqlStateStore.cs` (SQL) | last-sync timestamp, per-object checkpoints, dead-letter queue |
 | HA | `Infrastructure/HaCoordinator.cs` | crawl open/join, claim/heartbeat/complete, close ([SQL_CONTRACT.md](SQL_CONTRACT.md)) |
 | SQL plumbing | `Infrastructure/SqlExecutor.cs` | hardened `SqlConnection` (force `Encrypt`, optional Managed Identity), transient-fault retry (`SQL_MAX_RETRIES`) |
-| Secrets | `Infrastructure/SecretProvider.cs` | `SECRET_*` from env or Key Vault (`USE_KEY_VAULT`) |
-| Hosting | `Infrastructure/ServiceHost.cs`, `ServiceStop.cs` | Windows-service (SCM) lifetime + graceful stop |
+| Secrets | `Connector.Chassis/SecretProvider.cs` (shared chassis) | `SECRET_*` from env or Key Vault (`USE_KEY_VAULT`) |
+| Hosting | `Infrastructure/ServiceHost.cs`, `Connector.Chassis/ServiceStop.cs` (shared chassis) | Windows-service (SCM) lifetime + graceful stop |
 | Ops | `Infrastructure/Logging.cs` (+ `LOG_FORMAT`), `LogPruner.cs` (`LOG_RETENTION_DAYS`), `Dashboard.cs` | logging, run-dir pruning, live TUI |
 
 > Observability seams — `/health`, `/ready`, `/metrics` (`HEALTH_PORT`) and
@@ -296,7 +298,7 @@ parallel object workers started by `Graph/Ingest.cs`):
 | Change the search schema | Edit `config/graph-schema.json` (Graph external-connection schema). Reprovision the connection. |
 | Change result rendering | Edit `config/template.json` (Adaptive Card). |
 | Swap the state backend | `USE_SQL_SERVER` toggles `Config/SqlStateStore.cs` + `Graph/SqlServerIdentityStore.cs`. New backends implement `Graph/IIdentityStore.cs` and the `SyncState` surface. |
-| Source secrets differently | `Infrastructure/SecretProvider.GetSecret` (env → Key Vault via `USE_KEY_VAULT`). |
+| Source secrets differently | `Connector.Chassis.SecretProvider.GetSecret` (env → Key Vault via `USE_KEY_VAULT`) — shared across connectors, so changes land everywhere. |
 | Harden/redirect SQL | `Infrastructure/SqlExecutor.cs` (Managed Identity, retry policy). |
 | Scale past one connection | `GRAPH_CONNECTION_SHARDS` — per-connection schemas ([CAPACITY.md](CAPACITY.md) §6). |
 | Add an ACL principal type | Add a handler under `AclEngine/` and wire it into `Resolver.cs` / `PrincipalMapper.cs`. |
