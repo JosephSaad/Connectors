@@ -90,24 +90,26 @@ jobs:
             echo "::endgroup::"
           done
 
-      # upload: never — the SARIF is NOT sent to the code-scanning dashboard.
+      # Results go BOTH to the code-scanning dashboard and to a build artifact.
       #
-      # This repository is private and owned by a personal account, so GitHub
-      # rejects the upload outright: "Advanced security has not been purchased."
-      # Code scanning is free only on public repositories and otherwise needs a
-      # paid Code Security licence. Everything up to the upload works, so rather
-      # than lose the analysis (or leave a permanently red check), the results
-      # are written to disk and published as a build artifact instead.
+      # The dashboard is the one that matters: it is the only place that tracks
+      # alert STATE across runs, so a finding that gets fixed is recorded as
+      # fixed rather than just ceasing to appear. `output:` additionally writes
+      # the SARIF to disk, which the two steps below turn into a downloadable
+      # artifact and a job-summary table — useful for anyone triaging without
+      # dashboard access, and a copy that survives independently of it.
       #
-      # Trade-off: no inline PR annotations and no alert state tracking — a
-      # finding fixed in one run simply stops appearing, nothing records that it
-      # was ever there. Switch this to the default (drop `upload`/`output` and
-      # the two steps below) the day a licence exists.
+      # An earlier revision used `upload: never` because the upload was being
+      # rejected ("Advanced security has not been purchased") while the repo's
+      # security settings were in a different state. That is no longer the case.
+      # If the upload starts failing again, the cause is repository security
+      # settings or licensing, NOT this workflow — the analysis itself completes
+      # either way, as the artifact proves.
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
         with:
           category: "/language:csharp"
-          upload: never
+          upload: always
           output: sarif-results
 
       # Without this the artifact is a file nobody opens. Rendering the counts
@@ -125,8 +127,8 @@ jobs:
           {
             echo "## CodeQL (csharp)"
             echo
-            echo "Results are in the **codeql-sarif** artifact; this run does not"
-            echo "publish to the Security tab (no Code Security licence)."
+            echo "Published to the Security tab; the same SARIF is attached as the"
+            echo "**codeql-sarif** artifact."
             echo
           } >> "$GITHUB_STEP_SUMMARY"
           for f in "${files[@]}"; do
