@@ -14,4 +14,17 @@
     <ProjectReference Include="..\..\src\HadoopConnector\HadoopConnector.csproj" />
   </ItemGroup>
 
+
+  <!-- Chassis migration aliases (mirror the connector): migrated types resolve
+       to the chassis by simple name so this tool's call sites are untouched. -->
+  <ItemGroup>
+    <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
+    <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />
+    <Using Include="Connector.Chassis.Logging" Alias="Logging" />
+    <Using Include="Connector.Chassis.IAppLogger" Alias="IAppLogger" />
+    <Using Include="Connector.Chassis.LogLevel" Alias="LogLevel" />
+    <Using Include="Connector.Chassis.ISqlGateway" Alias="ISqlGateway" />
+    <Using Include="Connector.Chassis.SqlGateway" Alias="SqlExecutor" />
+  </ItemGroup>
+
 </Project>

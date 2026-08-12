@@ -5,8 +5,8 @@
 // on /metrics. No external dependencies.
 
 using System.Collections.Concurrent;
-using System.Globalization;
 using System.Text;
+using static Connector.Chassis.MetricsRenderer;
 
 namespace HadoopConnector.Infrastructure;
 
@@ -149,9 +149,12 @@ public static class Metrics
         RecordsFilteredByStage.Clear();
     }
 
-    private const string Prefix = "hadoop_connector_";
-
-    /// <summary>Prometheus text exposition format v0.0.4.</summary>
+    /// <summary>
+    /// Prometheus text exposition format v0.0.4. Metric names are prefixed
+    /// <c>hadoop_connector_</c> and the rendering mechanism is the shared chassis
+    /// <see cref="Connector.Chassis.MetricsRenderer"/>; label values are NOT
+    /// escaped and labelled families are omitted when empty.
+    /// </summary>
     public static string RenderPrometheus()
     {
         var sb = new StringBuilder(2048);
@@ -182,50 +185,19 @@ public static class Metrics
         Breakers.AppendMetrics(sb);
 
         // Per-stage filter accounting (only present once something is filtered).
-        LabelledCounter(sb, "records_filtered_total",
-            "BDH rows removed by the filter layer, by stage.", "stage", RecordsFilteredByStage);
+        if (!RecordsFilteredByStage.IsEmpty)
+            LabeledCounter(sb, "records_filtered_total",
+                "BDH rows removed by the filter layer, by stage.", "stage", RecordsFilteredByStage);
 
         // Labelled classification counters (only present once something is
         // classified/detected — keeps the exposition clean when off).
-        LabelledCounter(sb, "items_classified_total",
-            "Items classified, by sensitivity label.", "label", ItemsClassified);
-        LabelledCounter(sb, "sensitive_detections_total",
-            "Sensitive-data detections, by category.", "category", SensitiveDetections);
+        if (!ItemsClassified.IsEmpty)
+            LabeledCounter(sb, "items_classified_total",
+                "Items classified, by sensitivity label.", "label", ItemsClassified);
+        if (!SensitiveDetections.IsEmpty)
+            LabeledCounter(sb, "sensitive_detections_total",
+                "Sensitive-data detections, by category.", "category", SensitiveDetections);
 
         return sb.ToString();
-    }
-
-    /// <summary>Render a labelled counter family (one line per label value).</summary>
-    private static void LabelledCounter(
-        StringBuilder sb, string name, string help, string labelKey,
-        ConcurrentDictionary<string, long> values)
-    {
-        if (values.IsEmpty)
-            return;
-        var full = Prefix + name;
-        sb.Append("# HELP ").Append(full).Append(' ').Append(help).Append('\n');
-        sb.Append("# TYPE ").Append(full).Append(" counter\n");
-        foreach (var kv in values.OrderBy(k => k.Key, StringComparer.Ordinal))
-        {
-            sb.Append(full).Append('{').Append(labelKey).Append("=\"").Append(kv.Key).Append("\"} ")
-              .Append(kv.Value.ToString(CultureInfo.InvariantCulture)).Append('\n');
-        }
-    }
-
-    private static void Counter(StringBuilder sb, string name, string help, long value) =>
-        Metric(sb, name, help, "counter", value.ToString(CultureInfo.InvariantCulture));
-
-    private static void Gauge(StringBuilder sb, string name, string help, long value) =>
-        Metric(sb, name, help, "gauge", value.ToString(CultureInfo.InvariantCulture));
-
-    private static void GaugeDouble(StringBuilder sb, string name, string help, double value) =>
-        Metric(sb, name, help, "gauge", value.ToString("0.###", CultureInfo.InvariantCulture));
-
-    private static void Metric(StringBuilder sb, string name, string help, string type, string value)
-    {
-        var full = Prefix + name;
-        sb.Append("# HELP ").Append(full).Append(' ').Append(help).Append('\n');
-        sb.Append("# TYPE ").Append(full).Append(' ').Append(type).Append('\n');
-        sb.Append(full).Append(' ').Append(value).Append('\n');
     }
 }

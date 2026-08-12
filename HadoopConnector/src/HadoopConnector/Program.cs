@@ -35,10 +35,28 @@ public static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        WireChassisLogging();
+
         if (WindowsServiceHelpers.IsWindowsService())
             return await ServiceHost.RunAsync(args, ExecuteAsync);
 
         return await ExecuteAsync(args);
+    }
+
+    /// <summary>Wire the shared-chassis logging identity and hooks. Logging lives
+    /// in Connector.Chassis and cannot reference connector types, so the host
+    /// supplies its run-dir hardening, Event Log mirror and correlation source
+    /// and selects the standard (run-directory) text/json format. Mirrored by the
+    /// test bootstrap so tests and production behave identically.</summary>
+    private static void WireChassisLogging()
+    {
+        Connector.Chassis.Chassis.Init(
+            new Connector.Chassis.ChassisIdentity(
+                "hadoop_connector", EventLogSink.SourceName, "hadoop_connector"));
+        Connector.Chassis.Chassis.CorrelationIdProvider = () => CorrelationContext.Current;
+        Logging.HardenDirectoryHook = SecureDirectories.CreateHardened;
+        Logging.EventLogMirrorHook = EventLogSink.Mirror;
+        Logging.UseStandardMode();
     }
 
     /// <summary>Parse and run one CLI command; returns the process exit code.</summary>

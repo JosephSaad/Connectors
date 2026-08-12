@@ -34,4 +34,17 @@
     <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+
+  <!-- Chassis migration aliases: migrated types resolve to the chassis by simple
+       name so call sites are untouched; not-yet-migrated local types don't collide. -->
+  <ItemGroup>
+    <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
+    <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />
+    <Using Include="Connector.Chassis.Logging" Alias="Logging" />
+    <Using Include="Connector.Chassis.IAppLogger" Alias="IAppLogger" />
+    <Using Include="Connector.Chassis.LogLevel" Alias="LogLevel" />
+    <Using Include="Connector.Chassis.ISqlGateway" Alias="ISqlGateway" />
+    <Using Include="Connector.Chassis.SqlGateway" Alias="SqlExecutor" />
+  </ItemGroup>
+
 </Project>
