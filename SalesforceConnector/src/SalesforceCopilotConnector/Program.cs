@@ -55,6 +55,8 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        WireChassis();
+
         // Started by the Windows Service Control Manager → run the requested
         // command under the SCM-aware host (see Infrastructure/ServiceHost.cs).
         // Always false when launched from a console or on non-Windows platforms.
@@ -62,6 +64,29 @@ public static class Program
             return await ServiceHost.RunAsync(args, ExecuteAsync);
 
         return await ExecuteAsync(args);
+    }
+
+    /// <summary>
+    /// Install this connector's identity and logging into the shared chassis.
+    /// </summary>
+    /// <remarks>
+    /// Must run before the first chassis type is touched: chassis components name
+    /// their loggers from <c>Chassis.Identity</c> at type-load, so a later call
+    /// would be ignored.
+    ///
+    /// The logger factory is the important part. Unlike the other connectors, this
+    /// one keeps its own handler-based logging (a port of CPython's logging
+    /// module), so chassis components are pointed back at it through
+    /// ChassisLoggerAdapter. Without that, their log lines would go to the
+    /// chassis's own sinks, which nothing here reads.
+    /// </remarks>
+    internal static void WireChassis()
+    {
+        Connector.Chassis.Chassis.Init(
+            new Connector.Chassis.ChassisIdentity(
+                "salesforce_connector", EventLogSink.SourceName, "salesforce_connector"));
+        Connector.Chassis.Chassis.LoggerFactory =
+            name => new ChassisLoggerAdapter(name, Logging.GetLogger(name));
     }
 
     /// <summary>Parse and run one CLI command; returns the process exit code.</summary>
