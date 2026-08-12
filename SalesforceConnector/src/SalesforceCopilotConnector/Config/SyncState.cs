@@ -34,6 +34,63 @@ public static class SyncState
 
     private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
 
+    /// <summary>
+    /// Read a state file with a share mode that tolerates a concurrent writer.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="File.ReadAllText(string, System.Text.Encoding)"/> opens with
+    /// <see cref="FileShare.Read"/>, which does not permit another handle to hold
+    /// write access. Windows enforces share modes and POSIX does not, so on
+    /// Windows a read that overlaps another node's checkpoint write throws
+    /// <see cref="IOException"/> and takes the crawl down with it — while the
+    /// same code is silent on the macOS and Linux machines it is developed on.
+    ///
+    /// <see cref="FileShare.Delete"/> is part of the contract, not incidental:
+    /// <see cref="WriteAllTextAtomic"/> publishes by renaming over this path, and
+    /// Windows refuses to replace a file that an open handle has not shared
+    /// delete access to.
+    /// </remarks>
+    private static string ReadAllTextShared(string path)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream, Utf8NoBom);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>
+    /// Write a state file so a concurrent reader sees either the whole previous
+    /// version or the whole new one, never a partial write.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="File.WriteAllText(string, string, System.Text.Encoding)"/>
+    /// truncates in place, so a reader that opens mid-write gets a torn file. For
+    /// a checkpoint that is worse than the sharing violation it replaces: torn
+    /// JSON is caught as <see cref="System.Text.Json.JsonException"/> and read as
+    /// "no checkpoint", so instead of failing loudly the crawl silently restarts
+    /// from the beginning and re-ingests everything. Staging to a sibling file and
+    /// renaming over the target makes the swap atomic.
+    ///
+    /// The temp name carries a GUID because two nodes may publish at once; a
+    /// shared staging name would let them corrupt each other, which is the very
+    /// failure this is here to prevent.
+    /// </remarks>
+    private static void WriteAllTextAtomic(string path, string contents)
+    {
+        var temp = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temp, contents, Utf8NoBom);
+            File.Move(temp, path, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(temp); } catch { /* best effort: never mask the real error */ }
+            throw;
+        }
+    }
+
     /// <summary>State directory (Python: ``LOGS_DIR``). Settable so tests can redirect state files.</summary>
     public static string LogsDir { get; set; } = Path.Combine(Directory.GetCurrentDirectory(), "logs");
 
@@ -92,7 +149,7 @@ public static class SyncState
         }
         try
         {
-            var data = JsonNode.Parse(File.ReadAllText(SyncStateFile, Utf8NoBom))!.AsObject();
+            var data = JsonNode.Parse(ReadAllTextShared(SyncStateFile))!.AsObject();
             var ts = data.TryGetPropertyValue(connectorId, out var tsNode)
                 && tsNode is not null
                 && tsNode.GetValueKind() == JsonValueKind.String
@@ -123,7 +180,7 @@ public static class SyncState
         var data = new JsonObject();
         try
         {
-            data = JsonNode.Parse(File.ReadAllText(SyncStateFile, Utf8NoBom))!.AsObject();
+            data = JsonNode.Parse(ReadAllTextShared(SyncStateFile))!.AsObject();
         }
         catch (Exception exc) when (
             exc is FileNotFoundException or DirectoryNotFoundException or JsonException)
@@ -132,7 +189,7 @@ public static class SyncState
         }
         data[connectorId] = IsoFormat(timestamp);
         SecureDirectory.EnsureOwnerOnly(LogsDir);
-        File.WriteAllText(SyncStateFile, PyJson.Dumps(data, indent: 2), Utf8NoBom);
+        WriteAllTextAtomic(SyncStateFile, PyJson.Dumps(data, indent: 2));
         Logger.Info($"Saved last sync timestamp: {IsoFormat(timestamp)}");
     }
 
@@ -159,7 +216,7 @@ public static class SyncState
         var path = CheckpointPath(connectorId);
         try
         {
-            var data = JsonNode.Parse(File.ReadAllText(path, Utf8NoBom));
+            var data = JsonNode.Parse(ReadAllTextShared(path));
             if (data is JsonObject dataObject && dataObject.ContainsKey("completed"))
             {
                 return dataObject;
@@ -200,7 +257,7 @@ public static class SyncState
             };
             try
             {
-                var existing = JsonNode.Parse(File.ReadAllText(path, Utf8NoBom));
+                var existing = JsonNode.Parse(ReadAllTextShared(path));
                 if (existing is JsonObject existingObject)
                 {
                     var existingSince = existingObject.TryGetPropertyValue("since", out var sinceNode)
@@ -225,7 +282,7 @@ public static class SyncState
                 : 0;
             completed[objectType] = Math.Max(current, chunkIndex);
             SecureDirectory.EnsureOwnerOnly(LogsDir);
-            File.WriteAllText(path, PyJson.Dumps(data, indent: 2), Utf8NoBom);
+            WriteAllTextAtomic(path, PyJson.Dumps(data, indent: 2));
         }
     }
 
