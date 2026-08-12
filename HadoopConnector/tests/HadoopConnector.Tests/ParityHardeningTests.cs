@@ -422,6 +422,79 @@ public class DeadLetterConcurrencyTests
             Assert.StartsWith(objectType + "_", itemId);
         }
     }
+
+    /// <summary>
+    /// Reading the checkpoint WHILE another node writes it must neither throw nor
+    /// lose the checkpoint.
+    ///
+    /// Two distinct defects sit behind this, and the second is the dangerous one.
+    ///
+    /// A reader takes its own handle, and <c>File.ReadAllText</c> asks for
+    /// <c>FileShare.Read</c>, which refuses to coexist with a writer's write
+    /// access. Windows enforces that and POSIX does not, so an overlapping read
+    /// throws <c>IOException</c> on Windows Server — the deployment target — and
+    /// never on the macOS and Linux machines this is written on. That is loud.
+    ///
+    /// The quiet one: <c>File.WriteAllText</c> truncates in place, so a reader can
+    /// observe a half-written file. Torn JSON is swallowed as
+    /// <c>JsonException</c> and reported as "no checkpoint" — so a resume silently
+    /// restarts the crawl from the beginning and re-ingests everything, with
+    /// nothing in the logs to say why. This test therefore asserts not only that
+    /// the reader never throws, but that it never sees the checkpoint vanish.
+    /// </summary>
+    [Fact]
+    public async Task ConcurrentCheckpointWriteAndRead_ReaderNeverThrowsAndNeverLosesTheCheckpoint()
+    {
+        using var scope = new SyncStateScope();
+        const string Since = "2026-01-01T00:00:00Z";
+
+        // Establish a checkpoint first: from here on, a null read can only mean
+        // the reader caught the file mid-truncate.
+        SyncState.WriteCheckpoint(CheckpointConnector, Since, "Task", 0);
+        Assert.NotNull(SyncState.ReadCheckpoint(CheckpointConnector));
+
+        var stop = false;
+        var readerErrors = 0;
+        var vanished = 0;
+
+        var reader = Task.Run(() =>
+        {
+            while (!Volatile.Read(ref stop))
+            {
+                try
+                {
+                    if (SyncState.ReadCheckpoint(CheckpointConnector) is null)
+                    {
+                        Interlocked.Increment(ref vanished);
+                    }
+                }
+                catch
+                {
+                    Interlocked.Increment(ref readerErrors);
+                }
+            }
+        });
+
+        for (var i = 1; i <= 300; i++)
+        {
+            SyncState.WriteCheckpoint(CheckpointConnector, Since, "Task", i);
+        }
+
+        Volatile.Write(ref stop, true);
+        await reader.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Equal(0, readerErrors);
+        Assert.Equal(0, vanished);
+
+        // And the surviving checkpoint is the newest one, not a resurrected older
+        // copy left behind by a lost race.
+        var final = SyncState.ReadCheckpoint(CheckpointConnector);
+        Assert.NotNull(final);
+        Assert.Equal(300, final!["completed"]!["Task"]!.GetValue<int>());
+    }
+
+    private const string CheckpointConnector = "CheckpointRaceConnector";
+
 }
 
 public class LogGatingTests : IDisposable
