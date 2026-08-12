@@ -1,0 +1,109 @@
+# Dependabot configuration — REPOSITORY ROOT
+# ------------------------------------------
+# GitHub reads this file only at .github/dependabot.yml in the repository root.
+# The previous config lived at SalesforceConnector/.github/dependabot.yml, which
+# is where the monorepo consolidation moved it, and so nothing has been scanned
+# since — no NuGet updates, no base-image updates, no action updates, on any of
+# the five connectors. The four non-Salesforce connectors never had a config at
+# all. This file restores scanning for the whole repository.
+#
+# Directory paths below are repository-root-relative and must stay in step with
+# the project layout: 13 project files, five Dockerfiles, one live workflows
+# directory. A path that no longer resolves is silently skipped, which is the
+# failure mode this file exists to correct — so when a project moves, move its
+# entry with it.
+
+version: 2
+
+updates:
+  # ---- NuGet: every project in the monorepo ---------------------------------
+  # One entry covering all 13 projects rather than one entry each, so a package
+  # shared across connectors moves in a SINGLE pull request. Version alignment
+  # across the fleet matters now that all five build against one chassis; split
+  # entries would drift them apart one PR at a time.
+  - package-ecosystem: "nuget"
+    directories:
+      - "/Connector.Chassis"
+      - "/AltrataConnector/src/AltrataConnector"
+      - "/AltrataConnector/tests/AltrataConnector.Tests"
+      - "/ClarizenConnector/src/ClarizenConnector"
+      - "/ClarizenConnector/tests/ClarizenConnector.Tests"
+      - "/HadoopConnector/src/HadoopConnector"
+      - "/HadoopConnector/tests/HadoopConnector.Tests"
+      - "/HadoopConnector/tools/StressHarness"
+      - "/SalesforceConnector/src/SalesforceCopilotConnector"
+      - "/SalesforceConnector/tests/SalesforceCopilotConnector.Tests"
+      - "/SalesforceConnector/tools/StressHarness"
+      - "/SeismicConnector/src/SeismicConnector"
+      - "/SeismicConnector/tests/SeismicConnector.Tests"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "nuget"
+    commit-message:
+      prefix: "nuget"
+    groups:
+      # Minor and patch bumps arrive as one reviewable PR. Majors are
+      # deliberately left ungrouped so each gets its own PR and its own CI run.
+      dotnet:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ---- Docker: the connector base images ------------------------------------
+  # Each connector's Dockerfile pins mcr.microsoft.com/dotnet/{sdk,runtime}:10.0.
+  # These carry OS-level CVE fixes, so they are the security-relevant half of
+  # this file even though they change less often than packages.
+  - package-ecosystem: "docker"
+    directories:
+      - "/AltrataConnector"
+      - "/ClarizenConnector"
+      - "/HadoopConnector"
+      - "/SalesforceConnector"
+      - "/SeismicConnector"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "docker"
+    groups:
+      docker-base-images:
+        patterns:
+          - "*"
+
+  # ---- GitHub Actions -------------------------------------------------------
+  # Only /.github/workflows executes. The 15 files under
+  # <Connector>/.github/workflows/ are inert leftovers from when each connector
+  # was its own repository and are deliberately NOT scanned — bumping an action
+  # in a workflow that never runs is noise, and is what made the last three
+  # Dependabot PRs unmergeable.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"

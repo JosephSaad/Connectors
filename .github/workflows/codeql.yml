@@ -1,0 +1,165 @@
+# CodeQL — REPOSITORY ROOT
+# ------------------------
+# GitHub Actions only executes workflows from /.github/workflows. Each connector
+# carries its own <Connector>/.github/workflows/codeql.yml, left over from when
+# it was a separate repository, and none of them has ever run — so the code
+# scanning the fleet appeared to have was not happening at all. This is the one
+# that runs.
+#
+# Difference from those copies: they build with a bare `dotnet restore && dotnet
+# build`, which worked when the connector sat at the repository root and had a
+# single solution beside it. This repository has NO root solution and five
+# connector solutions one level down, so the build step iterates them. C# is a
+# compiled language and CodeQL only sees code the compiler actually processes —
+# a build that silently covers one solution would report a clean scan for the
+# other four.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Mondays 06:23 UTC (offset off the hour to avoid the scheduler rush).
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (csharp)
+    runs-on: ubuntu-latest
+    # Five solutions built under CodeQL's compiler tracing, then analysed with
+    # the security-and-quality suite over the whole fleet. Well clear of the
+    # observed runtime, but a scan that is killed mid-analysis uploads nothing.
+    timeout-minutes: 120
+
+    permissions:
+      # Kept at write so restoring the dashboard upload needs no permission
+      # change — see the analyze step for why results go to an artifact today.
+      security-events: write
+      # Needed by the workflow to read the repo (and Actions metadata).
+      actions: read
+      contents: read
+
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: csharp
+          # Broader ruleset alongside Dependabot's dependency scanning.
+          queries: security-and-quality
+
+      # Every solution, so every connector's code reaches the database. All five
+      # reference Connector.Chassis; MSBuild compiles it once and the rest see it
+      # up to date, which is why the chassis is not built separately here.
+      #
+      # No `set -e` needed (the shell is `bash -e` by default) but the failure has
+      # to be loud: a solution that fails to build is silently absent from the
+      # scan, not an error CodeQL reports.
+      - name: Build all solutions
+        run: |
+          shopt -s nullglob
+          solutions=(*/*.sln)
+          if [ ${#solutions[@]} -eq 0 ]; then
+            echo "::error::No solutions found — CodeQL would scan nothing."
+            exit 1
+          fi
+          echo "Building ${#solutions[@]} solutions: ${solutions[*]}"
+          for sln in "${solutions[@]}"; do
+            echo "::group::build $sln"
+            dotnet build "$sln" -c Release
+            echo "::endgroup::"
+          done
+
+      # Results go BOTH to the code-scanning dashboard and to a build artifact.
+      #
+      # The dashboard is the one that matters: it is the only place that tracks
+      # alert STATE across runs, so a finding that gets fixed is recorded as
+      # fixed rather than just ceasing to appear. `output:` additionally writes
+      # the SARIF to disk, which the two steps below turn into a downloadable
+      # artifact and a job-summary table — useful for anyone triaging without
+      # dashboard access, and a copy that survives independently of it.
+      #
+      # An earlier revision used `upload: never` because the upload was being
+      # rejected ("Advanced security has not been purchased") while the repo's
+      # security settings were in a different state. That is no longer the case.
+      # If the upload starts failing again, the cause is repository security
+      # settings or licensing, NOT this workflow — the analysis itself completes
+      # either way, as the artifact proves.
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:csharp"
+          upload: always
+          output: sarif-results
+
+      # Without this the artifact is a file nobody opens. Rendering the counts
+      # into the job summary puts the findings in front of a reviewer who has
+      # not downloaded anything.
+      - name: Summarise findings
+        if: always()
+        run: |
+          shopt -s nullglob
+          files=(sarif-results/*.sarif)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No SARIF produced — the analysis did not complete." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## CodeQL (csharp)"
+            echo
+            echo "Published to the Security tab; the same SARIF is attached as the"
+            echo "**codeql-sarif** artifact."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          for f in "${files[@]}"; do
+            total=$(jq '[.runs[].results[]] | length' "$f")
+            {
+              echo "### \`$(basename "$f")\` — $total result(s)"
+              echo
+              echo "| Severity | Count |"
+              echo "|---|--:|"
+              jq -r '[.runs[].results[]] | group_by(.level // "warning")
+                     | map({k: (.[0].level // "warning"), n: length})
+                     | sort_by(-.n)[] | "| \(.k) | \(.n) |"' "$f"
+              echo
+              echo "<details><summary>Top rules</summary>"
+              echo
+              echo "| Rule | Count |"
+              echo "|---|--:|"
+              jq -r '[.runs[].results[]] | group_by(.ruleId)
+                     | map({k: .[0].ruleId, n: length})
+                     | sort_by(-.n) | .[0:20][] | "| `\(.k)` | \(.n) |"' "$f"
+              echo
+              echo "</details>"
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload SARIF
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: codeql-sarif
+          path: sarif-results/
+          if-no-files-found: error
+          retention-days: 30
