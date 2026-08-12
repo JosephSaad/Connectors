@@ -25,7 +25,25 @@ public static class ServiceStop
     public static CancellationToken Token => _cts.Token;
 
     /// <summary>Request a graceful stop (idempotent).</summary>
-    public static void Request() => _cts.Cancel();
+    /// <remarks>
+    /// Never throws. <see cref="Reset"/> disposes the previous source, so a stop
+    /// arriving just after a reset — an SCM stop racing teardown, or a test that
+    /// re-arms while a stop is in flight — would otherwise surface
+    /// <see cref="ObjectDisposedException"/> on the shutdown path, where there is
+    /// nothing useful to do with it. An already-disposed source means the stop it
+    /// signalled has been handled, so ignoring it is correct rather than merely safe.
+    /// </remarks>
+    public static void Request()
+    {
+        try
+        {
+            _cts.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Already torn down — the stop this would have signalled is moot.
+        }
+    }
 
     /// <summary>Test seam: re-arm the signal between test cases.</summary>
     internal static void Reset()

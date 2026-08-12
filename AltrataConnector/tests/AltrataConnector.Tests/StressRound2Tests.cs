@@ -220,14 +220,14 @@ internal sealed class R2Rig : IDisposable
             GraphBreaker = new CircuitBreaker("graph", new CircuitBreakerOptions { Enabled = false }),
             ApiBreaker = new CircuitBreaker("api", new CircuitBreakerOptions { Enabled = false }),
         };
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
     }
 
     public void Dispose()
     {
         Identity.Dispose();
         Environment.SetEnvironmentVariable("LOGS_DIR", _previousLogsDir);
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
     }
 }
 
@@ -898,7 +898,7 @@ public class SeatShardChurnStressTests
         var previousLogs = Environment.GetEnvironmentVariable("LOGS_DIR");
         Environment.SetEnvironmentVariable("LOGS_DIR", Path.Combine(root, "logs"));
         Environment.SetEnvironmentVariable("GRAPH_CONNECTION_SHARDS", null);
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
         var shards = new List<ShardRig>();
         try
         {
@@ -1017,7 +1017,7 @@ public class SeatShardChurnStressTests
             foreach (var shard in shards)
                 shard.Identity.Dispose();
             Environment.SetEnvironmentVariable("LOGS_DIR", previousLogs);
-            ServiceStop.ResetForTests();
+            ServiceStop.Reset();
         }
     }
 }

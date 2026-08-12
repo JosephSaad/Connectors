@@ -59,12 +59,12 @@ public class DeadLetterPolicyTests : IDisposable
 
 public class DeadLetterProtectionTests : IDisposable
 {
-    public DeadLetterProtectionTests() => ServiceStop.ResetForTests();
+    public DeadLetterProtectionTests() => ServiceStop.Reset();
 
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(DeadLetterPolicy.EnvVar, null);
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
     }
 
     private const string PiiPersons = """

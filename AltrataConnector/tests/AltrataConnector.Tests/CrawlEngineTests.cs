@@ -68,7 +68,7 @@ public sealed class CrawlHarness : IDisposable
 
         Engine = new CrawlEngine(Config, Graph, State, Identity, Seats, Alerts,
             ha: null, decisions: Decisions, contentGate: gate);
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
     }
 
     public void WriteSeats(params string[] users) =>
@@ -78,7 +78,7 @@ public sealed class CrawlHarness : IDisposable
     {
         Identity.Dispose();
         Environment.SetEnvironmentVariable("LOGS_DIR", _previousLogsDir);
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
     }
 }
 

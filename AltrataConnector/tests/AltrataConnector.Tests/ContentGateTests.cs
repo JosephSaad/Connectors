@@ -586,12 +586,12 @@ public class ContentGateStageTests
 
 public class ContentGateCrawlTests : IDisposable
 {
-    public ContentGateCrawlTests() => ServiceStop.ResetForTests();
+    public ContentGateCrawlTests() => ServiceStop.Reset();
 
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(DeadLetterPolicy.EnvVar, null);
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
     }
 
     /// <summary>A poisoned profile: the injection rides in a free-text field
@@ -789,8 +789,8 @@ public class ContentGateCrawlTests : IDisposable
 
 public class ContentGateDefaultsOffTests : IDisposable
 {
-    public ContentGateDefaultsOffTests() => ServiceStop.ResetForTests();
-    public void Dispose() => ServiceStop.ResetForTests();
+    public ContentGateDefaultsOffTests() => ServiceStop.Reset();
+    public void Dispose() => ServiceStop.Reset();
 
     private const string Persons = """
         [{"id":"P1","person_name":"Ada Lovelace","email":"ada@contoso.com","employer":"Analytical Engines",

@@ -630,7 +630,7 @@ public class DeadLetterRedactionConcurrencyStressTests : IDisposable
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(DeadLetterPolicy.EnvVar, null);
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
     }
 
     // PII values that must NEVER appear at rest in a redacted queue.
@@ -865,7 +865,7 @@ public class EnterprisePackRegressionStressTests : IDisposable
         EventLogSink.Override = null;
         Environment.SetEnvironmentVariable(EventLogSink.EnvVar, null);
         Environment.SetEnvironmentVariable(DeadLetterPolicy.EnvVar, null);
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
     }
 
     [Fact]
