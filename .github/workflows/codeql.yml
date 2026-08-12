@@ -1,0 +1,95 @@
+# CodeQL — REPOSITORY ROOT
+# ------------------------
+# GitHub Actions only executes workflows from /.github/workflows. Each connector
+# carries its own <Connector>/.github/workflows/codeql.yml, left over from when
+# it was a separate repository, and none of them has ever run — so the code
+# scanning the fleet appeared to have was not happening at all. This is the one
+# that runs.
+#
+# Difference from those copies: they build with a bare `dotnet restore && dotnet
+# build`, which worked when the connector sat at the repository root and had a
+# single solution beside it. This repository has NO root solution and five
+# connector solutions one level down, so the build step iterates them. C# is a
+# compiled language and CodeQL only sees code the compiler actually processes —
+# a build that silently covers one solution would report a clean scan for the
+# other four.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Mondays 06:23 UTC (offset off the hour to avoid the scheduler rush).
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (csharp)
+    runs-on: ubuntu-latest
+    # Five solutions built under CodeQL's compiler tracing, then analysed with
+    # the security-and-quality suite over the whole fleet. Well clear of the
+    # observed runtime, but a scan that is killed mid-analysis uploads nothing.
+    timeout-minutes: 120
+
+    permissions:
+      # Required to upload results to the code-scanning dashboard.
+      security-events: write
+      # Needed by the workflow to read the repo (and Actions metadata).
+      actions: read
+      contents: read
+
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: csharp
+          # Broader ruleset alongside Dependabot's dependency scanning.
+          queries: security-and-quality
+
+      # Every solution, so every connector's code reaches the database. All five
+      # reference Connector.Chassis; MSBuild compiles it once and the rest see it
+      # up to date, which is why the chassis is not built separately here.
+      #
+      # No `set -e` needed (the shell is `bash -e` by default) but the failure has
+      # to be loud: a solution that fails to build is silently absent from the
+      # scan, not an error CodeQL reports.
+      - name: Build all solutions
+        run: |
+          shopt -s nullglob
+          solutions=(*/*.sln)
+          if [ ${#solutions[@]} -eq 0 ]; then
+            echo "::error::No solutions found — CodeQL would scan nothing."
+            exit 1
+          fi
+          echo "Building ${#solutions[@]} solutions: ${solutions[*]}"
+          for sln in "${solutions[@]}"; do
+            echo "::group::build $sln"
+            dotnet build "$sln" -c Release
+            echo "::endgroup::"
+          done
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:csharp"
