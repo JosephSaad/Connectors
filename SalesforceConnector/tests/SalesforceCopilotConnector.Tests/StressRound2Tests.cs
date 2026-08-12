@@ -1148,6 +1148,28 @@ public class Round2HaLeaseTests : IDisposable
         public int Failovers;
         public int PrematureReclaims;
         public int LostCompletes;
+
+        /// <summary>
+        /// Longest wall-clock gap between two successive committed heartbeats on
+        /// any held lease. This is the term the skew arithmetic cannot assume
+        /// away: a heartbeat is a BEGIN IMMEDIATE write competing with every
+        /// other node's claim scan, so it lands when it wins the lock, not when
+        /// it was due. If this exceeds the timeout the lease really was stale by
+        /// the contract's own definition and a reclaim is correct — which is why
+        /// a test asserting "no reclaims" must report this number rather than
+        /// leave a starved heartbeat looking like a lease-logic bug.
+        /// </summary>
+        public long MaxHeartbeatGapMs;
+
+        public void RecordHeartbeatGap(long gapMs)
+        {
+            long seen;
+            while (gapMs > (seen = Interlocked.Read(ref MaxHeartbeatGapMs)))
+            {
+                if (Interlocked.CompareExchange(ref MaxHeartbeatGapMs, gapMs, seen) == seen)
+                    return;
+            }
+        }
         public readonly ConcurrentDictionary<string, int> Active = new();
         public readonly ConcurrentDictionary<string, int> MaxActive = new();
         public readonly ConcurrentDictionary<string, int> DoneRecorded = new();
@@ -1202,6 +1224,7 @@ public class Round2HaLeaseTests : IDisposable
             stats.EnterObject(objectType);
             var abandoned = false;
             var lastBeat = 0L;
+            var lastLanded = 0L;
             var beatClock = Stopwatch.StartNew();
             var workSteps = workStepsFor(node);
             for (var step = 0; step < workSteps; step++)
@@ -1217,6 +1240,13 @@ public class Round2HaLeaseTests : IDisposable
                 {
                     lastBeat = beatClock.ElapsedMilliseconds;
                     db.Heartbeat(node, objectType);
+                    // Measured AFTER the write returns: what staleness is judged
+                    // on is when the row was actually updated, not when the beat
+                    // was due. The claim itself stamped heartbeat_ms, so the
+                    // first interval runs from the start of this work loop.
+                    var landed = beatClock.ElapsedMilliseconds;
+                    stats.RecordHeartbeatGap(landed - lastLanded);
+                    lastLanded = landed;
                 }
                 await Task.Delay(stepMs);
             }
@@ -1311,12 +1341,33 @@ public class Round2HaLeaseTests : IDisposable
     [Fact]
     public async Task ClockSkew_WithinRenewalMargin_NoPrematureReclaims()
     {
-        // Nodes disagree on the time by ±40ms against a 300ms timeout with 40ms
-        // renewals. Because staleness is judged by the CLAIMER's clock, the
-        // worst-case apparent heartbeat age is (interval + skew spread) ≈ 120ms
-        // — far inside the timeout — so no live lease may ever be reclaimed.
+        // Nodes disagree on the time by ±200ms against a 1500ms timeout with
+        // 40ms renewals. Because staleness is judged by the CLAIMER's clock, a
+        // live lease looks older than it is, and no live lease may ever be
+        // reclaimed while that apparent age stays inside the timeout:
+        //
+        //     apparent age  ≤  renewal interval        (~60ms, 40ms + a step)
+        //                   +  skew spread             (400ms, -200 to +200)
+        //                   +  heartbeat write delay   (the term below)
+        //
+        // That third term is the one an earlier version of this test omitted,
+        // and it is why it failed intermittently on Windows CI. A heartbeat is
+        // a BEGIN IMMEDIATE write — the applock stand-in — contending with two
+        // other nodes' claim scans, so it lands when it wins the write lock. On
+        // a slow-I/O runner that wait is hundreds of milliseconds, and against
+        // the old 300ms timeout it left only ~180ms for it. When it overran,
+        // the lease was genuinely stale by the contract's definition and the
+        // reclaim was CORRECT — the test was wrong to call it premature.
+        //
+        // Timeout and skew are scaled together so the property under test is
+        // unchanged (skew comfortably inside the margin) while the budget for
+        // that third term goes from ~180ms to ~1040ms. MaxHeartbeatGapMs is
+        // asserted below so a future overrun names itself instead of showing up
+        // as a mystery reclaim.
         using var db = new SqliteLeaseDb(Path.Combine(_tmp, "skew_ok.db"));
-        var skews = new Dictionary<string, long> { ["n0"] = -40, ["n1"] = 0, ["n2"] = 40 };
+        const long TimeoutMs = 1500;
+        const long SkewSpreadMs = 400;  // -200 .. +200
+        var skews = new Dictionary<string, long> { ["n0"] = -200, ["n1"] = 0, ["n2"] = 200 };
         db.SkewMs = node => skews.GetValueOrDefault(node, 0);
 
         var objects = Enumerable.Range(0, 12).Select(i => $"Obj{i:D2}").ToList();
@@ -1327,20 +1378,35 @@ public class Round2HaLeaseTests : IDisposable
 
         var sw = Stopwatch.StartNew();
         var nodes = skews.Keys.Select(n => Task.Run(() => RunNodeAsync(
-            db, n, 300, heartbeatMs: 40, workStepsFor: _ => 8, stepMs: 15,
+            db, n, TimeoutMs, heartbeatMs: 40, workStepsFor: _ => 8, stepMs: 15,
             stats, killed, holding))).ToList();
         await Round2Support.AwaitBoundedAsync(Task.WhenAll(nodes), 120, "skewed crawl");
         sw.Stop();
 
         Assert.All(db.Snapshot().Values, v => Assert.Equal("done", v.Status));
+
+        // Precondition, asserted first so it cannot be mistaken for a lease bug:
+        // every heartbeat landed early enough that no claimer — even the one
+        // running SkewSpreadMs fast — could legitimately see the lease as stale.
+        // Failing HERE means the runner starved the write, not that the lease
+        // logic is wrong.
+        Assert.True(
+            stats.MaxHeartbeatGapMs + SkewSpreadMs < TimeoutMs,
+            $"heartbeat starvation, not a lease defect: worst committed heartbeat gap was "
+            + $"{stats.MaxHeartbeatGapMs}ms; against {SkewSpreadMs}ms of skew that is an apparent age of "
+            + $"{stats.MaxHeartbeatGapMs + SkewSpreadMs}ms, at or beyond the {TimeoutMs}ms timeout, so any "
+            + "reclaim below is the contract behaving correctly on a genuinely stale lease.");
+
         Assert.Equal(0, stats.PrematureReclaims);
         Assert.Equal(0, stats.Failovers);
         Assert.Equal(0, stats.LostCompletes);
         Assert.All(stats.MaxActive, kv => Assert.Equal(1, kv.Value));
         _out.WriteLine(
-            $"[lease-skew ±40ms] 3 nodes, 12 objects, timeout 300ms, renewals 40ms: " +
+            $"[lease-skew ±200ms] 3 nodes, 12 objects, timeout {TimeoutMs}ms, renewals 40ms: " +
             $"failovers=0, premature reclaims=0, max owners/object=1, " +
-            $"acquisitions={stats.Acquisitions}, wall={sw.ElapsedMilliseconds} ms");
+            $"acquisitions={stats.Acquisitions}, worst heartbeat gap={stats.MaxHeartbeatGapMs}ms " +
+            $"(+{SkewSpreadMs}ms skew = {stats.MaxHeartbeatGapMs + SkewSpreadMs}ms apparent, budget {TimeoutMs}ms), " +
+            $"wall={sw.ElapsedMilliseconds} ms");
     }
 
     [Fact]
