@@ -30,7 +30,7 @@ public interface ISqlGateway
 
 public sealed class SqlGateway : ISqlGateway
 {
-    private static readonly IAppLogger Logger = Logging.GetLogger($"{Chassis.Identity.BaseLoggerName}.sql");
+    private static readonly IAppLogger Logger = Chassis.GetLogger($"{Chassis.Identity.BaseLoggerName}.sql");
 
     /// <summary>Transient SQL error numbers worth retrying (throttling, failover, deadlock, timeouts).</summary>
     internal static readonly int[] TransientErrorNumbers =

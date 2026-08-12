@@ -20,7 +20,7 @@ namespace Connector.Chassis;
 
 public static class LogPruner
 {
-    private static readonly IAppLogger Logger = Logging.GetLogger(Chassis.Identity.BaseLoggerName);
+    private static readonly IAppLogger Logger = Chassis.GetLogger(Chassis.Identity.BaseLoggerName);
 
     public const string RetentionEnvVar = "LOG_RETENTION_DAYS";
 

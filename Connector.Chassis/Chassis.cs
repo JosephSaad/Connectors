@@ -48,4 +48,28 @@ public static class Chassis
     /// the pre-extraction code did.
     /// </summary>
     public static Func<string?>? CorrelationIdProvider;
+
+    /// <summary>
+    /// How chassis components obtain a logger.
+    /// </summary>
+    /// <remarks>
+    /// Defaults to the chassis's own <see cref="Logging"/>, so a host that adopts
+    /// chassis logging needs no wiring and behaves exactly as before.
+    ///
+    /// A host with its OWN logging framework assigns this instead, and chassis
+    /// components then log through that. Without this seam, adopting any chassis
+    /// component obliges a host to adopt chassis <see cref="Logging"/> as well —
+    /// otherwise the component's log lines vanish into a logging system the host
+    /// does not read. That coupling is what kept the Salesforce connector, whose
+    /// logging is a handler-based port of CPython's <c>logging</c> module rather
+    /// than a variant of this one, from sharing anything at all.
+    ///
+    /// Assign before the first chassis type is used, alongside <see cref="Init"/>.
+    /// That is the same ordering <see cref="Identity"/> already requires, since
+    /// component loggers are named from it at type-load.
+    /// </remarks>
+    public static Func<string, IAppLogger> LoggerFactory { get; set; } = Logging.GetLogger;
+
+    /// <summary>Resolve a logger for a chassis component via <see cref="LoggerFactory"/>.</summary>
+    internal static IAppLogger GetLogger(string name) => LoggerFactory(name);
 }

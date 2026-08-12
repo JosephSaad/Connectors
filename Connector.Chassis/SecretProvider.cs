@@ -37,7 +37,7 @@ namespace Connector.Chassis;
 /// </summary>
 public static class SecretProvider
 {
-    private static readonly IAppLogger Logger = Logging.GetLogger(Chassis.Identity.BaseLoggerName);
+    private static readonly IAppLogger Logger = Chassis.GetLogger(Chassis.Identity.BaseLoggerName);
 
     private static readonly object ClientLock = new();
     private static volatile SecretClient? _client;

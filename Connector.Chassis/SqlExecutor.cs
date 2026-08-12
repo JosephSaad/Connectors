@@ -21,7 +21,7 @@ namespace Connector.Chassis;
 
 public static class SqlExecutor
 {
-    private static readonly IAppLogger Logger = Logging.GetLogger("seismic_connector.sql");
+    private static readonly IAppLogger Logger = Chassis.GetLogger($"{Chassis.Identity.BaseLoggerName}.sql");
 
     private static readonly int[] TransientErrorNumbers =
     {

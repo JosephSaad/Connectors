@@ -99,7 +99,7 @@ public sealed class CircuitBreakerOptions
 
 public sealed class CircuitBreaker
 {
-    private static readonly IAppLogger Logger = Logging.GetLogger($"{Chassis.Identity.BaseLoggerName}.breaker");
+    private static readonly IAppLogger Logger = Chassis.GetLogger($"{Chassis.Identity.BaseLoggerName}.breaker");
 
     private readonly object _gate = new();
     private readonly Func<DateTimeOffset> _clock;

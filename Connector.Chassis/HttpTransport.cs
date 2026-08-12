@@ -39,7 +39,7 @@ public static class HttpTransport
     public const string ProxyBypassEnvVar = "PROXY_BYPASS";
     public const string CaBundleEnvVar = "CA_BUNDLE_PATH";
 
-    private static readonly IAppLogger Logger = Logging.GetLogger($"{Chassis.Identity.BaseLoggerName}.transport");
+    private static readonly IAppLogger Logger = Chassis.GetLogger($"{Chassis.Identity.BaseLoggerName}.transport");
 
     /// <summary>
     /// Create the production handler for an outbound HttpClient. Direct,
