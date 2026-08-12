@@ -17,8 +17,9 @@ stay byte-equivalent — the offline validation suite
 1. the script parses cleanly under the real SQL Server 2019 grammar
    (`TSql150Parser`);
 2. every DDL statement is idempotent by construction (existence-guarded
-   CREATEs) — the re-run/upgrade safety CI also proves live by provisioning
-   the schema twice;
+   CREATEs) — the job that also proved this live by provisioning the schema
+   twice sits in this connector's own `.github/workflows/ci.yml`, inert since
+   the move into the connector monorepo;
 3. no drift between the script and the embedded constants, and every
    `dbo.altrata_*` table the C# touches exists in the script;
 4. a DacFx semantic model builds and validates the declarative schema.

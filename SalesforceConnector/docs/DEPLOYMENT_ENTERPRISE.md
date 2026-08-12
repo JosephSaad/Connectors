@@ -8,8 +8,9 @@ this doc is the hardened variant. Threats these controls answer:
 
 ## 1. MSI deployment via SCCM / Intune
 
-The MSI (`packaging/msi/`, built by the experimental `msi` job in
-`release.yml`) installs per-machine to
+The MSI (`packaging/msi/`, built by the experimental `msi` job in the
+connector's `release.yml` — an inert workflow GitHub no longer runs, so build it
+locally) installs per-machine to
 `%ProgramFiles%\SalesforceCopilotConnector`: exe, `config\` templates,
 `env\.env.local.example`, the Windows service (Automatic **delayed**, NOT
 started), `SFCONNECTOR_HOME`, and the `SalesforceConnector` event-log source.

@@ -96,8 +96,10 @@ BACKUP DATABASE SalesforceConnector TO DISK = N'...\SalesforceConnector.bak'
      presence is probed — e.g. `PRAGMA table_info(sync_sessions)` — and missing
      columns/tables are added; never dropped).
    - SQL Server: re-run `scripts/sql/create-database.sql` for the target
-     version — it is **idempotent** (CI proves the double-run on every build)
-     and only creates/alters, never drops data.
+     version — it is **idempotent** (the double-run is covered by the SQL
+     integration tests, which self-skip unless their `*_TEST_*` env vars are
+     set, so the root CI build does not currently exercise it) and only
+     creates/alters, never drops data.
 6. **Start the service.** First run resumes from the existing checkpoint —
    an upgrade does not force a full crawl unless the changelog says so.
 7. Verify: `validate-config --strict`, then watch `/metrics`

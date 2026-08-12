@@ -33,7 +33,8 @@ Copy-Item .\payload\env\*    D:\AltrataConnector\env\      # .env.local (+ .user
 ```
 
 - Detection rule: `D:\AltrataConnector\AltrataConnector.exe` file version
-  `1.0.0` (CI stamps `-p:Version`).
+  `1.0.0` (the `<Version>` in `src/AltrataConnector/AltrataConnector.csproj`;
+  release builds stamp `-p:Version`).
 - Uninstall: `install-windows-service.ps1 -ServiceName AltrataConnector -Uninstall`,
   then remove the directory — EXCEPT `logs\erasure_ledger_*.jsonl`,
   `logs\audit_*.jsonl` and your tier-1 backups (docs/DR.md): the compliance

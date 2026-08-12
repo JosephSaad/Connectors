@@ -269,6 +269,35 @@ them); everything else is additive and off/unchanged by default.
   Purview-enforced label — it does not encrypt or gate access on its own (the
   wire schema property name is unchanged for back-compat).
 
+### Build & repository layout
+
+- **The connector now consumes the shared `Connector.Chassis` project (1.13.1)
+  instead of carrying its own copies.** The connector lives in a monorepo
+  alongside the Salesforce, Clarizen, Seismic and Altrata connectors and the
+  chassis, and references it as a sibling project
+  (`<ProjectReference Include="..\..\..\Connector.Chassis\Connector.Chassis.csproj" />`)
+  — **not** a NuGet package: there is no feed, no `nuget.config` and no version
+  pin. Taken from the chassis: logging, secret provider, SQL executor / SQL
+  gateway, metrics renderer, service-stop seam and the chassis identity seam.
+  Still this connector's own: decision ledger, HA coordinator, SQL state store,
+  alerting, event-log sink, log pruner, service host, env flags, circuit
+  breaker. No behaviour change. (`src/HadoopConnector/HadoopConnector.csproj`,
+  `src/HadoopConnector/Program.cs`)
+- **CI now actually runs.** The live pipeline is
+  `.github/workflows/hadoop.yml` at the **repository root** — GitHub executes
+  only root workflows — building and testing on ubuntu-latest and
+  windows-latest and building the container image. This connector's own
+  `.github/workflows/` (`ci.yml`, `codeql.yml`, `release.yml`) are inert
+  leftovers from when it was a separate repository and are left in place
+  untouched; nothing runs them, so no release bundle, GHCR image or CodeQL scan
+  is produced from them.
+- **Docker builds from the repository root.** The image needs
+  `Connector.Chassis` inside its build context, so
+  `docker build -f HadoopConnector/Dockerfile .` from the root replaces the old
+  `docker build .`; `docker-compose.yml` sets `context: ..` for the same
+  reason, and a single root `.dockerignore` governs the build.
+- Test count is now **983** (green on both ubuntu-latest and windows-latest).
+
 ## [1.0.0] — 2026-07-18
 
 First production release: the full connector chassis plus the enterprise

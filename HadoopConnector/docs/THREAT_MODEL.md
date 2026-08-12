@@ -60,7 +60,7 @@ classification.
 
 | STRIDE | Threat | Mitigation | Residual |
 |---|---|---|---|
-| T | SQL injection via record-derived values | Every statement is parameterized (`Infrastructure/SqlExecutor.cs`, `Config/SqlStateStore.cs`); offline ScriptDom validation pins the schema scripts | — |
+| T | SQL injection via record-derived values | Every statement is parameterized (`Connector.Chassis/SqlGateway.cs`, aliased `SqlExecutor`; `Config/SqlStateStore.cs`); offline ScriptDom validation pins the schema scripts | — |
 | T | Corrupted state files redirect crawls | Corruption is detected, WARNED, and handled fail-safe: corrupt sync-state → treated never-synced (wider re-read, never silent), corrupt checkpoint → restart from chunk 0 (idempotent PUTs), torn dead-letter line → that line only (`Config/SyncState.cs`); see `docs/RUNBOOKS.md` "State corruption" | A watermark reset widens the next crawl — cost, not integrity |
 | I | State DB readable by others (it holds record ids, error text, possibly payloads) | Least-privilege SQL login documented in `docs/SQL_CONTRACT.md`; file ACLs in `docs/DEPLOYMENT_ENTERPRISE.md`; local state dirs created **owner-only** (0700 POSIX / owner+admins on Windows, best-effort) at startup (`Infrastructure/SecureDirectories.cs`); `DEADLETTER_PAYLOAD_MODE` defaults to `redacted` so record values never reach dead-letter storage | `full` mode is an explicit opt-in; a host where 0700 cannot be set logs a warning (set ACLs out of band) |
 | E | HA nodes trusting each other's rows | Claims are leases keyed by node with heartbeats; terminal states never reclaimed; single-row atomic transitions (`Infrastructure/HaCoordinator.cs`) | All HA nodes are one trust domain — a hostile node IS the service account |

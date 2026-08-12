@@ -8,8 +8,10 @@ this doc is the delta for managed estates.
 ## MSI rollout (SCCM / Intune)
 
 `packaging/msi/ClarizenConnector.wxs` (WiX v5, **experimental** — the zip
-bundle + `install-windows-service.ps1` remain canonical) builds
-`ClarizenConnector.msi` on the release pipeline's windows runner. The MSI:
+bundle + `install-windows-service.ps1` remain canonical) is the source for
+`ClarizenConnector.msi`. Build it on a windows host: the connector's
+`release.yml` that used to produce it is an inert leftover and no longer runs
+(`SECURITY.md` § release integrity). The MSI:
 
 - installs to `%ProgramFiles%\ClarizenConnector`, registers the
   **ClarizenConnector** service (auto-start, default arguments

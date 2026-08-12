@@ -195,7 +195,9 @@ Enterprise hardening package.
   `docs/DEPLOYMENT_ENTERPRISE.md` (SCCM/Intune/GPO, proxy/TLS, least privilege),
   `SECURITY.md` (supported versions, secret rotation, data-at-rest inventory).
 - CI: code-coverage gate (line ≥ 47.9%; measured 52.9% at introduction) and a
-  perf-smoke job (20k items; floors ≥ 3,000 items/s, < 500 MB RSS).
+  perf-smoke job (20k items; floors ≥ 3,000 items/s, < 500 MB RSS). Both live in
+  the connector's `ci.yml`, which is now inert — see **Changed** below; neither
+  gates a build today.
 - Release: CycloneDX SBOM attached to releases; Authenticode (win-x64 binary)
   and cosign (container image) signing steps, gated on `SIGNING_*` secrets and
   skipped with a notice when absent; experimental WiX v5 MSI job
@@ -206,6 +208,25 @@ Enterprise hardening package.
 - `SalesforceCopilotConnector.csproj` now carries `<Version>1.0.0</Version>`.
 - All outbound HTTP clients are constructed through `Infrastructure/HttpClientFactory`
   (behavior unchanged when the new env vars are unset).
+- **Moved into the `JosephSaad/Connectors` monorepo and onto the shared chassis.**
+  The connector consumes `Connector.Chassis` (1.13.1) through a
+  `<ProjectReference>` to `../../../Connector.Chassis/Connector.Chassis.csproj`
+  — it is not a NuGet package, so there is no version pin, no feed and no
+  `nuget.config`. `Chassis` (identity/seams), `ServiceStop` and `SecretProvider`
+  now come from the chassis; logging stays connector-local (the CPython-style
+  formatter the port depends on) and bridges through `Chassis.LoggerFactory`.
+  `DecisionLedger`, `HaCoordinator`, `SqlStateStore`, `SqlExecutor`, `Alerting`,
+  `EventLogSink`, `LogPruner`, `ServiceHost` and `EnvFlags` remain this
+  connector's own.
+- **CI runs from the repository root** — `.github/workflows/salesforce.yml`
+  (build + test on `ubuntu-latest` and `windows-latest`, plus a Docker image
+  job) is the workflow GitHub executes. The connector's own
+  `.github/workflows/*.yml` are inert leftovers from when it was a standalone
+  repository. Suite: 1206 tests, green on both operating systems.
+- **Docker builds use the repository root as their build context**
+  (`docker build -f SalesforceConnector/Dockerfile .`; compose sets
+  `context: ..`), because the project references `../Connector.Chassis` and a
+  build cannot reach outside its context. One root `.dockerignore` governs it.
 
 ### Security
 - **FIPS 140-3: identity-critical MD5 retired.** The field-cache instance key
@@ -268,5 +289,5 @@ production service on Windows Server and Linux.
   releases with self-contained win-x64/linux-x64 bundles and a GHCR container
   image.
 
-[Unreleased]: https://github.com/JosephSaad/SalesforceCopilotConnector/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/JosephSaad/SalesforceCopilotConnector/releases/tag/v1.0.0
+[Unreleased]: https://github.com/JosephSaad/Connectors/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/JosephSaad/Connectors/releases/tag/v1.0.0

@@ -1,6 +1,6 @@
 # Altrata Copilot Connector (C#)
 
-A standalone Microsoft 365 Copilot Graph connector for **Altrata**
+A custom Microsoft 365 Copilot Graph connector for **Altrata**
 relationship & wealth intelligence (BoardEx / WealthEngine / Wealth-X style
 data). Primary ingestion is licensed **bulk file feeds** (SFTP drop directory
 with checksummed manifests); secondary is the **Altrata REST API** for
@@ -34,8 +34,14 @@ docs/                          FEEDS, ENTITLEMENT, ERASURE, MATCHING,
 env/                           .env.local.example (+ layering README)
 scripts/                       install-windows-service.ps1, sql/ (canonical DDL)
 Dockerfile, docker-compose.yml container image + local SQL/HA dev topology
-.github/workflows/             ci.yml (ubuntu+windows), codeql.yml,
-                               release.yml (test-gated, checksummed bundles)
+.github/workflows/             ci.yml, codeql.yml, release.yml — INERT
+                               leftovers from when this connector was its own
+                               repository; GitHub runs only the workflows at
+                               the repository root (.github/workflows/altrata.yml)
+../Connector.Chassis/          the shared chassis project, referenced by all
+                               five connectors in this repository via
+                               <ProjectReference> (identity seams, ServiceStop,
+                               logging)
 ```
 
 ## Requirements
@@ -263,12 +269,17 @@ invariant is asserted on the batched paths too.
 ## Docker
 
 ```bash
-docker build -t altrata-connector .
+# Build context is the REPOSITORY ROOT: the connector references
+# ../Connector.Chassis and a build cannot reach outside its context.
+docker build -f AltrataConnector/Dockerfile -t altrata-connector .
+
 docker compose up --build     # SQL Server 2022 + schema init + continuous crawl
 ```
 
-`docker-compose.yml` is a local/dev topology (throwaway SA password, loopback
-port only) with a commented-out second node for HA experiments.
+`docker-compose.yml` sets `context: ..` for the same reason, and a single
+`.dockerignore` at the repository root governs both builds. It is a local/dev
+topology (throwaway SA password, loopback port only) with a commented-out
+second node for HA experiments.
 
 ## Observability
 
@@ -328,9 +339,10 @@ posture, and day-2 operations:
 Also in the package: `ops/grafana-dashboard.json`,
 `ops/prometheus-alerts.yml`, `ops/azure-monitor-alerts.kql` (rules link to
 runbook anchors; the ledger-tamper rule is severity critical / class
-security), an experimental WiX v5 MSI (`packaging/msi/`), CycloneDX SBOM +
-gated Authenticode/cosign signing on releases, and a coverage-gated,
-perf-smoked CI.
+security), an experimental WiX v5 MSI (`packaging/msi/`), and the CycloneDX
+SBOM + gated Authenticode/cosign signing, coverage gate and perf smoke that
+live in this connector's own — now inert — `.github/workflows/` (see Tests
+below).
 
 ## Tests
 
@@ -352,11 +364,13 @@ dotnet test        # 743 tests: CLI parsing, checkpoint resume, dead-letter
                    # timeout-fails-safe, no-PII-in-verdict, defaults-off parity)
 ```
 
-CI (`.github/workflows/ci.yml`) runs the suite on ubuntu **and windows**
-(Windows Server is the deployment target), provisions the SQL schema twice
-against a live SQL Server 2022 container (idempotency proof), and validates
-the Docker image build. Releases are test-gated with SHA-256 checksums on
-every bundle.
+CI is the repository-root workflow `.github/workflows/altrata.yml`: it runs the
+suite on ubuntu **and windows** (Windows Server is the deployment target) and
+validates the Docker image build (root context, `-f AltrataConnector/Dockerfile`).
+This connector's own `.github/workflows/` — the `ci.yml` that also provisioned
+the SQL schema twice against a live SQL Server 2022 container, plus `codeql.yml`
+and the test-gated, checksummed `release.yml` — is an inert leftover from when
+this was its own repository; GitHub executes only the root workflows.
 
 ## Environment variables
 

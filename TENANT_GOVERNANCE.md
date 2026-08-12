@@ -1,9 +1,9 @@
 # Tenant governance & capacity plan
 
 Five connectors share one Microsoft 365 tenant's Graph-connector quotas. Each
-connector is standalone by design, so nothing in code coordinates them — this
-document is that coordination. Re-run this plan whenever a connector is added,
-an object scope widens, or Microsoft raises the published limits.
+connector deploys and runs independently, so nothing in code coordinates them
+— this document is that coordination. Re-run this plan whenever a connector is
+added, an object scope widens, or Microsoft raises the published limits.
 
 ## Hard limits that bind the fleet (Microsoft-published)
 

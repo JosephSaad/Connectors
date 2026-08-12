@@ -27,7 +27,7 @@ SQLite identity store) so it can pick up where the Python version left off.
 ## Install from a release
 
 Prebuilt self-contained bundles (no .NET SDK or runtime required on the box) are
-published on the [releases page](https://github.com/JosephSaad/SalesforceCopilotConnector/releases)
+published on the [releases page](https://github.com/JosephSaad/Connectors/releases)
 for `win-x64` (includes `scripts/install-windows-service.ps1` for service mode)
 and `linux-x64`. Each zip extracts to a ready-to-run directory — binary plus
 `config/`, `env/`, `docs/`, `scripts/sql/` — laid out the way the app resolves
@@ -41,10 +41,11 @@ cp env/.env.local.example env/.env.local    # fill in credentials
 ./SalesforceCopilotConnector validate-config
 ```
 
-Releases build automatically from `v*` tags (test-gated, checksummed — see
-`.github/workflows/release.yml`); each release also pushes a container image to
-`ghcr.io/josephsaad/salesforce-copilot-connector` (`:<version>` and `:latest`).
-Building from source instead only needs the requirements below.
+Release automation is not currently wired up: GitHub only runs the workflows at
+the repository root, and this connector's own `.github/workflows/release.yml`
+(tag-triggered bundles, checksums, the `ghcr.io/josephsaad/salesforce-copilot-connector`
+image) is an inert leftover from when the connector was its own repository.
+Building from source only needs the requirements below.
 
 ## Requirements
 
@@ -82,8 +83,8 @@ Graph connection and dropped from the inventory.
 
 ## Usage
 
-Run from the repository root (paths like `logs/` and `config/` resolve against the
-current directory, exactly like the Python version):
+Run from the `SalesforceConnector/` directory (paths like `logs/` and `config/`
+resolve against the current directory, exactly like the Python version):
 
 ```bash
 dotnet run --project src/SalesforceCopilotConnector -- guide

@@ -9,6 +9,33 @@ and this file.
 
 ## [Unreleased]
 
+### Changed — the connector consumes the shared `Connector.Chassis` project
+
+This connector now lives in the `JosephSaad/Connectors` monorepo alongside the
+other four (Salesforce, Clarizen, Seismic, Hadoop) and the chassis itself.
+
+* **Project reference, not a package.** `src/AltrataConnector/AltrataConnector.csproj`
+  carries a `<ProjectReference>` to `../../../Connector.Chassis/Connector.Chassis.csproj`
+  (chassis **1.13.1**). There is no `PackageReference`, no version pin, no pack
+  step and no feed; the connector's `nuget.config` — which hardcoded an absolute
+  local path and made the repository unbuildable by anyone else — is deleted.
+* **What is shared:** the `Chassis` / `ChassisIdentity` seams, `ServiceStop`, and
+  logging (`Logging` / `IAppLogger`), with `AltrataLogDialect` preserved as a
+  custom dialect over the chassis `StandardLogDialect`. Altrata keeps its own
+  secret provider; the decision ledger, HA coordinator, SQL state store,
+  alerting, Event Log sink, log pruner, service host, env flags and circuit
+  breaker all remain connector-local.
+* **CI moved to the repository root**: `.github/workflows/altrata.yml` builds and
+  runs the suite on `ubuntu-latest` **and** `windows-latest` (743 tests green on
+  both) and builds the container image. The files under this connector's own
+  `.github/workflows/` are inert leftovers from when it was its own repository —
+  GitHub never runs them.
+* **Docker build context is the repository root**, because the image has to reach
+  `../Connector.Chassis`: `docker build -f AltrataConnector/Dockerfile .`.
+  `docker-compose.yml` sets `context: ..`, and a single `.dockerignore` at the
+  repository root governs the build (the per-connector one was removed — Docker
+  only reads the one at the context root).
+
 ### Fixed — refusal messages cap the rendered id at 64 units on BOTH branches
 
 The hostile verifier fed `SubjectIdPolicy.Explain` an ill-formed id of 100,001

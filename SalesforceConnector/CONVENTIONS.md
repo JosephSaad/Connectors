@@ -1,8 +1,8 @@
 # C# Port Conventions — Salesforce Copilot Connector
 
 Source Python repo: `/Users/joseph/Teams/Salesforce-Custom-Copilot-Connector`
-Target C# project: `/Users/joseph/Teams/SalesforceCopilotConnector/src/SalesforceCopilotConnector`
-Test project: `/Users/joseph/Teams/SalesforceCopilotConnector/tests/SalesforceCopilotConnector.Tests`
+Target C# project: `/Users/joseph/Teams/SalesforceCopilotConnector/SalesforceConnector/src/SalesforceCopilotConnector`
+Test project: `/Users/joseph/Teams/SalesforceCopilotConnector/SalesforceConnector/tests/SalesforceCopilotConnector.Tests`
 
 ## Goal
 A faithful, complete 1:1 behavioral port. Same commands, same log messages, same file formats

@@ -13,8 +13,11 @@ Copilot Connector. Deep dives: `docs/THREAT_MODEL.md` (STRIDE per boundary),
 | < 1.0 (pre-release builds) | not supported — upgrade |
 
 The dependency graph ships as a CycloneDX SBOM with every release
-(`hadoop-connector.cdx.json`); CodeQL (security-and-quality) runs weekly and
-on every push/PR.
+(`hadoop-connector.cdx.json`). Neither the SBOM nor the CodeQL
+security-and-quality scan is produced automatically today: GitHub executes only
+the workflows at the repository root, and this connector's own
+`.github/workflows/release.yml` and `codeql.yml` are inert leftovers from when
+it was a separate repository.
 
 ## Reporting a vulnerability
 
