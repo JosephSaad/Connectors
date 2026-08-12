@@ -1,3 +1,21 @@
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ THIS WORKFLOW DOES NOT RUN.                                             │
+# │                                                                         │
+# │ GitHub Actions only executes workflows from /.github/workflows at the   │
+# │ REPOSITORY ROOT. This file sits under a connector directory, left from  │
+# │ when each connector was its own repository, so no tag push has ever     │
+# │ triggered it and no release has ever been produced by it.               │
+# │                                                                         │
+# │ It is kept because it is the only design the fleet has for release      │
+# │ engineering — CycloneDX SBOM, self-contained single-file publish,       │
+# │ Authenticode and cosign signing, GitHub release creation — none of      │
+# │ which the root workflows do. Delete it only once that pipeline has      │
+# │ been ported to the root, not before.                                    │
+# │                                                                         │
+# │ The sibling ci.yml and codeql.yml were removed in the commit that added │
+# │ this banner; their work IS covered at the root.                         │
+# └─────────────────────────────────────────────────────────────────────────┘
+
 name: Release
 
 # Two entry points:
