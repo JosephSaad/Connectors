@@ -283,7 +283,7 @@ public class CheckpointResumeTests : IDisposable
     [Fact]
     public async Task ServiceStopPreservesCheckpoint()
     {
-        // New in the C# port: a Windows-service stop (Infrastructure.ServiceStop)
+        // New in the C# port: a Windows-service stop (ServiceStop)
         // must behave exactly like Ctrl+X — finish the chunk, keep the checkpoint.
         var cfg = CheckpointSupport.WithDebugObjectType(TestFixtures.TestConfig(), "Account");
         var connectorId = cfg.Connector.Id;
@@ -297,7 +297,7 @@ public class CheckpointResumeTests : IDisposable
             OnBatch = _ =>
             {
                 // The SCM stop arrives while the Graph push is in flight.
-                Infrastructure.ServiceStop.Request();
+                ServiceStop.Request();
                 return new List<JsonObject> { CheckpointSupport.Resp("0", 200) };
             },
         };
@@ -316,7 +316,7 @@ public class CheckpointResumeTests : IDisposable
         }
         finally
         {
-            Infrastructure.ServiceStop.Reset();
+            ServiceStop.Reset();
         }
     }
 

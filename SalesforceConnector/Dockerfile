@@ -21,18 +21,20 @@ WORKDIR /source
 
 # Restore first (better layer caching): copy the solution + project files, then
 # restore, then copy the rest of the tree.
-COPY SalesforceCopilotConnector.sln ./
-COPY src/SalesforceCopilotConnector/SalesforceCopilotConnector.csproj src/SalesforceCopilotConnector/
-COPY tests/SalesforceCopilotConnector.Tests/SalesforceCopilotConnector.Tests.csproj tests/SalesforceCopilotConnector.Tests/
-COPY tools/StressHarness/StressHarness.csproj tools/StressHarness/
-RUN dotnet restore src/SalesforceCopilotConnector/SalesforceCopilotConnector.csproj
+COPY SalesforceConnector/SalesforceCopilotConnector.sln SalesforceConnector/
+COPY SalesforceConnector/src/SalesforceCopilotConnector/SalesforceCopilotConnector.csproj SalesforceConnector/src/SalesforceCopilotConnector/
+COPY SalesforceConnector/tests/SalesforceCopilotConnector.Tests/SalesforceCopilotConnector.Tests.csproj SalesforceConnector/tests/SalesforceCopilotConnector.Tests/
+COPY SalesforceConnector/tools/StressHarness/StressHarness.csproj SalesforceConnector/tools/StressHarness/
+COPY Connector.Chassis/Connector.Chassis.csproj Connector.Chassis/
+RUN dotnet restore SalesforceConnector/src/SalesforceCopilotConnector/SalesforceCopilotConnector.csproj
 
 # Copy the remaining sources and publish the connector only (Release,
 # framework-dependent, portable — the runtime stage already ships the .NET
 # runtime, and a RID here would need a matching `dotnet restore -r`; the
 # portable publish carries the native assets (e.g. SQLite) under runtimes/).
-COPY . .
-RUN dotnet publish src/SalesforceCopilotConnector/SalesforceCopilotConnector.csproj \
+COPY Connector.Chassis/ Connector.Chassis/
+COPY SalesforceConnector/ SalesforceConnector/
+RUN dotnet publish SalesforceConnector/src/SalesforceCopilotConnector/SalesforceCopilotConnector.csproj \
         -c Release \
         --no-restore \
         -o /app/publish

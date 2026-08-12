@@ -74,7 +74,11 @@ services:
 
   # ---- Connector (primary node) --------------------------------------------
   connector:
-    build: .
+    build:
+      # Build context is the repository root: the connector references the
+      # shared Connector.Chassis project, which lives beside this directory.
+      context: ..
+      dockerfile: SalesforceConnector/Dockerfile
     depends_on:
       mssql:
         condition: service_healthy

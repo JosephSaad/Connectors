@@ -351,7 +351,22 @@ public class Round2ResolverChurnTests
 
         Assert.True(failures.IsEmpty, string.Join(" | ", failures.Take(5)));
         Assert.True(resolves > 500, $"expected real progress under churn, got {resolves} resolves");
-        Assert.True(clears > 100, $"expected real churn, got {clears} cache clears");
+        // The floor is deliberately low, and the number is not a pacing knob.
+        // ClearGroupCache takes the SAME _cacheLock the eight hammers contend on,
+        // so this count is bounded by how often one thread wins a contended lock
+        // against eight competitors on however many cores the host has - not by
+        // how fast the churn loop is driven. Measured on windows-latest across
+        // three drive strategies: Task.Delay(1) 32, Task.Yield() 1, dedicated
+        // LongRunning thread + Sleep(0) 37; a developer machine clears hundreds.
+        // Tuning the loop cannot make an absolute threshold portable.
+        //
+        // What this assertion is FOR is proving the scenario actually interleaved
+        // rather than the churn task dying early and leaving the hammers to run
+        // unopposed. Ten clears spread through 500+ concurrent resolves proves
+        // that. The correctness invariant is untouched: it is failures.IsEmpty
+        // above, which is what "invalidation costs performance, never
+        // correctness" actually means.
+        Assert.True(clears > 10, $"expected real churn, got {clears} cache clears");
         _out.WriteLine(
             $"[churn-live] {resolves} concurrent resolves ({resolves / 1.5:F0}/s) raced " +
             $"{clears} cache invalidations in 1.5s — 0 wrong grants, 0 deadlocks");

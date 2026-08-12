@@ -23,6 +23,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />
+    <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\SalesforceCopilotConnector\SalesforceCopilotConnector.csproj" />
   </ItemGroup>
 
