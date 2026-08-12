@@ -41,7 +41,8 @@ jobs:
     timeout-minutes: 120
 
     permissions:
-      # Required to upload results to the code-scanning dashboard.
+      # Kept at write so restoring the dashboard upload needs no permission
+      # change — see the analyze step for why results go to an artifact today.
       security-events: write
       # Needed by the workflow to read the repo (and Actions metadata).
       actions: read
@@ -89,7 +90,74 @@ jobs:
             echo "::endgroup::"
           done
 
+      # upload: never — the SARIF is NOT sent to the code-scanning dashboard.
+      #
+      # This repository is private and owned by a personal account, so GitHub
+      # rejects the upload outright: "Advanced security has not been purchased."
+      # Code scanning is free only on public repositories and otherwise needs a
+      # paid Code Security licence. Everything up to the upload works, so rather
+      # than lose the analysis (or leave a permanently red check), the results
+      # are written to disk and published as a build artifact instead.
+      #
+      # Trade-off: no inline PR annotations and no alert state tracking — a
+      # finding fixed in one run simply stops appearing, nothing records that it
+      # was ever there. Switch this to the default (drop `upload`/`output` and
+      # the two steps below) the day a licence exists.
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
         with:
           category: "/language:csharp"
+          upload: never
+          output: sarif-results
+
+      # Without this the artifact is a file nobody opens. Rendering the counts
+      # into the job summary puts the findings in front of a reviewer who has
+      # not downloaded anything.
+      - name: Summarise findings
+        if: always()
+        run: |
+          shopt -s nullglob
+          files=(sarif-results/*.sarif)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No SARIF produced — the analysis did not complete." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## CodeQL (csharp)"
+            echo
+            echo "Results are in the **codeql-sarif** artifact; this run does not"
+            echo "publish to the Security tab (no Code Security licence)."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          for f in "${files[@]}"; do
+            total=$(jq '[.runs[].results[]] | length' "$f")
+            {
+              echo "### \`$(basename "$f")\` — $total result(s)"
+              echo
+              echo "| Severity | Count |"
+              echo "|---|--:|"
+              jq -r '[.runs[].results[]] | group_by(.level // "warning")
+                     | map({k: (.[0].level // "warning"), n: length})
+                     | sort_by(-.n)[] | "| \(.k) | \(.n) |"' "$f"
+              echo
+              echo "<details><summary>Top rules</summary>"
+              echo
+              echo "| Rule | Count |"
+              echo "|---|--:|"
+              jq -r '[.runs[].results[]] | group_by(.ruleId)
+                     | map({k: .[0].ruleId, n: length})
+                     | sort_by(-.n) | .[0:20][] | "| `\(.k)` | \(.n) |"' "$f"
+              echo
+              echo "</details>"
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload SARIF
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: codeql-sarif
+          path: sarif-results/
+          if-no-files-found: error
+          retention-days: 30
