@@ -1033,11 +1033,19 @@ public sealed class Round3AdversarialTests
         using var stop = new CancellationTokenSource(duration);
         var ct = stop.Token;
 
-        // 3x concurrency: 3 workers per path family (12 workers total).
+        // 3x concurrency: 3 workers per path family (12 workers total), each on a
+        // DEDICATED thread rather than the pool. These loops are tight and never
+        // await, so pool-scheduled they occupy every worker thread they get and the
+        // ones queued behind them wait on thread injection, which is roughly one
+        // new thread per 500 ms. On a two-core Windows runner the metrics workers -
+        // queued last - had not started before the 3 s window closed, so they ran
+        // ZERO iterations: the reconciliation below then found no Soak sample at
+        // all (ingested=0, no rendered line) and the test failed every time. It was
+        // measuring thread-pool injection, not the paths it claims to soak.
         var workers = new List<Task>();
         for (var k = 0; k < 3; k++)
         {
-            workers.Add(Task.Run(() =>
+            workers.Add(Task.Factory.StartNew(() =>
             {
                 while (!ct.IsCancellationRequested)
                 {
@@ -1052,8 +1060,8 @@ public sealed class Round3AdversarialTests
                     }
                     catch (Exception exc) { errors.Enqueue("jwt: " + exc.Message); }
                 }
-            }));
-            workers.Add(Task.Run(() =>
+            }, TaskCreationOptions.LongRunning));
+            workers.Add(Task.Factory.StartNew(() =>
             {
                 while (!ct.IsCancellationRequested)
                 {
@@ -1067,8 +1075,8 @@ public sealed class Round3AdversarialTests
                     }
                     catch (Exception exc) { errors.Enqueue("tls: " + exc.Message); }
                 }
-            }));
-            workers.Add(Task.Run(() =>
+            }, TaskCreationOptions.LongRunning));
+            workers.Add(Task.Factory.StartNew(() =>
             {
                 var i = 0;
                 while (!ct.IsCancellationRequested)
@@ -1085,15 +1093,15 @@ public sealed class Round3AdversarialTests
                     }
                     catch (Exception exc) { errors.Enqueue("log: " + exc.Message); }
                 }
-            }));
-            workers.Add(Task.Run(() =>
+            }, TaskCreationOptions.LongRunning));
+            workers.Add(Task.Factory.StartNew(() =>
             {
                 while (!ct.IsCancellationRequested)
                 {
                     Metrics.IncItemsIngested();
                     Metrics.AddObjectFetched("Soak", 1);
                 }
-            }));
+            }, TaskCreationOptions.LongRunning));
         }
 
         await Round3Support.AwaitBoundedAsync(Task.WhenAll(workers), 30, "3x interleaved soak");
