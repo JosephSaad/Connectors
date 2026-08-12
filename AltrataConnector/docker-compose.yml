@@ -72,7 +72,11 @@ services:
 
   # ---- Connector (primary node) --------------------------------------------
   connector:
-    build: .
+    # Context is the repository root: the connector references
+    # ../Connector.Chassis, which a build scoped to this directory cannot reach.
+    build:
+      context: ..
+      dockerfile: AltrataConnector/Dockerfile
     depends_on:
       mssql:
         condition: service_healthy
@@ -105,7 +109,9 @@ services:
   # See docs/HA.md.
   #
   # connector2:
-  #   build: .
+  #   build:
+  #     context: ..
+  #     dockerfile: AltrataConnector/Dockerfile
   #   depends_on:
   #     mssql:
   #       condition: service_healthy

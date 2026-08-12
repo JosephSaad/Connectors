@@ -77,7 +77,7 @@ public class EventLogSinkTests : IDisposable
         EventLogSink.Override = null;
         Environment.SetEnvironmentVariable(EventLogSink.EnvVar, null);
         Environment.SetEnvironmentVariable("LOGS_DIR", null);
-        Logging.EndRun();
+        Logging.ResetForTests();
     }
 
     [Fact]
@@ -117,7 +117,7 @@ public class EventLogSinkTests : IDisposable
     {
         Environment.SetEnvironmentVariable(EventLogSink.EnvVar, "true");
         Environment.SetEnvironmentVariable("LOGS_DIR", TestFixtures.NewTempDir("evtlog"));
-        Logging.StartRun("hardening");
+        RunLog.StartRun("hardening");
         Assert.Contains(_mirror.Entries, e =>
             e.EventId == EventLogSink.EventIdLifecycle
             && e.Severity == EventLogSeverity.Information

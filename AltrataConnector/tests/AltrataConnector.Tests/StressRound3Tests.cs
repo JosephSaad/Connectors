@@ -266,8 +266,8 @@ public class CertAssertionConcurrencyStressTests
         Environment.SetEnvironmentVariable("LOGS_DIR", logsDir);
         Environment.SetEnvironmentVariable(CertificateCredential.CertPathEnvVar, pfxPath);
         Environment.SetEnvironmentVariable(CertificateCredential.CertPasswordEnvVar, "pw");
-        Logging.EndRun();
-        Logging.StartRun("r3cert");
+        Logging.ResetForTests();
+        RunLog.StartRun("r3cert");
         try
         {
             var config = TestFixtures.NewConfig() with
@@ -310,7 +310,7 @@ public class CertAssertionConcurrencyStressTests
 
             // No key material, no raw assertion, in the run log — only the MODE
             // and the public thumbprint are allowed.
-            Logging.EndRun();
+            Logging.ResetForTests();
             var logText = string.Join("\n",
                 Directory.EnumerateFiles(logsDir, "*.log", SearchOption.AllDirectories)
                     .Select(File.ReadAllText));
@@ -331,7 +331,7 @@ public class CertAssertionConcurrencyStressTests
             Environment.SetEnvironmentVariable(CertificateCredential.CertPathEnvVar, null);
             Environment.SetEnvironmentVariable(CertificateCredential.CertPasswordEnvVar, null);
             Environment.SetEnvironmentVariable("LOGS_DIR", previousLogs);
-            Logging.EndRun();
+            Logging.ResetForTests();
         }
     }
 }
@@ -518,7 +518,7 @@ public class EventLogFloodStressTests : IDisposable
         EventLogSink.Override = null;
         Environment.SetEnvironmentVariable(EventLogSink.EnvVar, null);
         Environment.SetEnvironmentVariable("LOGS_DIR", null);
-        Logging.EndRun();
+        Logging.ResetForTests();
     }
 
     [Fact]

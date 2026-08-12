@@ -23,7 +23,8 @@ public static class ValidateConfig
 {
     public static async Task<object?> RunAsync(bool strict)
     {
-        Logging.Verbose = true;
+        ConsoleVerbosity.Verbose = true;
+        Logging.Configure(verbose: true);
         var errors = new List<string>();
         var warnings = new List<string>();
 

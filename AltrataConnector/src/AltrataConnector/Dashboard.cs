@@ -14,7 +14,7 @@ namespace AltrataConnector;
 public static class Dashboard
 {
     public static bool Enabled =>
-        !Console.IsOutputRedirected && !Logging.JsonFormat && !Logging.Verbose;
+        !Console.IsOutputRedirected && !Logging.JsonFormat && !ConsoleVerbosity.Verbose;
 
     /// <summary>Run a crawl with a live status table; falls back to plain awaiting.</summary>
     public static async Task<CrawlResult> RunAsync(CrawlEngine engine, Func<Task<CrawlResult>> crawl)

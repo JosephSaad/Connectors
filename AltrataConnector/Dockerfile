@@ -20,18 +20,24 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /source
 
+# The build context is the REPOSITORY ROOT, not this directory, because the
+# connector now references ../Connector.Chassis and a build cannot reach outside
+# its context. Build with:  docker build -f AltrataConnector/Dockerfile .
+#
 # Restore first (better layer caching): copy the solution + project files, then
 # restore, then copy the rest of the tree.
-COPY AltrataConnector.sln ./
-COPY src/AltrataConnector/AltrataConnector.csproj src/AltrataConnector/
-COPY tests/AltrataConnector.Tests/AltrataConnector.Tests.csproj tests/AltrataConnector.Tests/
-RUN dotnet restore src/AltrataConnector/AltrataConnector.csproj
+COPY AltrataConnector/AltrataConnector.sln AltrataConnector/
+COPY AltrataConnector/src/AltrataConnector/AltrataConnector.csproj AltrataConnector/src/AltrataConnector/
+COPY AltrataConnector/tests/AltrataConnector.Tests/AltrataConnector.Tests.csproj AltrataConnector/tests/AltrataConnector.Tests/
+COPY Connector.Chassis/Connector.Chassis.csproj Connector.Chassis/
+RUN dotnet restore AltrataConnector/src/AltrataConnector/AltrataConnector.csproj
 
 # Copy the remaining sources and publish the connector only (Release,
 # framework-dependent, portable — the runtime stage already ships the .NET
 # runtime; the portable publish carries the native assets (SQLite) under runtimes/).
-COPY . .
-RUN dotnet publish src/AltrataConnector/AltrataConnector.csproj \
+COPY Connector.Chassis/ Connector.Chassis/
+COPY AltrataConnector/ AltrataConnector/
+RUN dotnet publish AltrataConnector/src/AltrataConnector/AltrataConnector.csproj \
         -c Release \
         --no-restore \
         -o /app/publish

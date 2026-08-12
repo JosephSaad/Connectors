@@ -12,11 +12,13 @@ on:
     branches: [main]
     paths:
       - "AltrataConnector/**"
+      - "Connector.Chassis/**"
       - ".github/workflows/altrata.yml"
   pull_request:
     branches: [main]
     paths:
       - "AltrataConnector/**"
+      - "Connector.Chassis/**"
       - ".github/workflows/altrata.yml"
   workflow_dispatch:
 
@@ -89,7 +91,7 @@ jobs:
       - name: Build image
         uses: docker/build-push-action@v7
         with:
-          context: ./AltrataConnector
+          context: .
           file: AltrataConnector/Dockerfile
           push: false
           tags: altrata-connector:ci

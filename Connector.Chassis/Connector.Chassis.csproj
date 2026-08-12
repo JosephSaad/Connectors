@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
 
     <PackageId>Connector.Chassis</PackageId>
-    <Version>1.12.1</Version>
+    <Version>1.13.0</Version>
     <IsPackable>true</IsPackable>
   </PropertyGroup>
 
@@ -15,6 +15,7 @@
     <InternalsVisibleTo Include="ClarizenConnector.Tests" />
     <InternalsVisibleTo Include="HadoopConnector.Tests" />
     <InternalsVisibleTo Include="SalesforceCopilotConnector.Tests" />
+    <InternalsVisibleTo Include="AltrataConnector.Tests" />
     <InternalsVisibleTo Include="StressHarness" />
   </ItemGroup>
 

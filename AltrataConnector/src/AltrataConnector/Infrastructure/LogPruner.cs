@@ -34,7 +34,10 @@ public static class LogPruner
         if (days <= 0)
             return 0;
 
-        var root = logsRoot ?? Logging.LogsRoot;
+        // DirectoryHardening.LogsDir, not chassis Logging.LogsRoot: the latter is
+        // a settable static that only reflects LOGS_DIR once a run has started, so
+        // pruning invoked outside a run would target a stale path.
+        var root = logsRoot ?? DirectoryHardening.LogsDir;
         if (!Directory.Exists(root))
             return 0;
 

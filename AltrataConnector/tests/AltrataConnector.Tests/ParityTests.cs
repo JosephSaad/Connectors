@@ -590,7 +590,7 @@ public class LogGatingTests : IDisposable
     {
         Environment.SetEnvironmentVariable("LOG_LEVEL", null);
         Environment.SetEnvironmentVariable("LOGS_DIR", null);
-        Logging.EndRun();
+        Logging.ResetForTests();
     }
 
     [Fact]
@@ -598,12 +598,12 @@ public class LogGatingTests : IDisposable
     {
         Environment.SetEnvironmentVariable("LOG_LEVEL", null);
         var logger = Logging.GetLogger("gating_test");
-        Assert.False(logger.IsDebugEnabled);
+        Assert.False(logger.IsEnabledFor(Connector.Chassis.LogLevel.Debug));
 
         Environment.SetEnvironmentVariable("LOG_LEVEL", "debug");
-        Assert.True(logger.IsDebugEnabled);
+        Assert.True(logger.IsEnabledFor(Connector.Chassis.LogLevel.Debug));
         Environment.SetEnvironmentVariable("LOG_LEVEL", "DEBUG");
-        Assert.True(logger.IsDebugEnabled);
+        Assert.True(logger.IsEnabledFor(Connector.Chassis.LogLevel.Debug));
     }
 
     [Fact]
@@ -611,7 +611,7 @@ public class LogGatingTests : IDisposable
     {
         var logs = TestFixtures.NewTempDir("gating_logs");
         Environment.SetEnvironmentVariable("LOGS_DIR", logs);
-        Logging.StartRun("gating");
+        RunLog.StartRun("gating");
         var logger = Logging.GetLogger("gating_test");
         try
         {
@@ -623,7 +623,7 @@ public class LogGatingTests : IDisposable
         }
         finally
         {
-            Logging.EndRun();
+            Logging.ResetForTests();
         }
 
         var logFile = Directory.EnumerateFiles(logs, "connector.log", SearchOption.AllDirectories).Single();
