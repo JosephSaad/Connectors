@@ -27,8 +27,8 @@ public sealed class EventDebouncer
     /// <summary>Default cap on distinct pending entities (CLARIZEN_WEBHOOK_MAX_PENDING).</summary>
     public const int DefaultMaxPending = 100_000;
 
-    private static readonly Infrastructure.IAppLogger Logger =
-        Infrastructure.Logging.GetLogger("clarizen_connector.webhook");
+    private static readonly IAppLogger Logger =
+        Logging.GetLogger("clarizen_connector.webhook");
 
     private readonly object _lock = new();
     private readonly Dictionary<string, Pending> _pending = new(StringComparer.Ordinal);

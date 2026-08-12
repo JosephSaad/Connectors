@@ -28,6 +28,34 @@
          OTEL_EXPORTER_OTLP_ENDPOINT is set; a cheap no-op otherwise. -->
     <PackageReference Include="OpenTelemetry" Version="1.16.0" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.16.0" />
+    <!-- The chassis lives in this repository, so it is referenced as a project
+         rather than a published package: a clean clone builds with no feed, no
+         pack step and no version to keep in sync. -->
+    <ProjectReference Include="..\..\..\Connector.Chassis\Connector.Chassis.csproj" />
+  </ItemGroup>
+
+  <!-- Chassis migration aliases: each migrated type resolves to its chassis
+       counterpart by simple name, so call sites are untouched and the not-yet-
+       migrated ClarizenConnector.Infrastructure types do not collide. -->
+  <ItemGroup>
+    <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
+    <!-- R3: SecretProvider consumed from chassis. -->
+    <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />
+    <!-- R5: SQL access seam. ISqlGateway + the gateway impl (chassis SqlGateway)
+         consumed by simple names; SqlExecutor aliases to the chassis SqlGateway
+         so `new SqlExecutor()` / SqlExecutor.EnsureEncrypt resolve unchanged. -->
+    <Using Include="Connector.Chassis.ISqlGateway" Alias="ISqlGateway" />
+    <Using Include="Connector.Chassis.SqlGateway" Alias="SqlExecutor" />
+    <!-- R2: Logging unified into the chassis. These map the simple names the
+         Clarizen code uses (Logging / IAppLogger / LogLevel) to their chassis
+         counterparts now that Infrastructure/Logging.cs is deleted. -->
+    <Using Include="Connector.Chassis.Logging" Alias="Logging" />
+    <Using Include="Connector.Chassis.IAppLogger" Alias="IAppLogger" />
+    <Using Include="Connector.Chassis.LogLevel" Alias="LogLevel" />
+    <!-- R4 (re-platform): Metrics is now a connector-side facade in
+         ClarizenConnector.Infrastructure (Infrastructure/Metrics.cs); it resolves
+         by simple name via the existing Infrastructure usings and drives the
+         chassis Connector.Chassis.MetricsRenderer for the rendering mechanism. -->
   </ItemGroup>
 
 </Project>

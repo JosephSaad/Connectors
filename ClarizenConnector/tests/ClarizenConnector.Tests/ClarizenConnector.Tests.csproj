@@ -20,6 +20,23 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <!-- Chassis migration aliases (mirror src): migrated types resolve to the
+         chassis by simple name so test call sites are untouched. -->
+    <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
+    <!-- R3: SecretProvider consumed from chassis. -->
+    <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />
+    <!-- R5: SQL access seam. ISqlGateway + the gateway impl (chassis SqlGateway)
+         consumed by simple names; SqlExecutor aliases to the chassis SqlGateway
+         so `new SqlExecutor()` / SqlExecutor.EnsureEncrypt resolve unchanged. -->
+    <Using Include="Connector.Chassis.ISqlGateway" Alias="ISqlGateway" />
+    <Using Include="Connector.Chassis.SqlGateway" Alias="SqlExecutor" />
+    <!-- R2: Logging unified into the chassis. -->
+    <Using Include="Connector.Chassis.Logging" Alias="Logging" />
+    <Using Include="Connector.Chassis.IAppLogger" Alias="IAppLogger" />
+    <Using Include="Connector.Chassis.LogLevel" Alias="LogLevel" />
+    <!-- R4 (re-platform): Metrics is a connector-side facade
+         (ClarizenConnector.Infrastructure.Metrics); tests resolve it by simple
+         name via the Infrastructure usings already present in the test files. -->
   </ItemGroup>
 
   <ItemGroup>

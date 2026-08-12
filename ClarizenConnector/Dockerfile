@@ -21,17 +21,19 @@ WORKDIR /source
 
 # Restore first (better layer caching): copy the solution + project files, then
 # restore, then copy the rest of the tree.
-COPY ClarizenConnector.sln ./
-COPY src/ClarizenConnector/ClarizenConnector.csproj src/ClarizenConnector/
-COPY tests/ClarizenConnector.Tests/ClarizenConnector.Tests.csproj tests/ClarizenConnector.Tests/
-RUN dotnet restore src/ClarizenConnector/ClarizenConnector.csproj
+COPY ClarizenConnector/ClarizenConnector.sln ClarizenConnector/
+COPY ClarizenConnector/src/ClarizenConnector/ClarizenConnector.csproj ClarizenConnector/src/ClarizenConnector/
+COPY ClarizenConnector/tests/ClarizenConnector.Tests/ClarizenConnector.Tests.csproj ClarizenConnector/tests/ClarizenConnector.Tests/
+COPY Connector.Chassis/Connector.Chassis.csproj Connector.Chassis/
+RUN dotnet restore ClarizenConnector/src/ClarizenConnector/ClarizenConnector.csproj
 
 # Copy the remaining sources and publish the connector only (Release,
 # framework-dependent, portable — the runtime stage already ships the .NET
 # runtime; the portable publish carries the native assets (e.g. SQLite)
 # under runtimes/).
-COPY . .
-RUN dotnet publish src/ClarizenConnector/ClarizenConnector.csproj \
+COPY Connector.Chassis/ Connector.Chassis/
+COPY ClarizenConnector/ ClarizenConnector/
+RUN dotnet publish ClarizenConnector/src/ClarizenConnector/ClarizenConnector.csproj \
         -c Release \
         --no-restore \
         -o /app/publish
