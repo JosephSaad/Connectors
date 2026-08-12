@@ -12,11 +12,13 @@ on:
     branches: [main]
     paths:
       - "HadoopConnector/**"
+      - "Connector.Chassis/**"
       - ".github/workflows/hadoop.yml"
   pull_request:
     branches: [main]
     paths:
       - "HadoopConnector/**"
+      - "Connector.Chassis/**"
       - ".github/workflows/hadoop.yml"
   workflow_dispatch:
 
@@ -89,7 +91,7 @@ jobs:
       - name: Build image
         uses: docker/build-push-action@v7
         with:
-          context: ./HadoopConnector
+          context: .
           file: HadoopConnector/Dockerfile
           push: false
           tags: hadoop-connector:ci

@@ -30,6 +30,23 @@
          OTEL_EXPORTER_OTLP_ENDPOINT is set; a cheap no-op otherwise. -->
     <PackageReference Include="OpenTelemetry" Version="1.16.0" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.16.0" />
+    <!-- The chassis lives in this repository, so it is referenced as a project
+         rather than a published package: a clean clone builds with no feed, no
+         pack step and no version to keep in sync. -->
+    <ProjectReference Include="..\..\..\Connector.Chassis\Connector.Chassis.csproj" />
+  </ItemGroup>
+
+
+  <!-- Chassis migration aliases: migrated types resolve to the chassis by simple
+       name so call sites are untouched; not-yet-migrated local types don't collide. -->
+  <ItemGroup>
+    <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
+    <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />
+    <Using Include="Connector.Chassis.Logging" Alias="Logging" />
+    <Using Include="Connector.Chassis.IAppLogger" Alias="IAppLogger" />
+    <Using Include="Connector.Chassis.LogLevel" Alias="LogLevel" />
+    <Using Include="Connector.Chassis.ISqlGateway" Alias="ISqlGateway" />
+    <Using Include="Connector.Chassis.SqlGateway" Alias="SqlExecutor" />
   </ItemGroup>
 
 </Project>

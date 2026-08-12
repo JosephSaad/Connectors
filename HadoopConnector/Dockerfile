@@ -21,17 +21,19 @@ WORKDIR /source
 
 # Restore first (better layer caching): copy the solution + project files, then
 # restore, then copy the rest of the tree.
-COPY HadoopConnector.sln ./
-COPY src/HadoopConnector/HadoopConnector.csproj src/HadoopConnector/
-COPY tests/HadoopConnector.Tests/HadoopConnector.Tests.csproj tests/HadoopConnector.Tests/
-RUN dotnet restore src/HadoopConnector/HadoopConnector.csproj
+COPY HadoopConnector/HadoopConnector.sln HadoopConnector/
+COPY HadoopConnector/src/HadoopConnector/HadoopConnector.csproj HadoopConnector/src/HadoopConnector/
+COPY HadoopConnector/tests/HadoopConnector.Tests/HadoopConnector.Tests.csproj HadoopConnector/tests/HadoopConnector.Tests/
+COPY Connector.Chassis/Connector.Chassis.csproj Connector.Chassis/
+RUN dotnet restore HadoopConnector/src/HadoopConnector/HadoopConnector.csproj
 
 # Copy the remaining sources and publish the connector only (Release,
 # framework-dependent, portable — the runtime stage already ships the .NET
 # runtime; the portable publish carries the native assets (e.g. SQLite)
 # under runtimes/).
-COPY . .
-RUN dotnet publish src/HadoopConnector/HadoopConnector.csproj \
+COPY Connector.Chassis/ Connector.Chassis/
+COPY HadoopConnector/ HadoopConnector/
+RUN dotnet publish HadoopConnector/src/HadoopConnector/HadoopConnector.csproj \
         -c Release \
         --no-restore \
         -o /app/publish

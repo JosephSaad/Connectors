@@ -15,6 +15,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{07C2787E
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "StressHarness", "tools\StressHarness\StressHarness.csproj", "{FB4C4DF9-7537-4AFC-B84C-FF2E98ED8814}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Connector.Chassis", "..\Connector.Chassis\Connector.Chassis.csproj", "{F8B53138-AEEC-4964-AE62-D462F652BD76}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -61,6 +63,18 @@ Global
 		{FB4C4DF9-7537-4AFC-B84C-FF2E98ED8814}.Release|x64.Build.0 = Release|Any CPU
 		{FB4C4DF9-7537-4AFC-B84C-FF2E98ED8814}.Release|x86.ActiveCfg = Release|Any CPU
 		{FB4C4DF9-7537-4AFC-B84C-FF2E98ED8814}.Release|x86.Build.0 = Release|Any CPU
+		{F8B53138-AEEC-4964-AE62-D462F652BD76}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F8B53138-AEEC-4964-AE62-D462F652BD76}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F8B53138-AEEC-4964-AE62-D462F652BD76}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{F8B53138-AEEC-4964-AE62-D462F652BD76}.Debug|x64.Build.0 = Debug|Any CPU
+		{F8B53138-AEEC-4964-AE62-D462F652BD76}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{F8B53138-AEEC-4964-AE62-D462F652BD76}.Debug|x86.Build.0 = Debug|Any CPU
+		{F8B53138-AEEC-4964-AE62-D462F652BD76}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F8B53138-AEEC-4964-AE62-D462F652BD76}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F8B53138-AEEC-4964-AE62-D462F652BD76}.Release|x64.ActiveCfg = Release|Any CPU
+		{F8B53138-AEEC-4964-AE62-D462F652BD76}.Release|x64.Build.0 = Release|Any CPU
+		{F8B53138-AEEC-4964-AE62-D462F652BD76}.Release|x86.ActiveCfg = Release|Any CPU
+		{F8B53138-AEEC-4964-AE62-D462F652BD76}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
