@@ -33,8 +33,31 @@ public static class Program
 {
     private static readonly IAppLogger Logger = Logging.GetLogger("clarizen_connector.cli");
 
+    /// <summary>
+    /// Point the shared chassis logging at Clarizen's identity, format and
+    /// side-effects. R2: Logging lives in Connector.Chassis; the chassis cannot
+    /// reference ClarizenConnector types, so the Clarizen host wires them here as
+    /// hooks before the first log line — owner-only directory hardening, the
+    /// Windows Event Log mirror, and the ambient correlation id. (Metrics is now
+    /// a connector-side facade in ClarizenConnector.Infrastructure that drives the
+    /// chassis MetricsRenderer directly, so no metrics wiring is needed here.)
+    /// Idempotent: repeated calls re-assign the same delegates.
+    /// </summary>
+    private static void WireChassisLogging()
+    {
+        Connector.Chassis.Chassis.Init(
+            new Connector.Chassis.ChassisIdentity(
+                "clarizen_connector", EventLogSink.Source, "clarizen_connector"));
+        Connector.Chassis.Chassis.CorrelationIdProvider = () => CorrelationContext.Current;
+        Logging.HardenDirectoryHook = DirectoryHardening.EnsureOwnerOnly;
+        Logging.EventLogMirrorHook = EventLogSink.Mirror;
+        Logging.UseStandardMode();
+    }
+
     public static async Task<int> Main(string[] args)
     {
+        WireChassisLogging();
+
         if (WindowsServiceHelpers.IsWindowsService())
             return await ServiceHost.RunAsync(args, ExecuteAsync);
 
@@ -44,6 +67,8 @@ public static class Program
     /// <summary>Parse and run one CLI command; returns the process exit code.</summary>
     internal static async Task<int> ExecuteAsync(string[] args)
     {
+        WireChassisLogging();
+
         try
         {
             Console.OutputEncoding = new UTF8Encoding(false);
