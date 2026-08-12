@@ -442,7 +442,10 @@ public sealed class LoggerObject : IAppLogger
     {
         if (Logging.Mode == LoggingMode.Standard)
         {
-            Logging.Write((LogLevel)level, Name, ex is null ? message : $"{message}\n{ex}");
+            // The exception travels alongside the message rather than folded into
+            // it: the active dialect decides whether it belongs on a second line
+            // or in a structured field of its own.
+            Logging.Write((LogLevel)level, Name, message, ex);
             return;
         }
         Log(level, message, ex);
@@ -631,12 +634,26 @@ public static class Logging
         string.Equals(Environment.GetEnvironmentVariable("LOG_FORMAT"), "json", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// The level the hot-path gate advertises, delegated to the active
+    /// <see cref="Dialect"/>. See <see cref="DefaultEffectiveLevel"/> for the
+    /// chassis default.
+    /// </summary>
+    public static LogLevel EffectiveLevel() => Dialect.EffectiveLevel();
+
+    /// <summary>
+    /// Format and gating policy for the Standard sink. Defaults to the chassis's
+    /// historical behaviour; a host with its own log contract assigns a subclass
+    /// at startup, alongside <see cref="Chassis.Init"/> and the other hooks.
+    /// </summary>
+    public static StandardLogDialect Dialect { get; set; } = new();
+
+    /// <summary>
     /// The lowest level any Standard sink currently accepts: the file sink
     /// captures DEBUG+ whenever a run directory is open; otherwise only the
     /// console threshold applies. LOG_LEVEL (DEBUG|INFO|WARNING|ERROR) raises the
     /// floor for both sinks — the hot-path gate honours it.
     /// </summary>
-    public static LogLevel EffectiveLevel()
+    internal static LogLevel DefaultEffectiveLevel()
     {
         var floor = ParseLevel(Environment.GetEnvironmentVariable("LOG_LEVEL"));
         LogLevel sinks;
@@ -728,41 +745,27 @@ public static class Logging
     /// from <see cref="Chassis.CorrelationIdProvider"/> and the Event-Log mirror
     /// from <see cref="EventLogMirrorHook"/>, so the chassis needs no Standard type.
     /// </summary>
-    internal static void Write(LogLevel level, string loggerName, string message)
+    internal static void Write(LogLevel level, string loggerName, string rawMessage, Exception? exception = null)
     {
-        // LOG_LEVEL raises the floor for every sink (matches EffectiveLevel()).
-        if (level < ParseLevel(Environment.GetEnvironmentVariable("LOG_LEVEL")))
+        // Read once: a dialect swapped mid-write would otherwise gate with one
+        // policy and render with another.
+        var dialect = Dialect;
+        var message = dialect.ComposeMessage(rawMessage, exception);
+
+        if (level < dialect.SinkFloor())
             return;
 
         TestSink?.Invoke(level, loggerName, message);
 
-        // Optional Windows Event Log mirror (host-wired) — skipped when unset.
-        EventLogMirrorHook?.Invoke(level, loggerName, message);
-
         // Stamp the ambient correlation id (per crawl cycle / webhook event) so a
         // single run is followable end-to-end. Null when outside a scope / unset.
-        var correlationId = Chassis.CorrelationIdProvider?.Invoke();
+        var e = new StandardLogEvent(
+            level, loggerName, message, exception, Chassis.CorrelationIdProvider?.Invoke());
 
-        string line;
-        if (StandardJsonFormat)
-        {
-            var fields = new Dictionary<string, object?>
-            {
-                ["timestamp"] = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture),
-                ["level"] = level.ToString().ToUpperInvariant(),
-                ["logger"] = loggerName,
-                ["message"] = message,
-            };
-            if (correlationId is not null)
-                fields["correlation_id"] = correlationId;
-            line = JsonSerializer.Serialize(fields, StandardJsonOptions);
-        }
-        else
-        {
-            var stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-            var prefix = correlationId is not null ? $"[{correlationId[..8]}] " : string.Empty;
-            line = $"{stamp} [{level.ToString().ToUpperInvariant(),-7}] {prefix}{loggerName}: {message}";
-        }
+        // Optional Windows Event Log mirror (host-wired) — skipped when unset.
+        dialect.Mirror(e);
+
+        var line = dialect.Render(e);
 
         RenderedSink?.Invoke(line);
 
@@ -778,12 +781,39 @@ public static class Logging
             }
         }
 
-        if (level >= ConsoleLevel)
+        if (dialect.WritesToConsole(e))
         {
-            if (level >= LogLevel.Warning)
+            if (dialect.WritesToStandardError(e))
                 Console.Error.WriteLine(line);
             else
                 Console.WriteLine(line);
         }
+    }
+
+    /// <summary>
+    /// The chassis's historical Standard line format: text
+    /// <c>"ts [LEVEL  ] [corr8] logger: msg"</c>, or one JSON object per record
+    /// under <c>LOG_FORMAT=json</c> with the correlation id stamped as
+    /// <c>correlation_id</c> and omitted outside a scope.
+    /// </summary>
+    internal static string DefaultRender(StandardLogEvent e)
+    {
+        if (StandardJsonFormat)
+        {
+            var fields = new Dictionary<string, object?>
+            {
+                ["timestamp"] = DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+                ["level"] = e.Level.ToString().ToUpperInvariant(),
+                ["logger"] = e.Logger,
+                ["message"] = e.Message,
+            };
+            if (e.CorrelationId is not null)
+                fields["correlation_id"] = e.CorrelationId;
+            return JsonSerializer.Serialize(fields, StandardJsonOptions);
+        }
+
+        var stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        var prefix = e.CorrelationId is not null ? $"[{e.CorrelationId[..8]}] " : string.Empty;
+        return $"{stamp} [{e.Level.ToString().ToUpperInvariant(),-7}] {prefix}{e.Logger}: {e.Message}";
     }
 }

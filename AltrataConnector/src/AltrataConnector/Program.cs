@@ -26,8 +26,41 @@ namespace AltrataConnector;
 
 public static class Program
 {
+    /// <summary>
+    /// Install this connector's identity into the shared chassis and select the
+    /// standard (run-directory) logging behaviour.
+    /// </summary>
+    /// <remarks>
+    /// Must run before the first chassis type is touched: chassis components name
+    /// their loggers from Chassis.Identity at type-load, so a later call is
+    /// silently ignored. No logger factory is needed here - unlike Salesforce,
+    /// this connector adopts chassis logging outright, so the default factory is
+    /// already correct.
+    /// </remarks>
+    internal static void WireChassis()
+    {
+        Connector.Chassis.Chassis.Init(
+            new Connector.Chassis.ChassisIdentity(
+                "altrata_connector", Infrastructure.EventLogSink.SourceName, "altrata_connector"));
+
+        // Host seams. The chassis deliberately knows nothing about this
+        // connector's correlation scope, Event Log sink or directory hardening,
+        // so each is supplied here.
+        Connector.Chassis.Chassis.CorrelationIdProvider =
+            () => Infrastructure.CorrelationContext.Current;
+        Logging.HardenDirectoryHook = Infrastructure.DirectoryHardening.EnsureSecureDirectory;
+        // Log format, level gating, Event Log mirroring and console routing all
+        // follow this connector's own contract rather than the chassis default -
+        // see AltrataLogDialect for what differs and why it is preserved.
+        Logging.Dialect = new Infrastructure.AltrataLogDialect();
+
+        Logging.UseStandardMode();
+    }
+
     public static async Task<int> Main(string[] args)
     {
+        WireChassis();
+
         // Started by the Windows Service Control Manager → run under the
         // SCM-aware host (Infrastructure/ServiceHost.cs). Always false when
         // launched from a console or on non-Windows platforms.

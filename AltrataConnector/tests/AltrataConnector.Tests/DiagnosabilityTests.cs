@@ -21,22 +21,22 @@ internal sealed class RunLogCapture : IDisposable
 
     public RunLogCapture(string prefix)
     {
-        Logging.EndRun();   // defensive: never inherit another test's file sink
-        Logging.StartRun(prefix);
+        Logging.ResetForTests();   // defensive: never inherit another test's file sink
+        RunLog.StartRun(prefix);
         _logsRoot = Logging.LogsRoot;
     }
 
     /// <summary>Close the run and return the whole connector.log content.</summary>
     public string ReadAll()
     {
-        Logging.EndRun();
+        Logging.ResetForTests();
         var file = Directory.EnumerateFiles(_logsRoot, "connector.log", SearchOption.AllDirectories)
             .OrderByDescending(File.GetLastWriteTimeUtc)
             .First();
         return File.ReadAllText(file);
     }
 
-    public void Dispose() => Logging.EndRun();
+    public void Dispose() => Logging.ResetForTests();
 }
 
 public class TransformFailureDiagnosabilityTests
@@ -136,7 +136,7 @@ public class ErasureLedgerDiagnosabilityTests : IDisposable
 
     public void Dispose()
     {
-        Logging.EndRun();
+        Logging.ResetForTests();
         Environment.SetEnvironmentVariable("LOGS_DIR", _previousLogsDir);
     }
 
@@ -184,7 +184,7 @@ public class StateFileDiagnosabilityTests : IDisposable
 
     public void Dispose()
     {
-        Logging.EndRun();
+        Logging.ResetForTests();
         Environment.SetEnvironmentVariable("LOGS_DIR", _previousLogsDir);
     }
 
@@ -239,7 +239,7 @@ public class TopLevelHandlerDiagnosabilityTests : IDisposable
 
     public void Dispose()
     {
-        Logging.EndRun();
+        Logging.ResetForTests();
         Environment.SetEnvironmentVariable("LOGS_DIR", _previousLogsDir);
         Environment.SetEnvironmentVariable("CONNECTOR_ID", _previousConnectorId);
         ServiceStop.ResetForTests();
@@ -254,12 +254,12 @@ public class TopLevelHandlerDiagnosabilityTests : IDisposable
         var root = TestFixtures.NewTempDir("diag_toplevel");
         Environment.SetEnvironmentVariable("LOGS_DIR", Path.Combine(root, "logs"));
         Environment.SetEnvironmentVariable("CONNECTOR_ID", "ab");
-        Logging.EndRun();   // the command opens its own run under LOGS_DIR
+        Logging.ResetForTests();   // the command opens its own run under LOGS_DIR
 
         var exitCode = await Program.ExecuteAsync(new[] { "seat-sync" });
         Assert.Equal(1, exitCode);
 
-        Logging.EndRun();
+        Logging.ResetForTests();
         var file = Directory.EnumerateFiles(Path.Combine(root, "logs"), "connector.log",
             SearchOption.AllDirectories).Single();
         var log = File.ReadAllText(file);

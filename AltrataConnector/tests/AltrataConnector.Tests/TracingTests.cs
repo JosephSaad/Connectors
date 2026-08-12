@@ -361,7 +361,7 @@ public class CorrelationStampingTests
         var logs = TestFixtures.NewTempDir("corrlogs");
         Environment.SetEnvironmentVariable("LOGS_DIR", logs);
         Environment.SetEnvironmentVariable("LOG_FORMAT", "json");
-        Logging.StartRun("corr");
+        RunLog.StartRun("corr");
         try
         {
             using (CorrelationContext.Begin("corr-42"))
@@ -370,7 +370,7 @@ public class CorrelationStampingTests
         }
         finally
         {
-            Logging.EndRun();
+            Logging.ResetForTests();
             Environment.SetEnvironmentVariable("LOG_FORMAT", null);
             Environment.SetEnvironmentVariable("LOGS_DIR", null);
         }

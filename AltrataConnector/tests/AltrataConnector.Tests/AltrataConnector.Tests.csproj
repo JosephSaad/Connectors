@@ -24,6 +24,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Using Include="Connector.Chassis.Logging" Alias="Logging" />
+    <Using Include="Connector.Chassis.IAppLogger" Alias="IAppLogger" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\AltrataConnector\AltrataConnector.csproj" />
   </ItemGroup>
 

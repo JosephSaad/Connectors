@@ -671,7 +671,7 @@ public sealed class GraphClient : IGraphClient
                 return results;
             }
 
-            if (Logger.IsDebugEnabled)
+            if (Logger.IsEnabledFor(Connector.Chassis.LogLevel.Debug))
             {
                 // Hot-path log gating: serializing the full $batch response array is
                 // the most expensive log message in the pipeline — DEBUG only.

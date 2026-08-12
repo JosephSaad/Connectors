@@ -59,9 +59,23 @@ public static class DirectoryHardening
     /// once per command run; idempotent and best-effort.</summary>
     public static void HardenStartupDirectories()
     {
-        EnsureSecureDirectory(Logging.LogsRoot);
+        EnsureSecureDirectory(LogsDir);
         EnsureSecureDirectory(StateDir);
     }
+
+    /// <summary>
+    /// Effective logs directory (LOGS_DIR override, else ./logs) — resolved the
+    /// same way as <see cref="StateDir"/>.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not chassis <c>Logging.LogsRoot</c>. That is a settable static
+    /// fixed at type-load, so it only reflects LOGS_DIR once a run has started;
+    /// this is called at startup and from the verifier probe, before and outside
+    /// any run, where it would otherwise harden a stale path.
+    /// </remarks>
+    public static string LogsDir =>
+        Environment.GetEnvironmentVariable("LOGS_DIR")
+        ?? Path.Combine(Directory.GetCurrentDirectory(), "logs");
 
     /// <summary>Effective state directory (DATA_DIR override, else ./data) —
     /// matches FileStateStore's resolution.</summary>

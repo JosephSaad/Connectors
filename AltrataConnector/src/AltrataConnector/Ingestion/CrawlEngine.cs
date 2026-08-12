@@ -735,7 +735,7 @@ public sealed class CrawlEngine
                     // delivery + why (ids only — never a profile field value).
                     Logger.Warning($"Transform dead-lettered {dataset} record '{record.Id ?? $"row{i}"}' " +
                                    $"(delivery '{delivery.Id}'): {exc.GetType().Name}: {exc.Message}");
-                    if (Logger.IsDebugEnabled)
+                    if (Logger.IsEnabledFor(Connector.Chassis.LogLevel.Debug))
                         Logger.Debug($"Transform failed for {dataset} record {record.Id ?? i.ToString()}: {exc}");
                 }
             }

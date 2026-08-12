@@ -333,8 +333,8 @@ public static class CommandRegistry
     {
         return async args =>
         {
-            Logging.Verbose = args.Verbose;
-            Logging.StartRun(logPrefix);
+            ConsoleVerbosity.Verbose = args.Verbose;
+            RunLog.StartRun(logPrefix, args.Verbose);
             // Owner-only permissions on the logs + state directories (POSIX 0700
             // / best-effort Windows ACLs). Best-effort; never fatal.
             DirectoryHardening.HardenStartupDirectories();

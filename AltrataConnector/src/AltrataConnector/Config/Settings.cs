@@ -337,7 +337,7 @@ public sealed record AppConfig
             if (gate.Enabled && gate.IcapUrl != null)
             {
                 // Honest about the scope reduction rather than silently ignoring it.
-                Infrastructure.Logging.GetLogger("altrata_connector.config").Info(
+                Logging.GetLogger("altrata_connector.config").Info(
                     $"{Altrata.ContentGateOptions.IcapUrlEnvVar} is set but INERT in this connector: " +
                     "Altrata ingests no binary content (FeedReader accepts .json/.jsonl/.csv only), " +
                     "so there is no malware scanner. File integrity is the SHA-256 manifest gate.");

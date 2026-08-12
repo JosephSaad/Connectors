@@ -1,0 +1,41 @@
+# Repository-root .dockerignore
+# -----------------------------
+# Every connector image now builds with the REPOSITORY ROOT as its context
+# (docker build -f <Connector>/Dockerfile .), because each references
+# ../Connector.Chassis and a build cannot reach outside its context. Docker only
+# ever reads the .dockerignore at the context root, so the per-connector files
+# stopped being honoured the moment the context moved — including their exclusion
+# of env/.env.local, which holds real credentials on a developer machine.
+#
+# This file restores those exclusions for the whole repository. Patterns are
+# **/-prefixed so they apply inside every connector directory.
+
+# Build output (rebuilt inside the image)
+**/bin/
+**/obj/
+
+# Version control
+.git
+.gitignore
+
+# Runtime artifacts / state (bind-mounted or created at runtime, never baked in)
+**/logs/
+**/data/
+**/stress-out/
+
+# IDE / user files
+**/.vs/
+**/.idea/
+**/*.user
+
+# Local environment / secrets — never copy real credentials into the image.
+# The tracked .env.local.example templates are deliberately NOT matched.
+**/env/.env.local
+**/env/.env.local.user
+**/.env.local
+**/.env.local.user
+
+# Container / CI descriptors (not needed inside the build context)
+**/docker-compose.yml
+**/docker-compose.*.yml
+.github/
