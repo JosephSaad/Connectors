@@ -62,7 +62,7 @@ public static class ServiceHost
     private sealed class CommandWorker : BackgroundService
     {
         private static readonly IAppLogger Logger =
-            Logging.GetLogger(Chassis.Identity.ServiceLoggerName);
+            Chassis.GetLogger(Chassis.Identity.ServiceLoggerName);
 
         private readonly string[] _args;
         private readonly Func<string[], Task<int>> _executeCommand;

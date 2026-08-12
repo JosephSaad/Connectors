@@ -53,7 +53,7 @@ public enum HaCloseResult
 /// </summary>
 public class HaCoordinator
 {
-    private static readonly IAppLogger Logger = Logging.GetLogger($"{Chassis.Identity.BaseLoggerName}.ha");
+    private static readonly IAppLogger Logger = Chassis.GetLogger($"{Chassis.Identity.BaseLoggerName}.ha");
 
     /// <summary>
     /// Optional host hook invoked once each time THIS node acquires an HA claim

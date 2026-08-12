@@ -47,7 +47,7 @@ public sealed record ChassisTracingOptions(
 
 public static class Tracing
 {
-    private static readonly IAppLogger Logger = Logging.GetLogger($"{Chassis.Identity.BaseLoggerName}.tracing");
+    private static readonly IAppLogger Logger = Chassis.GetLogger($"{Chassis.Identity.BaseLoggerName}.tracing");
 
     /// <summary>The single ActivitySource all connector spans are opened from
     /// (the host's Event Log source — the same string the pre-extraction

@@ -28,7 +28,7 @@ namespace Connector.Chassis;
 /// </summary>
 public static class Alerting
 {
-    private static readonly IAppLogger Logger = Logging.GetLogger(Chassis.Identity.BaseLoggerName);
+    private static readonly IAppLogger Logger = Chassis.GetLogger(Chassis.Identity.BaseLoggerName);
 
     /// <summary>Env var holding the alert webhook URL. Unset → alerting disabled.</summary>
     public const string WebhookUrlEnvVar = "ALERT_WEBHOOK_URL";

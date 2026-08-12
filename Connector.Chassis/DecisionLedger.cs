@@ -158,7 +158,7 @@ public sealed class DecisionLedger : IDisposable
     /// </summary>
     public const long MaxSeq = long.MaxValue - 1;
 
-    private static readonly IAppLogger Logger = Logging.GetLogger(Chassis.Identity.LedgerLoggerName);
+    private static readonly IAppLogger Logger = Chassis.GetLogger(Chassis.Identity.LedgerLoggerName);
 
     private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
 

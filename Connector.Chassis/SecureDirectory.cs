@@ -21,7 +21,7 @@ namespace Connector.Chassis;
 
 public static class SecureDirectory
 {
-    private static readonly IAppLogger Logger = Logging.GetLogger($"{Chassis.Identity.BaseLoggerName}.fs");
+    private static readonly IAppLogger Logger = Chassis.GetLogger($"{Chassis.Identity.BaseLoggerName}.fs");
 
     /// <summary>Owner-only POSIX permission bits (rwx------).</summary>
     internal const UnixFileMode OwnerOnly =
