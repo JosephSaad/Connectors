@@ -67,7 +67,7 @@ public class AdversarialProbeRound3Tests : IDisposable
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(DeadLetterPolicy.EnvVar, null);
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
     }
 
     private static DeadLetterRecord DeleteRecord(string itemId, string subject) => new()
@@ -91,7 +91,7 @@ public class AdversarialProbeRound3Tests : IDisposable
     [Fact]
     public async Task Retry_finalize_preserves_a_deadletter_appended_during_replay()
     {
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
         var root = TestFixtures.NewTempDir("probe1");
         var config = TestFixtures.NewConfig();
         var inner = new FakeGraphClient();
@@ -154,7 +154,7 @@ public class AdversarialProbeRound3Tests : IDisposable
     [Fact]
     public async Task Forget_subject_scrubs_upsert_but_keeps_compensating_delete()
     {
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
         var root = TestFixtures.NewTempDir("probe2");
         var config = TestFixtures.NewConfig();
         var graph = new FakeGraphClient();

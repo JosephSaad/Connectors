@@ -242,7 +242,7 @@ public class TopLevelHandlerDiagnosabilityTests : IDisposable
         Logging.ResetForTests();
         Environment.SetEnvironmentVariable("LOGS_DIR", _previousLogsDir);
         Environment.SetEnvironmentVariable("CONNECTOR_ID", _previousConnectorId);
-        ServiceStop.ResetForTests();
+        ServiceStop.Reset();
     }
 
     [Fact]

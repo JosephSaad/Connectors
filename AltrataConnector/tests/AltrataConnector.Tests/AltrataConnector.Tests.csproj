@@ -26,6 +26,7 @@
   <ItemGroup>
     <Using Include="Connector.Chassis.Logging" Alias="Logging" />
     <Using Include="Connector.Chassis.IAppLogger" Alias="IAppLogger" />
+    <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
   </ItemGroup>
 
   <ItemGroup>
