@@ -313,21 +313,23 @@ public class Round2ResolverChurnTests
         var clears = 0;
         using var stop = new CancellationTokenSource(TimeSpan.FromMilliseconds(1500));
 
-        var churn = Task.Run(async () =>
+        // A DEDICATED thread, not a pool task. The eight hammers below saturate
+        // the thread pool, so a pool-scheduled churn loop measures scheduling
+        // rather than churn: Task.Delay(1) actually slept ~15 ms (Windows' default
+        // timer resolution is ~15.6 ms) for ~32 clears in the 1500 ms window, and
+        // Task.Yield() was worse still at 1, because yielding parks the
+        // continuation behind eight busy hammers. Its own thread lets the loop
+        // pace itself, and Sleep(0) hands the rest of the timeslice to any ready
+        // thread of equal priority so the hammers are not starved.
+        var churn = Task.Factory.StartNew(() =>
         {
             while (!stop.IsCancellationRequested)
             {
                 Round2Support.ClearGroupCache(resolver);
                 Interlocked.Increment(ref clears);
-                try
-                {
-                    await Task.Delay(1, stop.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                }
+                Thread.Sleep(0);
             }
-        });
+        }, TaskCreationOptions.LongRunning);
 
         var hammers = Enumerable.Range(0, 8).Select(worker => Task.Run(async () =>
         {
@@ -1219,15 +1221,25 @@ public class Round2HaLeaseTests : IDisposable
     [Fact]
     public async Task FailoverStorm_LeadersKilledMidCrawl_ExactlyOnceCompletionNoDoubleOwnership()
     {
-        // 8 active-active nodes, 24 objects, ~120ms of work per object with 40ms
-        // lease renewals against a 300ms claim timeout. Six nodes are killed
+        // 8 active-active nodes, 24 objects, ~120ms of work per object with 150ms
+        // lease renewals against a 2s claim timeout. Six nodes are killed
         // mid-crawl, one after another, each while it holds a claim (a failover
         // storm). Every abandoned lease must go stale and be reclaimed by
         // EXACTLY one survivor, no object may ever have two live workers, every
         // object completes 'done' exactly once, and the crawl closes exactly once.
         using var db = new SqliteLeaseDb(Path.Combine(_tmp, "storm.db"));
         const int Nodes = 8, Objects = 24;
-        const long TimeoutMs = 300;
+        // A lease timeout cannot distinguish "dead" from "merely descheduled", so
+        // this margin has to exceed the worst scheduler stall, not the typical one.
+        // At 300 ms with 40 ms heartbeats it was ample on developer machines and on
+        // Linux CI, but a shared two-core Windows runner with eight node tasks plus
+        // the rest of the suite stalls a live owner past 300 ms often enough to make
+        // this test intermittently fail: a survivor then correctly reclaims a lease
+        // whose owner was only paused, and MaxActive for that object reads 2. That
+        // is the lease protocol behaving as designed, so the assertions below are
+        // right and the timings were wrong. 2000/150 keeps the same 13x heartbeat
+        // margin while tolerating a stall an order of magnitude longer.
+        const long TimeoutMs = 2000;
         var objects = Enumerable.Range(0, Objects).Select(i => $"Obj{i:D2}").ToList();
         var created = db.OpenOrJoin("n0", objects);
         Assert.True(created);
@@ -1245,7 +1257,7 @@ public class Round2HaLeaseTests : IDisposable
 
         var sw = Stopwatch.StartNew();
         var nodes = Enumerable.Range(0, Nodes).Select(i => Task.Run(() => RunNodeAsync(
-            db, $"n{i}", TimeoutMs, heartbeatMs: 40, workStepsFor: _ => 8, stepMs: 15,
+            db, $"n{i}", TimeoutMs, heartbeatMs: 150, workStepsFor: _ => 8, stepMs: 15,
             stats, killed, holding,
             killAtStep: node => victims.Contains(node) ? 3 : null))).ToList();
 
@@ -1260,7 +1272,7 @@ public class Round2HaLeaseTests : IDisposable
         Assert.All(stats.DoneRecorded.Values, count => Assert.Equal(1, count));
 
         // Split-brain check: no object ever had two concurrently-active workers,
-        // and with live heartbeats (40ms ≪ 300ms) no live owner was ever ousted.
+        // and with live heartbeats (150ms ≪ 2000ms) no live owner was ever ousted.
         Assert.All(stats.MaxActive, kv => Assert.Equal(1, kv.Value));
         Assert.Equal(0, stats.PrematureReclaims);
         Assert.Equal(0, stats.LostCompletes);

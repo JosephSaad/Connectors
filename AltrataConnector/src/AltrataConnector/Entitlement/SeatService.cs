@@ -60,7 +60,13 @@ public sealed class SeatService
                 path);
         try
         {
-            return ParseSeatFile(File.ReadAllText(path));
+            // Shared read: File.ReadAllText opens as FileShare.Read, which on
+            // Windows is refused while a writer holds the seat file — a concurrent
+            // shard crawl then fails with "the process cannot access the file".
+            using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            return ParseSeatFile(reader.ReadToEnd());
         }
         catch (Exception exc) when (exc is JsonException or FormatException)
         {

@@ -1,0 +1,95 @@
+name: Clarizen
+
+# Build and test the Clarizen connector.
+#
+# NOTE: GitHub Actions only executes workflows found in `.github/workflows` at the
+# REPOSITORY ROOT. The connector's own `ClarizenConnector/.github/workflows/*.yml` files are
+# inert leftovers from when each connector was its own repository, and are left
+# untouched here.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ClarizenConnector/**"
+      - ".github/workflows/clarizen.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "ClarizenConnector/**"
+      - ".github/workflows/clarizen.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: clarizen-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+  SOLUTION: "ClarizenConnector/ClarizenConnector.sln"
+  TEST_PROJECT: "ClarizenConnector/tests/ClarizenConnector.Tests/ClarizenConnector.Tests.csproj"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build the whole solution (so tools/ projects are compiled too) then run the
+  # suite. SQL/HA and other network-gated tests self-skip because their *_TEST_*
+  # env vars are unset, so this job stays hermetic.
+  #
+  # windows-latest is not a nicety: Windows Server is the primary deployment
+  # target (Windows service mode). Every Windows-only defect found in this
+  # repository so far was invisible on Linux and macOS.
+  # ---------------------------------------------------------------------------
+  build-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore ${{ env.SOLUTION }}
+
+      - name: Build
+        run: dotnet build ${{ env.SOLUTION }} -c Release --no-restore
+
+      - name: Test
+        run: dotnet test ${{ env.TEST_PROJECT }} -c Release --no-build
+
+  # ---------------------------------------------------------------------------
+  # Build the container image (not pushed). This connector is self-contained, so
+  # its build context is the connector directory.
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./ClarizenConnector
+          file: ClarizenConnector/Dockerfile
+          push: false
+          tags: clarizen-connector:ci
