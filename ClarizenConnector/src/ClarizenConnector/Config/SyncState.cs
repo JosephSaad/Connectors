@@ -79,12 +79,50 @@ public static class SyncState
         try
         {
             File.WriteAllText(temp, contents, Utf8NoBom);
-            File.Move(temp, path, overwrite: true);
+            ReplaceWithRetry(temp, path);
         }
         catch
         {
             try { File.Delete(temp); } catch { /* best effort: never mask the real error */ }
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Rename <paramref name="temp"/> over <paramref name="path"/>, retrying
+    /// briefly while Windows refuses.
+    /// </summary>
+    /// <remarks>
+    /// The rename itself is the atomic publish and a single call is usually
+    /// enough. On Windows it is not reliably enough: a replace fails with
+    /// <see cref="UnauthorizedAccessException"/> or <see cref="IOException"/>
+    /// whenever anything holds a handle to the destination without sharing
+    /// delete — and on a build agent that is routinely Defender or the search
+    /// indexer opening the file microseconds after it appears, not this
+    /// connector. Nothing in our own code can prevent that, so the only correct
+    /// response is to wait for the interloper to let go.
+    ///
+    /// Retrying does not weaken the guarantee: every attempt is still a whole-
+    /// file rename, so a reader continues to see either the old file or the new
+    /// one. Exhausting the attempts rethrows rather than falling back to a
+    /// non-atomic write, because a torn checkpoint is read as "no checkpoint"
+    /// and silently restarts the crawl — failing loudly is the better outcome.
+    /// </remarks>
+    private static void ReplaceWithRetry(string temp, string path)
+    {
+        const int Attempts = 20;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Move(temp, path, overwrite: true);
+                return;
+            }
+            catch (Exception exc) when (
+                (exc is UnauthorizedAccessException or IOException) && attempt < Attempts)
+            {
+                Thread.Sleep(10);
+            }
         }
     }
 
