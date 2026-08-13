@@ -77,7 +77,7 @@ public static class RetryFailed
             }
 
             var failedEntries = new List<JsonObject>();
-            foreach (var rawLine in File.ReadLines(dlPath, new UTF8Encoding(false)))
+            foreach (var rawLine in SyncState.ReadLinesShared(dlPath))
             {
                 var line = rawLine.Trim();
                 if (line.Length > 0)

@@ -116,7 +116,7 @@ public static class RetryFailed
         if (!File.Exists(path))
             return entries;
         var lineNumber = 0;
-        foreach (var line in File.ReadLines(path))
+        foreach (var line in SyncState.ReadLinesShared(path))
         {
             lineNumber++;
             var trimmed = line.Trim();

@@ -161,7 +161,7 @@ public static class RetryFailed
         // unretryable — log it with the file + line number and keep going.
         var entries = new List<JsonObject>();
         var lineNumber = 0;
-        foreach (var rawLine in File.ReadLines(file))
+        foreach (var rawLine in SyncState.ReadLinesShared(file))
         {
             lineNumber++;
             var line = rawLine.Trim();

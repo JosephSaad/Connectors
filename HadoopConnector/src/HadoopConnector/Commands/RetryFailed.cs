@@ -139,7 +139,7 @@ public static class RetryFailed
             return SyncState.ReadFailedRecords(connectorId);
 
         var entries = new List<JsonObject>();
-        foreach (var rawLine in File.ReadLines(file))
+        foreach (var rawLine in SyncState.ReadLinesShared(file))
         {
             var line = rawLine.Trim();
             if (line.Length > 0)
