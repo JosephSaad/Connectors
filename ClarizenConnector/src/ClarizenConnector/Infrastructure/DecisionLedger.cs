@@ -126,7 +126,7 @@ public static class DecisionLedger
         var entries = new List<JsonObject>();
         try
         {
-            foreach (var rawLine in File.ReadLines(LedgerPath(connectorId), Utf8NoBom))
+            foreach (var rawLine in ReadLinesShared(LedgerPath(connectorId)))
             {
                 var line = rawLine.Trim();
                 if (line.Length == 0)
@@ -165,7 +165,7 @@ public static class DecisionLedger
         var info = new FileInfo(path);
         if (!info.Exists || info.Length == 0)
             return;
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
         stream.Seek(-1, SeekOrigin.End);
         if (stream.ReadByte() == '\n')
             return;
@@ -248,4 +248,34 @@ public static class DecisionLedger
         var canonical = prevHash + "\n" + recordWithoutHash.ToJsonString(Compact);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
     }
+
+    /// <summary>
+    /// Read the ledger with a share mode that tolerates the concurrent appender.
+    /// </summary>
+    /// <remarks>
+    /// <c>File.ReadLines</c> opens with <see cref="FileShare.Read"/>, which does
+    /// not permit the appender's Write access. Windows enforces share modes and
+    /// POSIX does not, so verifying or exporting the ledger while a crawl is
+    /// writing to it throws on Windows Server — the deployment target — and never
+    /// on the machines this is developed on. The audit trail is the worst place
+    /// for a read that only works when nothing else is happening.
+    ///
+    /// Only the READER is widened. The appender deliberately keeps
+    /// <see cref="FileShare.Read"/>: refusing a second writer is what enforces
+    /// the single-active-writer assumption the hash chain rests on, since two
+    /// appenders would independently resume the seq/prev_hash counters and fork
+    /// the chain. That asymmetry is the whole point — a mechanical "add
+    /// ReadWrite everywhere" sweep would break the ledger it was meant to protect.
+    /// </remarks>
+    private static IEnumerable<string> ReadLinesShared(string path)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream, Utf8NoBom);
+        while (reader.ReadLine() is { } line)
+        {
+            yield return line;
+        }
+    }
+
 }
