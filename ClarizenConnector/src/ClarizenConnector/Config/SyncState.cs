@@ -499,7 +499,13 @@ public static class SyncState
     /// either absent or skipped as malformed by the caller and picked up on the next
     /// read - the queue is append-only, so no committed record is missed.
     /// </remarks>
-    private static IEnumerable<string> ReadLinesShared(string path)
+    /// <remarks>
+    /// internal, not private: RetryFailed reads the same dead-letter file and
+    /// previously did so with a bare File.ReadLines, which re-introduced the
+    /// FileShare.Read defect this method exists to fix. Keeping it unreachable
+    /// is what made that bypass the path of least resistance.
+    /// </remarks>
+    internal static IEnumerable<string> ReadLinesShared(string path)
     {
         using var stream = new FileStream(
             path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
