@@ -43,19 +43,22 @@ public sealed class IdentityStore : IIdentityStore
         // journal_mode is persisted in the database file, so the pragma is a no-op
         // after the first connection and upgrades a file made by an older build.
         ApplySqlitePragmas(_connection);
-        using var command = _connection.CreateCommand();
-        command.CommandText =
-            """
-            CREATE TABLE IF NOT EXISTS principals (
-                source_id    TEXT PRIMARY KEY,
-                principal_type TEXT NOT NULL,
-                email          TEXT,
-                entra_id       TEXT,
-                updated_utc    TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_principals_email ON principals(email);
-            """;
-        command.ExecuteNonQuery();
+        WithBusyRetry(() =>
+        {
+            using var command = _connection.CreateCommand();
+            command.CommandText =
+                """
+                CREATE TABLE IF NOT EXISTS principals (
+                    source_id    TEXT PRIMARY KEY,
+                    principal_type TEXT NOT NULL,
+                    email          TEXT,
+                    entra_id       TEXT,
+                    updated_utc    TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_principals_email ON principals(email);
+                """;
+            command.ExecuteNonQuery();
+        });
         Logger.Debug($"Identity store opened: {path}");
     }
 
@@ -159,16 +162,43 @@ public sealed class IdentityStore : IIdentityStore
     /// that just reports the mode. Failing here would abort a crawl at startup
     /// over a transition that has almost certainly already happened.
     /// </remarks>
-    private static void ApplySqlitePragmas(SqliteConnection connection)
+    private static void ApplySqlitePragmas(SqliteConnection connection) =>
+        WithBusyRetry(() =>
+        {
+            using var pragma = connection.CreateCommand();
+            pragma.CommandText = "PRAGMA busy_timeout=10000; PRAGMA journal_mode=WAL;";
+            pragma.ExecuteNonQuery();
+        });
+
+    /// <summary>
+    /// Run one-time setup work, retrying while SQLite reports the file busy.
+    /// </summary>
+    /// <remarks>
+    /// Both halves of opening this store need a brief EXCLUSIVE lock and neither
+    /// is covered by busy_timeout: switching journal_mode to WAL, and the
+    /// CREATE TABLE IF NOT EXISTS that follows it on the same connection. Several
+    /// nodes opening the same state file together — an HA pair starting up, or a
+    /// stress test with six writers — collide on either one and get SQLITE_BUSY
+    /// ("database is locked") thrown straight out of the constructor.
+    ///
+    /// An earlier fix wrapped only the pragmas. The schema DDL one statement
+    /// later then failed on a contended Windows runner in exactly the same way,
+    /// which is why this is a helper around the whole operation rather than a
+    /// retry bolted onto one call: the exclusive-lock window spans both.
+    ///
+    /// Retrying is safe because both are idempotent and one-way — journal_mode is
+    /// persisted in the file and IF NOT EXISTS is a no-op once the table is
+    /// there — so whoever wins leaves the store ready and every later attempt
+    /// simply confirms it.
+    /// </remarks>
+    private static void WithBusyRetry(Action work)
     {
         const int Attempts = 20;
         for (var attempt = 1; ; attempt++)
         {
             try
             {
-                using var pragma = connection.CreateCommand();
-                pragma.CommandText = "PRAGMA busy_timeout=10000; PRAGMA journal_mode=WAL;";
-                pragma.ExecuteNonQuery();
+                work();
                 return;
             }
             catch (SqliteException exc) when (
