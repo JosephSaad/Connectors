@@ -179,7 +179,7 @@ public sealed class IdentitySync
             // the sync continues. Keep the exception type — a config/auth error
             // (token failure) looks very different from a transient socket error.
             Logger.Warning(
-                $"Entra lookup failed for '{email}' (user counted as unresolved): "
+                $"Entra lookup failed for '{LogRedaction.MaskEmail(email)}' (user counted as unresolved): "
                 + $"{exc.GetType().Name}: {exc.Message}");
             return null;
         }
