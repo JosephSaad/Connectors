@@ -41,11 +41,39 @@ public static class LogPruner
     /// "may hold a ledger". Retention is a convenience; audit evidence is not,
     /// so anything we cannot prove ledger-free is kept.
     /// </summary>
+    /// <summary>
+    /// Every filename pattern a connector in this fleet writes its decision
+    /// ledger under.
+    /// </summary>
+    /// <remarks>
+    /// There are two, and that is the whole reason this is a named constant
+    /// rather than a literal at the call site. Seismic, Salesforce and Altrata
+    /// write <c>decision_ledger_&lt;id&gt;.jsonl</c>; Clarizen and Hadoop write
+    /// <c>decisions_&lt;id&gt;.jsonl</c>. A guard matching only the first would
+    /// scan, find nothing, and cheerfully delete a directory holding the second
+    /// -- protection that reads as present in the code and the comment while
+    /// covering half the fleet.
+    ///
+    /// LedgerNamingTests asserts every connector's actual ledger filename matches
+    /// one of these, so adding a connector (or renaming a ledger) that this list
+    /// does not cover fails the build instead of silently losing the guard.
+    /// </remarks>
+    internal static readonly string[] LedgerFilePatterns =
+    {
+        "decision_ledger_*.jsonl",
+        "decisions_*.jsonl",
+    };
+
     private static IReadOnlyList<string>? LedgersUnder(string dir)
     {
         try
         {
-            return Directory.GetFiles(dir, "decision_ledger_*.jsonl", SearchOption.AllDirectories);
+            var found = new List<string>();
+            foreach (var pattern in LedgerFilePatterns)
+            {
+                found.AddRange(Directory.GetFiles(dir, pattern, SearchOption.AllDirectories));
+            }
+            return found;
         }
         catch (Exception exc)
         {
