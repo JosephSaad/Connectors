@@ -63,8 +63,19 @@ public sealed class SeatService
             // Shared read: File.ReadAllText opens as FileShare.Read, which on
             // Windows is refused while a writer holds the seat file — a concurrent
             // shard crawl then fails with "the process cannot access the file".
+            //
+            // Delete is part of that share mode, not an extra. ReadWrite alone
+            // still blocks the other half of the problem: a publisher that
+            // replaces the seat file by renaming a temp over it cannot do so
+            // while a reader holds a handle without shared delete access, and
+            // Windows reports that as the same "cannot access the file"
+            // IOException from whichever side loses. Read-during-write and
+            // read-during-replace are one defect, and ReadWrite only fixes one
+            // of them — which is why this still failed on windows-latest after
+            // the first fix.
             using var stream = new FileStream(
-                path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
             using var reader = new StreamReader(stream);
             return ParseSeatFile(reader.ReadToEnd());
         }
