@@ -11,6 +11,9 @@ namespace SeismicConnector.Commands;
 
 public static class CommandRegistry
 {
+    /// <summary>This process's run directory, so later pruner calls can exclude it.</summary>
+    internal static string? ActiveRunDir { get; private set; }
+
     public static string LogsDir { get; internal set; } = Path.GetFullPath("logs");
 
     /// <summary>
@@ -65,7 +68,13 @@ public static class CommandRegistry
         progress.AddHandler(fileHandler);
 
         // Retention pruning runs at the start of every command (docs/OBSERVABILITY.md).
-        LogPruner.Prune(LogsDir);
+        //
+        // runDir is passed explicitly: this host builds its own run directory and
+        // never calls Logging.Initialize, so Logging.RunDirectory is null here and
+        // the chassis cannot infer which directory is live. Without it the pruner
+        // eventually deletes the logs this process is still writing.
+        ActiveRunDir = runDir;
+        LogPruner.Prune(LogsDir, activeRunDir: runDir);
 
         return (logFile, summaryFile);
     }
