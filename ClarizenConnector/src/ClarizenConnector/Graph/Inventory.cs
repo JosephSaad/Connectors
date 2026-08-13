@@ -15,6 +15,7 @@
 
 using System.Globalization;
 using ClarizenConnector.Infrastructure;
+using System.Runtime.CompilerServices;
 using Microsoft.Data.Sqlite;
 
 namespace ClarizenConnector.Graph;
@@ -98,6 +99,16 @@ public sealed class ItemInventory : IItemInventory
         Logger.Debug($"Item inventory opened: {path}");
     }
 
+    /// <remarks>
+    /// Synchronized because the SQLite connection is an instance field shared by
+    /// every caller, and SQLite allows one transaction per connection. Two
+    /// threads reaching BeginTransaction together produce "cannot start a
+    /// transaction within a transaction" from whichever loses — which is how a
+    /// concurrent-withdraw stress test failed on CI while every single-threaded
+    /// test passed. busy_timeout and WAL do not help: this is not lock
+    /// contention between connections, it is misuse of one.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.Synchronized)]
     public void RecordSeen(IEnumerable<(string ItemId, string ObjectType)> items, DateTime seenUtc)
     {
         using var transaction = _connection.BeginTransaction();
@@ -129,6 +140,16 @@ public sealed class ItemInventory : IItemInventory
         transaction.Commit();
     }
 
+    /// <remarks>
+    /// Synchronized because the SQLite connection is an instance field shared by
+    /// every caller, and SQLite allows one transaction per connection. Two
+    /// threads reaching BeginTransaction together produce "cannot start a
+    /// transaction within a transaction" from whichever loses — which is how a
+    /// concurrent-withdraw stress test failed on CI while every single-threaded
+    /// test passed. busy_timeout and WAL do not help: this is not lock
+    /// contention between connections, it is misuse of one.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.Synchronized)]
     public void Remove(IEnumerable<string> itemIds)
     {
         using var transaction = _connection.BeginTransaction();
