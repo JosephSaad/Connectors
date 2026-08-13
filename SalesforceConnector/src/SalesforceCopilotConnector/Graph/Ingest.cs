@@ -1460,6 +1460,14 @@ public static class Ingest
         DateTime? since = null,
         IngestionDashboard? dashboard = null)
     {
+        // The crawl-cycle span, opened from the same chassis vocabulary Seismic
+        // and Altrata use, so a trace backend reads all three the same way.
+        // Inert when OTEL_EXPORTER_OTLP_ENDPOINT is unset: the scope still
+        // carries a correlation id, it just opens no span.
+        Infrastructure.SalesforceTracing.Initialize(config);
+        using var cycle = Connector.Chassis.Tracing.BeginCycle(
+            config.Connector.Id, since is null ? "full" : "incremental");
+
         var stats = new IngestionStats();
         var statsLock = new object();
         Logger.Info("Starting ingestion process...");
