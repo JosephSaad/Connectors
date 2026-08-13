@@ -93,7 +93,7 @@ public sealed record AppConfig
 
     // ---- Data classification & sensitivity labeling -----------------------------
     /// <summary>CLASSIFICATION (default false): stamp the unified
-    /// sensitivityLabel / detectedCategories / dataResidency properties.</summary>
+    /// advisorySensitivity / detectedCategories / dataResidency properties.</summary>
     public bool Classification { get; init; }
 
     /// <summary>DATA_RESIDENCY (optional): governance residency tag, e.g. US/EU.</summary>

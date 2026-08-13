@@ -3,14 +3,14 @@
 // Data-classification & sensitivity TAGGING. HONESTY NOTE: the value this
 // produces is a CONNECTOR-APPLIED CLASSIFICATION TAG — advisory metadata the
 // connector stamps on the item. It is NOT a Microsoft Purview sensitivity LABEL
-// and is NOT enforced by Purview; the wire property is named `sensitivityLabel`
+// and is NOT enforced by Purview; the wire property is named `advisorySensitivity`
 // only for back-compat. It is searchable/refinable so admins can build
 // Microsoft Search policies on it, and — only when CLASSIFICATION_ENFORCE_ACL is
 // on — the connector itself hard-restricts the top tier's ACL (see #6b in
 // ItemTransformer). Formalizes the existing PII classification (PiiClassifier)
 // into ONE taxonomy stamped on every externalItem when CLASSIFICATION is enabled:
 //
-//   * sensitivityLabel  ∈ {Public, Internal, Confidential, Restricted}
+//   * advisorySensitivity  ∈ {Public, Internal, Confidential, Restricted}
 //                          (advisory classification tag; see honesty note above)
 //   * detectedCategories — the category LABELS a field classifier confirmed
 //                          (Name / Email / NationalId / WealthFigure)

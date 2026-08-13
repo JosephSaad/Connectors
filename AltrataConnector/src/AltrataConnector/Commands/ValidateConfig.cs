@@ -212,7 +212,7 @@ public static class ValidateConfig
 
             // 9. Data classification & sensitivity TAGGING (advisory, not Purview).
             if (config.Classification)
-                Pass($"Classification tagging on: advisory sensitivityLabel + detectedCategories " +
+                Pass($"Classification tagging on: advisory advisorySensitivity + detectedCategories " +
                      "(connector-applied TAG, NOT a Purview-enforced label)" +
                      (string.IsNullOrWhiteSpace(config.DataResidency)
                          ? " (no DATA_RESIDENCY set)"

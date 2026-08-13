@@ -162,7 +162,7 @@ public class ClassificationTransformerTests
     public void DisabledByDefaultAddsNoClassificationProperties()
     {
         var item = new ItemTransformer().Transform(Person("P1"), SeatAcl);
-        Assert.False(item.Properties.ContainsKey(ItemTransformer.SensitivityLabelProp));
+        Assert.False(item.Properties.ContainsKey(ItemTransformer.AdvisorySensitivityProp));
         Assert.False(item.Properties.ContainsKey(ItemTransformer.DetectedCategoriesProp));
         Assert.False(item.Properties.ContainsKey(ItemTransformer.DataResidencyProp));
     }
@@ -175,7 +175,7 @@ public class ClassificationTransformerTests
             classification: new ClassificationOptions { Enabled = true, Residency = "US" });
         var item = transformer.Transform(Person("P1"), SeatAcl);
 
-        Assert.Equal("Restricted", item.Properties[ItemTransformer.SensitivityLabelProp]);
+        Assert.Equal("Restricted", item.Properties[ItemTransformer.AdvisorySensitivityProp]);
         Assert.Equal("US", item.Properties[ItemTransformer.DataResidencyProp]);
         var cats = Assert.IsType<List<string>>(item.Properties[ItemTransformer.DetectedCategoriesProp]);
         Assert.Contains(DataCategories.Email, cats);
@@ -192,7 +192,7 @@ public class ClassificationTransformerTests
     {
         var transformer = new ItemTransformer(classification: new ClassificationOptions { Enabled = true });
         var item = transformer.Transform(Person("P1"), SeatAcl);
-        Assert.True(item.Properties.ContainsKey(ItemTransformer.SensitivityLabelProp));
+        Assert.True(item.Properties.ContainsKey(ItemTransformer.AdvisorySensitivityProp));
         Assert.False(item.Properties.ContainsKey(ItemTransformer.DataResidencyProp));
     }
 
@@ -225,7 +225,7 @@ public class ClassificationTransformerTests
             classification: new ClassificationOptions { Enabled = true });
         var item = transformer.Transform(Person("P1"), SeatAcl);
 
-        Assert.Equal("Restricted", item.Properties[ItemTransformer.SensitivityLabelProp]);
+        Assert.Equal("Restricted", item.Properties[ItemTransformer.AdvisorySensitivityProp]);
         Assert.True(item.Properties.ContainsKey("firstDegreeCount"));  // path summary present
     }
 }
@@ -343,7 +343,7 @@ public class ClassificationCrawlTests
         await harness.Engine.RunAsync(CrawlKind.Full);
 
         var item = Assert.Single(harness.Graph.PutItems);
-        Assert.False(item.Properties.ContainsKey(ItemTransformer.SensitivityLabelProp));
+        Assert.False(item.Properties.ContainsKey(ItemTransformer.AdvisorySensitivityProp));
     }
 
     [Fact]
@@ -361,10 +361,10 @@ public class ClassificationCrawlTests
         await harness.Engine.RunAsync(CrawlKind.Full);
 
         var person = harness.Graph.PutItems.Single(i => i.Id == "PersonProfile-P1");
-        Assert.Equal("Restricted", person.Properties[ItemTransformer.SensitivityLabelProp]);
+        Assert.Equal("Restricted", person.Properties[ItemTransformer.AdvisorySensitivityProp]);
         Assert.Equal("US", person.Properties[ItemTransformer.DataResidencyProp]);
         var org = harness.Graph.PutItems.Single(i => i.Id == "Organization-O1");
-        Assert.Equal("Confidential", org.Properties[ItemTransformer.SensitivityLabelProp]);
+        Assert.Equal("Confidential", org.Properties[ItemTransformer.AdvisorySensitivityProp]);
 
         // Seat invariant intact.
         Assert.All(harness.Graph.PutItems, item =>

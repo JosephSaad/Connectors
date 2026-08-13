@@ -129,7 +129,7 @@
       "isRefinable": true
     },
     {
-      "name": "sensitivityLabel",
+      "name": "advisorySensitivity",
       "type": "String",
       "isSearchable": true,
       "isQueryable": true,

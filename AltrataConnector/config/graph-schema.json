@@ -13,7 +13,7 @@
     { "name": "crmMatchRule", "type": "string", "isRetrievable": true },
     { "name": "crmMatchConfidence", "type": "string", "isRetrievable": true },
     { "name": "piiClassification", "type": "string", "isQueryable": true, "isRetrievable": true, "isRefinable": true },
-    { "name": "sensitivityLabel", "type": "string", "isQueryable": true, "isRetrievable": true, "isRefinable": true },
+    { "name": "advisorySensitivity", "type": "string", "isQueryable": true, "isRetrievable": true, "isRefinable": true },
     { "name": "detectedCategories", "type": "stringCollection", "isRetrievable": true, "isRefinable": true },
     { "name": "dataResidency", "type": "string", "isQueryable": true, "isRetrievable": true, "isRefinable": true },
     { "name": "firstDegreeCount", "type": "int64", "isQueryable": true, "isRetrievable": true, "isRefinable": true },

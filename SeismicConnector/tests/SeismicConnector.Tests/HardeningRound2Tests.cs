@@ -138,7 +138,7 @@ public class ClassificationEnforceAclTests
         Assert.True(await harness.Pipeline.RunCrawlAsync(fullCrawl: true, objectTypeFilter: "ContentItem"));
 
         var put = harness.LastPutBody("c1")!;
-        Assert.Equal("Restricted", put["properties"]!["sensitivityLabel"]!.GetValue<string>());
+        Assert.Equal("Restricted", put["properties"]!["advisorySensitivity"]!.GetValue<string>());
 
         // ACL is the resolved user grant — NOT restricted to any group.
         var acl = put["acl"]!.AsArray();
@@ -165,7 +165,7 @@ public class ClassificationEnforceAclTests
         Assert.True(await harness.Pipeline.RunCrawlAsync(fullCrawl: true, objectTypeFilter: "ContentItem"));
 
         var put = harness.LastPutBody("c1")!;
-        Assert.Equal("Restricted", put["properties"]!["sensitivityLabel"]!.GetValue<string>());
+        Assert.Equal("Restricted", put["properties"]!["advisorySensitivity"]!.GetValue<string>());
 
         // ACL is now a single group grant to the enforcement group.
         var acl = put["acl"]!.AsArray();
@@ -193,7 +193,7 @@ public class ClassificationEnforceAclTests
         Assert.True(await harness.Pipeline.RunCrawlAsync(fullCrawl: true, objectTypeFilter: "ContentItem"));
 
         var put = harness.LastPutBody("c1")!;
-        Assert.NotEqual("Restricted", put["properties"]!["sensitivityLabel"]!.GetValue<string>());
+        Assert.NotEqual("Restricted", put["properties"]!["advisorySensitivity"]!.GetValue<string>());
         var acl = put["acl"]!.AsArray();
         Assert.DoesNotContain(acl, e => e!["type"]!.GetValue<string>() == "group"
             && e["value"]!.GetValue<string>() == "entra-restricted-group");

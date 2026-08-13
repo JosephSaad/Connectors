@@ -1061,7 +1061,7 @@ public sealed class IngestPipeline
         var result = _classifier!.Classify(text, content.Distribution);
 
         var properties = item["properties"]!.AsObject();
-        properties["sensitivityLabel"] = result.Label.ToString();
+        properties["advisorySensitivity"] = result.Label.ToString();
         properties["detectedCategories"] = new JsonArray(
             result.Categories.Select(c => (JsonNode)c).ToArray());
 

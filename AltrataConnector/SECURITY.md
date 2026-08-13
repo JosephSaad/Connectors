@@ -224,10 +224,18 @@ the decision ledger, the dead-letter queue file, or the alert payload.
   purpose is DENIED **before** any billable/sensitive action, audited
   (`Decision=deny`) and metered (`altrata_purpose_denied_total`); unset =
   record-only (back-compat), logged so the posture is never silent.
-- `sensitivityLabel` is an ADVISORY connector-applied classification TAG, not a
+- `advisorySensitivity` is an ADVISORY connector-applied classification TAG, not a
   Purview-enforced label. The only hard enforcement is `CLASSIFICATION_ENFORCE_ACL`
   (top-tier items locked to the reviewer group); that ACL restriction can never
   be an everyone-grant and is recorded in the decision ledger.
+
+  > **Naming note.** This property was called `sensitivityLabel` until Aug 2026.
+  > It was renamed because "sensitivity label" is Microsoft's term for a
+  > Purview/MIP-enforced label, so a reviewer reading the Graph schema reasonably
+  > assumed this was one. It never was — the caveat lived only in source comments,
+  > where nobody auditing a schema would find it. The wire name now states what
+  > the value actually is. No re-index is needed: the schema has never been
+  > registered in a tenant.
 - Logs, spans, Event Log mirror, dead-letter file (redacted), review queue,
   decision ledger, purpose audit, **content-gate verdicts**: ids/counts/hashes/
   enums only — never names, emails, wealth figures (test-enforced).

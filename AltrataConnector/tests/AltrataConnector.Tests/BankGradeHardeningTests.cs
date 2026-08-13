@@ -250,9 +250,9 @@ public class ClassificationEnforcementTests
         var item = transformer.Transform(Person("P1"), SeatAcl);
 
         Assert.Same(SeatAcl, item.Acl);
-        Assert.Equal("Restricted", item.Properties[ItemTransformer.SensitivityLabelProp]);
+        Assert.Equal("Restricted", item.Properties[ItemTransformer.AdvisorySensitivityProp]);
         // Wire back-compat: the shipped Graph schema property name is unchanged.
-        Assert.Equal("sensitivityLabel", ItemTransformer.SensitivityLabelProp);
+        Assert.Equal("advisorySensitivity", ItemTransformer.AdvisorySensitivityProp);
     }
 
     [Fact]
@@ -266,7 +266,7 @@ public class ClassificationEnforcementTests
         });
         var item = transformer.Transform(Person("P1"), SeatAcl);
 
-        Assert.Equal("Restricted", item.Properties[ItemTransformer.SensitivityLabelProp]);
+        Assert.Equal("Restricted", item.Properties[ItemTransformer.AdvisorySensitivityProp]);
         var acl = Assert.Single(item.Acl);
         Assert.Equal("group", acl.Type);
         Assert.Equal("11111111-2222-3333-4444-555555555555", acl.Value);
@@ -286,7 +286,7 @@ public class ClassificationEnforcementTests
         var item = transformer.Transform(Org("O1"), SeatAcl);
 
         // Organization baseline is Confidential (not top tier) → seat ACL intact.
-        Assert.Equal("Confidential", item.Properties[ItemTransformer.SensitivityLabelProp]);
+        Assert.Equal("Confidential", item.Properties[ItemTransformer.AdvisorySensitivityProp]);
         Assert.Same(SeatAcl, item.Acl);
     }
 

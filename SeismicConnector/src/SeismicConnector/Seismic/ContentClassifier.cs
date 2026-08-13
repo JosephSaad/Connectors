@@ -4,7 +4,7 @@
 // Compliance support).
 //
 // IMPORTANT — WHAT THIS IS (AND IS NOT):
-//   The value stamped on each item (the `sensitivityLabel` property) is an
+//   The value stamped on each item (the `advisorySensitivity` property) is an
 //   ADVISORY, CONNECTOR-APPLIED CLASSIFICATION TAG. It is NOT a Microsoft
 //   Purview sensitivity label and carries NONE of Purview's ENFORCEMENT
 //   (no encryption, no DLP policy, no downstream honouring of the label).
