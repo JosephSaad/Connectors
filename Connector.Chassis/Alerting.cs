@@ -58,6 +58,33 @@ public static class Alerting
     private static HttpClient? _httpClient;
 
     /// <summary>
+    /// How the alerting client's transport is built. Defaults to the chassis's
+    /// own <see cref="HttpTransport.CreateHandler"/>; a host with its own
+    /// transport assigns this at startup instead.
+    /// </summary>
+    /// <remarks>
+    /// This exists because the fleet has four transports, not one. The chassis
+    /// has HttpTransport; Salesforce has HttpClientFactory; Altrata has
+    /// HttpConnectivity; Hadoop has its own HttpTransport that merely shares the
+    /// name. All four read PROXY_URL and CA_BUNDLE_PATH and all four are already
+    /// in production, so consolidating <c>Alerting</c> by picking a winner would
+    /// silently change which TLS and proxy behaviour every other connector gets
+    /// for its webhooks — a real behavioural change smuggled in as a refactor.
+    ///
+    /// A factory lets the shared alerting logic — thresholds, payload shape,
+    /// dead-letter escalation, the degradation guard below — be genuinely shared
+    /// while each connector keeps the transport it was hardened with. Same seam
+    /// pattern as <see cref="Chassis.LoggerFactory"/> and
+    /// <see cref="Logging.Dialect"/>: the chassis owns the mechanism, the host
+    /// keeps the contract it cannot give up.
+    ///
+    /// Assign before the first alert. A null return is treated as a factory
+    /// failure and takes the fallback path, so a misconfigured host degrades
+    /// rather than throwing from a static property getter.
+    /// </remarks>
+    public static Func<HttpMessageHandler>? HandlerFactory { get; set; }
+
+    /// <summary>
     /// The alerting client, degrading to the bare default transport if the
     /// configured one cannot be built.
     /// </summary>
@@ -85,7 +112,10 @@ public static class Alerting
     {
         try
         {
-            return new HttpClient(HttpTransport.CreateHandler(), disposeHandler: true)
+            var handler = (HandlerFactory ?? HttpTransport.CreateHandler)()
+                ?? throw new InvalidOperationException(
+                    "Alerting.HandlerFactory returned null.");
+            return new HttpClient(handler, disposeHandler: true)
             {
                 Timeout = TimeSpan.FromSeconds(5),
             };
