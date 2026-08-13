@@ -503,3 +503,74 @@ public class LogGatingTests : IDisposable
         }
     }
 }
+
+/// <summary>
+/// Emails must not reach a log file in clear. Run logs are the one place the
+/// fleet's privacy controls do not cover: dead-letter payloads are redacted by
+/// default and indexed items are erasable through the DSAR path, but
+/// connector.log is retained on the node, mirrored to the Event Log and shipped
+/// to SIEM, and ForgetSubject never reaches it.
+/// </summary>
+public class LogRedactionTests
+{
+    [Fact]
+    public void MaskEmail_KeepsTheDomainAndHidesTheMailbox()
+    {
+        var masked = LogRedaction.MaskEmail("Jane.Doe@contoso.com");
+
+        Assert.DoesNotContain("Jane", masked, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Doe", masked, StringComparison.OrdinalIgnoreCase);
+        // The domain is deliberately in clear: "every failure is @contoso.com"
+        // is the diagnosis, and the individual mailbox rarely changes it.
+        Assert.EndsWith("@contoso.com", masked, StringComparison.Ordinal);
+        Assert.Matches("^[0-9a-f]{16}@contoso[.]com$", masked);
+    }
+
+    [Fact]
+    public void MaskEmail_IsStableSoRepeatFailuresStillCorrelate()
+    {
+        Assert.Equal(
+            LogRedaction.MaskEmail("jane.doe@contoso.com"),
+            LogRedaction.MaskEmail("  jane.doe@contoso.com  "));
+        Assert.NotEqual(
+            LogRedaction.MaskEmail("jane.doe@contoso.com"),
+            LogRedaction.MaskEmail("john.doe@contoso.com"));
+    }
+
+    [Fact]
+    public void MaskEmail_HashesWholeValueWhenItIsNotAnAddress()
+    {
+        // No '@' to split on, so nothing is published in clear rather than an
+        // arbitrary tail being treated as a domain.
+        var masked = LogRedaction.MaskEmail("not-an-address");
+        Assert.Matches("^[0-9a-f]{16}$", masked);
+        Assert.DoesNotContain("not-an-address", masked, StringComparison.Ordinal);
+
+        Assert.Equal(LogRedaction.None, LogRedaction.MaskEmail(null));
+        Assert.Equal(LogRedaction.None, LogRedaction.MaskEmail("   "));
+    }
+
+    [Fact]
+    public void ResolveUserByEmail_FailureIsLoggedWithoutTheAddress()
+    {
+        // The regression this exists for: CodeQL traced a real flow from this
+        // parameter into the Standard file sink at WARNING level, so every failed
+        // Entra lookup wrote a full address into a retained log.
+        var source = File.ReadAllText(
+            Path.Combine(RepoRoot(), "src", "ClarizenConnector", "AclEngine", "IdentitySync.cs"));
+
+        Assert.DoesNotContain("Entra lookup failed for '{email}'", source, StringComparison.Ordinal);
+        Assert.Contains("LogRedaction.MaskEmail(email)", source, StringComparison.Ordinal);
+    }
+
+    private static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "ClarizenConnector.sln")))
+        {
+            dir = dir.Parent;
+        }
+        Assert.NotNull(dir);
+        return dir!.FullName;
+    }
+}

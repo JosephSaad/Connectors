@@ -74,7 +74,8 @@ public sealed class PrincipalMapper
         if (!string.IsNullOrWhiteSpace(ownerId) || !string.IsNullOrWhiteSpace(ownerEmail))
         {
             UnmappedOwners++;
-            Logger.Debug($"Owner '{ownerId ?? ownerEmail}' has no Entra mapping.");
+            Logger.Debug(
+                $"Owner '{LogRedaction.MaskEmail(ownerId ?? ownerEmail)}' has no Entra mapping.");
         }
         return null;
     }

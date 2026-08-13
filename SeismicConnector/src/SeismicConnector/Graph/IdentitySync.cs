@@ -115,7 +115,7 @@ public sealed class IdentitySync
         }
         catch (GraphApiError ex) when (ex.StatusCode == 404)
         {
-            Logger.Info($"No Entra user for '{email}'");
+            Logger.Info($"No Entra user for '{LogRedaction.MaskEmail(email)}'");
             return null;
         }
         catch (GraphApiError ex) when (ex.StatusCode == 400)

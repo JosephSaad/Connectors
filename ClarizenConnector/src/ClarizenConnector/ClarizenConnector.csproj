@@ -39,6 +39,7 @@
        migrated ClarizenConnector.Infrastructure types do not collide. -->
   <ItemGroup>
     <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
+    <Using Include="Connector.Chassis.LogRedaction" Alias="LogRedaction" />
     <!-- R3: SecretProvider consumed from chassis. -->
     <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />
     <!-- R5: SQL access seam. ISqlGateway + the gateway impl (chassis SqlGateway)
