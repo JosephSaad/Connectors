@@ -85,7 +85,14 @@ public static class LogPruner
     }
 
     /// <summary>Prune old run dirs under <paramref name="logsDir"/>. Never throws.</summary>
-    public static int Prune(string logsDir, DateTime? nowLocal = null)
+    /// <param name="activeRunDir">
+    /// The run directory of the CURRENTLY RUNNING process, which is never pruned.
+    /// Hosts that call <see cref="Logging.Initialize"/> can leave this null — the
+    /// active directory is taken from <see cref="Logging.RunDirectory"/>. Hosts
+    /// that manage their own run directory (Seismic never calls Initialize, so
+    /// Logging.RunDirectory is null there) MUST pass it.
+    /// </param>
+    public static int Prune(string logsDir, DateTime? nowLocal = null, string? activeRunDir = null)
     {
         var retentionDays = RetentionDays;
         if (retentionDays <= 0)
@@ -113,8 +120,35 @@ public static class LogPruner
         {
             if (!Directory.Exists(logsDir))
                 return 0;
+            // The run directory this process is writing into RIGHT NOW is chosen
+            // once at startup and never changes, so in --continuous or service
+            // mode it eventually ages past the cutoff and the pruner starts
+            // targeting its own live logs on every cycle.
+            //
+            // The two platforms fail differently and the quiet one is worse. On
+            // Windows the recursive delete removes the directory's other entries
+            // first — previous summaries, the reconciliation report, the
+            // classification manifest — and only then throws on the locked .log,
+            // so live artifacts are destroyed every cycle behind a warning that
+            // repeats forever. On macOS and Linux the unlink simply SUCCEEDS: the
+            // open handle keeps writing into an unlinked inode, and every log line
+            // for the remaining life of the service goes nowhere, silently.
+            //
+            // Deliberately NOT solved by granting the log writers shared-delete
+            // access. On Windows the absence of that right is currently the only
+            // thing preventing the unlink; granting it would turn the loud failure
+            // into the silent one everywhere.
+            var active = activeRunDir ?? Logging.RunDirectory;
+            var activeFull = active is null ? null : Path.GetFullPath(active);
+
             foreach (var dir in Directory.GetDirectories(logsDir))
             {
+                if (activeFull is not null
+                    && string.Equals(Path.GetFullPath(dir), activeFull, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;  // never prune the run we are writing into
+                }
+
                 var name = Path.GetFileName(dir);
                 var match = RunDirPattern.Match(name);
                 if (!match.Success)

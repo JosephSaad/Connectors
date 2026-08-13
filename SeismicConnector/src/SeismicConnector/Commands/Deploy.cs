@@ -106,7 +106,7 @@ public static class Deploy
 
             if (fullDue || incrementalDue)
             {
-                LogPruner.Prune(CommandRegistry.LogsDir);
+                LogPruner.Prune(CommandRegistry.LogsDir, activeRunDir: CommandRegistry.ActiveRunDir);
                 var isFull = fullDue;
                 if (isFull && identity is not null)
                     await identity.RunAsync(persist: true, ct: ServiceStop.Token);
