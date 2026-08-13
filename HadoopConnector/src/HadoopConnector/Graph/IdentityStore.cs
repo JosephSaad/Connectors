@@ -42,11 +42,7 @@ public sealed class IdentityStore : IIdentityStore
         // Windows enforces the locking that exposes this; POSIX hides it.
         // journal_mode is persisted in the database file, so the pragma is a no-op
         // after the first connection and upgrades a file made by an older build.
-        using (var pragma = _connection.CreateCommand())
-        {
-            pragma.CommandText = "PRAGMA busy_timeout=10000; PRAGMA journal_mode=WAL;";
-            pragma.ExecuteNonQuery();
-        }
+        ApplySqlitePragmas(_connection);
         using var command = _connection.CreateCommand();
         command.CommandText =
             """
@@ -144,4 +140,43 @@ public sealed class IdentityStore : IIdentityStore
         EnvFlags.UseSqlServer
             ? new SqlServerIdentityStore(connectorId)
             : new IdentityStore(connectorId);
+
+    /// <summary>
+    /// Apply the busy timeout and switch the file to WAL, retrying while the
+    /// journal-mode change is refused.
+    /// </summary>
+    /// <remarks>
+    /// busy_timeout is a no-op to set and journal_mode is persisted in the file,
+    /// so on every connection after the first this is pure overhead — but the
+    /// FIRST one is a real race. Switching journal mode needs a brief exclusive
+    /// lock, and busy_timeout does not cover that transition: several nodes
+    /// opening the same state file at once (an HA pair starting together, or a
+    /// stress test with six writers) collide on it and one gets SQLITE_BUSY —
+    /// "database is locked" — thrown straight out of the constructor.
+    ///
+    /// Retrying is safe precisely because the change is idempotent and one-way:
+    /// whoever wins leaves the file in WAL, and every later attempt is a no-op
+    /// that just reports the mode. Failing here would abort a crawl at startup
+    /// over a transition that has almost certainly already happened.
+    /// </remarks>
+    private static void ApplySqlitePragmas(SqliteConnection connection)
+    {
+        const int Attempts = 20;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                using var pragma = connection.CreateCommand();
+                pragma.CommandText = "PRAGMA busy_timeout=10000; PRAGMA journal_mode=WAL;";
+                pragma.ExecuteNonQuery();
+                return;
+            }
+            catch (SqliteException exc) when (
+                (exc.SqliteErrorCode is 5 or 6) && attempt < Attempts)  // BUSY / LOCKED
+            {
+                Thread.Sleep(25);
+            }
+        }
+    }
+
 }
