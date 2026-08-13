@@ -44,6 +44,24 @@ public static class EnvFlags
     }
 
     /// <summary>
+    /// True only when the named env var is EXPLICITLY <c>false</c>/<c>0</c>/<c>no</c>
+    /// (case-insensitive). Unset, blank, or anything unrecognised is not false.
+    /// </summary>
+    /// <remarks>
+    /// For default-ON switches, written as <c>!IsFalse("CIRCUIT_BREAKER")</c>. This is
+    /// deliberately NOT the same as <c>IsTrueOrDefault(name, true)</c>, and the
+    /// difference is the whole reason it exists: given an unrecognised value such as
+    /// a typo, <c>IsTrueOrDefault</c> returns false and <c>!IsFalse</c> returns true.
+    /// For a protective default like the circuit breaker, a mistyped env var must not
+    /// be what silently switches it off — only a deliberate, recognised "off" should.
+    /// </remarks>
+    public static bool IsFalse(string name)
+    {
+        var raw = Environment.GetEnvironmentVariable(name);
+        return raw is not null && raw.Trim().ToLowerInvariant() is "false" or "0" or "no";
+    }
+
+    /// <summary>
     /// <c>IDENTITY_SYNC_ON_INCREMENTAL</c> — run the (incremental) identity crawl on
     /// incremental content crawls too, not just full crawls. DEFAULT TRUE:
     /// re-syncing entitlements every incremental shrinks the ACL-staleness lag
