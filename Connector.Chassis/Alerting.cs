@@ -51,14 +51,54 @@ public static class Alerting
     /// </summary>
     internal static HttpClient HttpClient
     {
-        get => _httpClient ??= new HttpClient(HttpTransport.CreateHandler(), disposeHandler: true)
-        {
-            Timeout = TimeSpan.FromSeconds(5),
-        };
+        get => _httpClient ??= CreateDefaultClient();
         set => _httpClient = value;
     }
 
     private static HttpClient? _httpClient;
+
+    /// <summary>
+    /// The alerting client, degrading to the bare default transport if the
+    /// configured one cannot be built.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="HttpTransport.CreateHandler"/> reads PROXY_URL and
+    /// CA_BUNDLE_PATH, so a misconfigured deployment can make it throw. Without
+    /// the catch that exception surfaces from a property getter on first use —
+    /// which, for a static like this, means a TypeInitializationException at an
+    /// arbitrary point in a crawl rather than at startup.
+    ///
+    /// Alerting must never be the thing that takes a process down: it is how an
+    /// operator finds out something else went wrong. A bad proxy or CA path has
+    /// already failed fast, naming the setting, where the Graph and source
+    /// clients were built — by the time alerting runs, the useful signal has
+    /// been delivered and crashing here only removes the messenger.
+    ///
+    /// The fallback client has no proxy or custom CA, so in a locked-down network
+    /// the webhook POST will simply fail and be logged. That is the intended
+    /// trade: a failed alert is recoverable, a dead connector is not.
+    ///
+    /// Ported from the Hadoop connector, which carried this guard while the
+    /// chassis did not — the same asymmetry ServiceStop had.
+    /// </remarks>
+    private static HttpClient CreateDefaultClient()
+    {
+        try
+        {
+            return new HttpClient(HttpTransport.CreateHandler(), disposeHandler: true)
+            {
+                Timeout = TimeSpan.FromSeconds(5),
+            };
+        }
+        catch (Exception exc)
+        {
+            Logger.Warning(
+                $"Alerting transport could not be built ({exc.GetType().Name}: {exc.Message}) — "
+                + "falling back to the default transport, so proxy and CA-bundle settings will NOT "
+                + "apply to alert webhooks. Alerts may fail to send on a restricted network.");
+            return new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        }
+    }
 
     /// <summary>
     /// Optional connector id stamped into the alert envelope as <c>connector</c>.
