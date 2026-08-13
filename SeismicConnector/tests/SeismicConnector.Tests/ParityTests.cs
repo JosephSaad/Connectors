@@ -697,4 +697,70 @@ public class DeadLetterConcurrencyTests
         Assert.Equal(0, readerErrors);
         Assert.Equal(200, SyncState.ReadFailedRecords("Conn").Count);
     }
+
+    /// <summary>
+    /// Reading the checkpoint WHILE another node writes it must neither throw nor
+    /// lose the checkpoint.
+    ///
+    /// The sibling above covers the dead-letter queue; this covers the other file
+    /// a crawl keeps open, and it was the gap that let the same share-mode defect
+    /// be fixed for one and missed for the other in the very same source file.
+    ///
+    /// Two defects sit behind it and the second is the dangerous one. The share
+    /// mode is the loud half: an overlapping read throws on Windows, where share
+    /// modes are enforced. The quiet half is atomicity — a truncate-in-place
+    /// write lets a reader observe a half-written file, and torn JSON is
+    /// swallowed and reported as "no checkpoint", so a resume silently restarts
+    /// the crawl from the beginning and re-ingests everything.
+    /// </summary>
+    [Fact]
+    public async Task ConcurrentCheckpointWriteAndRead_ReaderNeverThrowsAndNeverLosesTheCheckpoint()
+    {
+        using var state = new TempStateDir();
+        const string CheckpointConnector = "SeismicCheckpointRace";
+        const string Since = "2026-01-01T00:00:00Z";
+
+        // Establish one first: from here a null read can only mean the reader
+        // caught the file mid-truncate.
+        SyncState.WriteCheckpoint(CheckpointConnector, Since, "Document", 0);
+        Assert.NotNull(SyncState.ReadCheckpoint(CheckpointConnector));
+
+        var stop = false;
+        var readerErrors = 0;
+        var vanished = 0;
+
+        var reader = Task.Run(() =>
+        {
+            while (!Volatile.Read(ref stop))
+            {
+                try
+                {
+                    if (SyncState.ReadCheckpoint(CheckpointConnector) is null)
+                    {
+                        Interlocked.Increment(ref vanished);
+                    }
+                }
+                catch
+                {
+                    Interlocked.Increment(ref readerErrors);
+                }
+            }
+        });
+
+        for (var i = 1; i <= 300; i++)
+        {
+            SyncState.WriteCheckpoint(CheckpointConnector, Since, "Document", i);
+        }
+
+        Volatile.Write(ref stop, true);
+        await reader.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Equal(0, readerErrors);
+        Assert.Equal(0, vanished);
+
+        var final = SyncState.ReadCheckpoint(CheckpointConnector);
+        Assert.NotNull(final);
+        Assert.Equal(300, final!["completed"]!["Document"]!.GetValue<int>());
+    }
+
 }
