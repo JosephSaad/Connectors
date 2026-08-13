@@ -1,0 +1,115 @@
+# Chassis conformance
+# -------------------
+# Fails when a capability the fleet claims is uniform is missing from a
+# connector.
+#
+# The TOGAF assessment named this as a distinct concern from the copied chassis
+# itself: "observable chassis drift — Salesforce lacks OpenTelemetry tracing the
+# others (and the docs) claim is standard". Drift of that kind is invisible in
+# the per-connector suites, because each one only tests what it has. Nothing
+# fails when a connector quietly lacks something; the docs keep asserting the
+# fleet is uniform, and the claim rots.
+#
+# This is the cheap half of the remedy. It does not make connectors uniform — it
+# makes non-uniformity loud, so a gap is a decision someone took rather than
+# something nobody noticed.
+#
+# Adding a capability here is deliberate: it asserts the fleet genuinely intends
+# every connector to carry it. A legitimate exemption belongs in EXEMPT below,
+# with a reason, not as a silently absent row.
+
+name: Conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chassis-conformance:
+    name: Chassis conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Every connector carries every declared chassis capability
+        run: |
+          set -uo pipefail
+          CONNECTORS="SalesforceConnector ClarizenConnector HadoopConnector SeismicConnector AltrataConnector"
+          fail=0
+
+          # ---- Recorded exemptions -------------------------------------------
+          # "<Connector>|<capability>" => the reason it is absent, and what closes
+          # it. An exemption is a DATED, VISIBLE decision, which is the whole point
+          # of this job: the failure mode being prevented is a gap nobody noticed,
+          # not a gap someone chose. Each line here is a debt with a name on it,
+          # and deleting the line is the definition of done.
+          #
+          # Every exemption is reported as a warning annotation, so it stays in
+          # front of reviewers on every run rather than decaying into a permanent
+          # silent allowance.
+          exemption_reason () {
+            case "$1" in
+              "SalesforceConnector|OpenTelemetry tracing")
+                echo "Open since the Aug-2026 TOGAF assessment (concern #2). Salesforce is the only connector without tracing while the docs claim it is fleet-standard. Closing it means adopting the chassis Tracing (as Seismic and Altrata do), not just adding the package."
+                ;;
+              *) echo "" ;;
+            esac
+          }
+
+          # capability | how it is detected | why it is fleet-wide
+          check () {
+            local name="$1" pattern="$2" scope="$3"
+            printf '\n== %s ==\n' "$name"
+            for c in $CONNECTORS; do
+              if grep -rqE "$pattern" "$c/$scope" --include='*.cs' --include='*.csproj' 2>/dev/null; then
+                printf '   ok      %s\n' "$c"
+                # An exemption for something now present is stale — say so, so the
+                # register cannot quietly outlive the gap it describes.
+                if [ -n "$(exemption_reason "$c|$name")" ]; then
+                  printf '   ^^ STALE EXEMPTION — remove it\n'
+                  echo "::error title=Stale exemption::$c now provides '$name'. Delete its exemption from .github/workflows/conformance.yml."
+                  fail=1
+                fi
+                continue
+              fi
+
+              local reason; reason="$(exemption_reason "$c|$name")"
+              if [ -n "$reason" ]; then
+                printf '   EXEMPT  %s — %s\n' "$c" "$reason"
+                echo "::warning title=Conformance exemption::$c does not provide '$name'. $reason"
+              else
+                printf '   MISSING %s\n' "$c"
+                echo "::error title=Chassis conformance::$c does not provide '$name'. Either add it, or record an exemption in .github/workflows/conformance.yml with a reason."
+                fail=1
+              fi
+            done
+          }
+
+          # The chassis project reference is the definition of being on the fleet.
+          check "Connector.Chassis project reference" 'Connector\.Chassis\.csproj' "src"
+
+          # Operational surfaces the enterprise pack and the docs promise for all five.
+          check "OpenTelemetry tracing"  'OpenTelemetry'                "src"
+          check "health endpoint"        'HealthEndpoint|"/health"'     "src"
+          check "metrics endpoint"       'MetricsRenderer|"/metrics"'   "src"
+          check "Windows service host"   'UseWindowsService|WindowsServiceHelpers' "src"
+
+          # State-file hardening: the defect class that cost five separate fixes.
+          # A connector reading shared state with a default share mode is drift.
+          check "shared-read state helper" 'FileShare\.ReadWrite'        "src"
+
+          echo
+          if [ "$fail" -ne 0 ]; then
+            echo "Chassis conformance FAILED — see the annotations above."
+            exit 1
+          fi
+          echo "All connectors carry every declared capability."

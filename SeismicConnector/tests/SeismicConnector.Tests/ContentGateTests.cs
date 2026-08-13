@@ -755,7 +755,7 @@ public class ContentGatePipelineTests
 
         var put = harness.LastPutBody("c1")!;
         Assert.Equal("quarantined:injection", put["properties"]!["contentGateStatus"]!.GetValue<string>());
-        Assert.Null(put["properties"]!["sensitivityLabel"]);   // classification really is off
+        Assert.Null(put["properties"]!["advisorySensitivity"]);   // classification really is off
     }
 
     [Fact]
@@ -771,7 +771,7 @@ public class ContentGatePipelineTests
 
         var put = harness.LastPutBody("c1")!;
         Assert.Equal("clean", put["properties"]!["contentGateStatus"]!.GetValue<string>());
-        Assert.Equal("Restricted", put["properties"]!["sensitivityLabel"]!.GetValue<string>());
+        Assert.Equal("Restricted", put["properties"]!["advisorySensitivity"]!.GetValue<string>());
     }
 
     // ── the webhook / single-item path uses the same seam ────────────────────

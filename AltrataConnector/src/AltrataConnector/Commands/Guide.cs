@@ -86,7 +86,7 @@ public static class Guide
           the index; path properties never widen ACLs (items stay seat-only).
 
         5d. DATA CLASSIFICATION (docs/CLASSIFICATION.md)
-          CLASSIFICATION=true stamps a unified sensitivityLabel (Public/Internal/
+          CLASSIFICATION=true stamps a unified advisorySensitivity (Public/Internal/
           Confidential/Restricted; Altrata is Confidential+) + detectedCategories
           on every item, folding the existing PII label in as one input.
           DATA_RESIDENCY tags residency (US/EU). CLASSIFICATION_MANIFEST=true

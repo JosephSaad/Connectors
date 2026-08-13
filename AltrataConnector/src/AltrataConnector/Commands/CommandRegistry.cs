@@ -129,7 +129,7 @@ public static class CommandRegistry
                 // the single decision (per-item, inherently low-volume here).
                 if (runtime.Config.Classification && runtime.Config.ClassificationEnforceAcl
                     && !string.IsNullOrWhiteSpace(runtime.Config.ClassificationEnforceGroupId)
-                    && item.Properties.TryGetValue(ItemTransformer.SensitivityLabelProp, out var lbl)
+                    && item.Properties.TryGetValue(ItemTransformer.AdvisorySensitivityProp, out var lbl)
                     && lbl as string == SensitivityLabel.Restricted.ToString())
                 {
                     runtime.Decisions.RecordAclRestriction(item.Id,

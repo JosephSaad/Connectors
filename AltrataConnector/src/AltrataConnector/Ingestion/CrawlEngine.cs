@@ -859,7 +859,7 @@ public sealed class CrawlEngine
                     classificationEntries.Add(ce);
                 if (aclRestrictedItemIds != null
                     && itemsById!.TryGetValue(itemId, out var putItem)
-                    && putItem.Properties.TryGetValue(ItemTransformer.SensitivityLabelProp, out var labelValue)
+                    && putItem.Properties.TryGetValue(ItemTransformer.AdvisorySensitivityProp, out var labelValue)
                     && labelValue as string == SensitivityLabel.Restricted.ToString())
                 {
                     aclRestrictedItemIds.Add(itemId);
@@ -1201,7 +1201,7 @@ public sealed class CrawlEngine
     /// item id, label and category labels ONLY (never a personal value).</summary>
     private static ClassificationEntry ClassificationEntryFor(ExternalItem item)
     {
-        var label = item.Properties.TryGetValue(ItemTransformer.SensitivityLabelProp, out var l)
+        var label = item.Properties.TryGetValue(ItemTransformer.AdvisorySensitivityProp, out var l)
             ? l?.ToString() ?? SensitivityLabel.Internal.ToString()
             : SensitivityLabel.Internal.ToString();
         var categories = item.Properties.TryGetValue(ItemTransformer.DetectedCategoriesProp, out var c)

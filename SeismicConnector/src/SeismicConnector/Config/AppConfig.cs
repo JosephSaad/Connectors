@@ -77,7 +77,7 @@ public sealed class SeismicSettings
     /// <summary>
     /// CLASSIFICATION=true → run the dependency-free content classifier over the
     /// indexed text of every ingested item and stamp an ADVISORY, connector-
-    /// applied sensitivity classification TAG (the <c>sensitivityLabel</c>
+    /// applied sensitivity classification TAG (the <c>advisorySensitivity</c>
     /// property) + detected categories. This is NOT a Microsoft Purview-enforced
     /// label — it carries no encryption/DLP enforcement; it is a search/triage
     /// signal (Purview-aligned in naming only). Default off (behaviour

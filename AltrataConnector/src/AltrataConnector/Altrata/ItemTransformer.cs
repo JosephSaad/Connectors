@@ -31,7 +31,7 @@ public sealed class TransformException : Exception
 /// </summary>
 public sealed record ClassificationOptions
 {
-    /// <summary>CLASSIFICATION — stamp the advisory sensitivityLabel /
+    /// <summary>CLASSIFICATION — stamp the advisory advisorySensitivity /
     /// detectedCategories / dataResidency classification-tag properties.</summary>
     public bool Enabled { get; init; }
 
@@ -68,7 +68,7 @@ public sealed class ItemTransformer
     }
 
     /// <summary>Property keys the classification feature adds (used by the manifest reader).</summary>
-    public const string SensitivityLabelProp = "sensitivityLabel";
+    public const string AdvisorySensitivityProp = "advisorySensitivity";
     public const string DetectedCategoriesProp = "detectedCategories";
     public const string DataResidencyProp = "dataResidency";
 
@@ -235,7 +235,7 @@ public sealed class ItemTransformer
         {
             var label = SensitivityClassifier.Classify(record);
             var categories = SensitivityClassifier.DetectCategories(record);
-            properties[SensitivityLabelProp] = SensitivityClassifier.LabelName(label);
+            properties[AdvisorySensitivityProp] = SensitivityClassifier.LabelName(label);
             if (categories.Count > 0)
                 properties[DetectedCategoriesProp] = categories.ToList();
             if (!string.IsNullOrWhiteSpace(_classification.Residency))
