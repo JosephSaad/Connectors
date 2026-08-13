@@ -132,12 +132,27 @@ public static class Reconciliation
     {
         var path = ReportPath(connectorId, summary.DeliveryId, logsDir);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        using var writer = new StreamWriter(path, append: false);
-        foreach (var file in summary.Files)
+
+        // Written through a shared handle, not `new StreamWriter(path, false)`.
+        // That overload takes FileShare.Read, which refuses any concurrent handle
+        // holding write access; Windows enforces share modes and POSIX does not,
+        // so on Windows Server a report written while anything else has the file
+        // open throws IOException and takes the delivery down with it. The report
+        // IS read concurrently — reconciliation output is what the dead-letter
+        // correlation check joins against — so this is a live path, not a
+        // theoretical one. Same defect class as the dead-letter queue and the
+        // checkpoint; this was the third file carrying it.
+        using (var stream = new FileStream(
+            path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+        using (var writer = new StreamWriter(stream))
+        {
+            foreach (var file in summary.Files)
+                writer.WriteLine(JsonSerializer.Serialize(
+                    new { type = "file", deliveryId = summary.DeliveryId, detail = file }, JsonlOptions));
             writer.WriteLine(JsonSerializer.Serialize(
-                new { type = "file", deliveryId = summary.DeliveryId, detail = file }, JsonlOptions));
-        writer.WriteLine(JsonSerializer.Serialize(
-            new { type = "summary", detail = summary }, JsonlOptions));
+                new { type = "summary", detail = summary }, JsonlOptions));
+        }
+
         return path;
     }
 }
