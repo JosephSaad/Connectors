@@ -158,7 +158,7 @@ public sealed record AppConfig
     public static AppConfig Load(ISecretProvider? secrets = null)
     {
         EnvLoader.LoadOnce();
-        secrets ??= new SecretProvider();
+        secrets ??= new ChassisSecretProvider();
 
         var errors = new List<string>();
 

@@ -1,20 +1,33 @@
 // Infrastructure/SecretProvider.cs
 // --------------------------------
-// Resolution of SECRET_* values.
+// SECRET_* resolution, delegated to the shared chassis.
 //
-//   Default:            read from the process environment (populated from
-//                       env/.env.local.user by the env loader).
-//   USE_KEY_VAULT=true: SECRET_<NAME> resolves from Azure Key Vault
-//                       (KEY_VAULT_URI required). The vault secret name is the
-//                       env name lowered with '_' → '-' (SECRET_AAD_APP_CLIENT_SECRET
-//                       → secret-aad-app-client-secret). Environment values still
-//                       win when present, so local overrides remain possible.
+// The chassis owns the mechanism (environment by default; Azure Key Vault when
+// USE_KEY_VAULT is truthy, with the env name lowered and '_' → '-' to form the
+// vault secret name). What stays here is the seam: this connector resolves
+// secrets through an injectable ISecretProvider so Settings.Load can be given a
+// fake, and the chassis exposes a static. The adapter below is that bridge and
+// nothing more.
 //
-// Resolved values are cached for the process lifetime.
-
-using System.Collections.Concurrent;
-using Azure.Identity;
-using Azure.Security.KeyVault.Secrets;
+// TWO BEHAVIOUR CHANGES came with the move, both deliberate:
+//
+//  1. PRECEDENCE IS INVERTED. The old local implementation always read the
+//     environment first and only consulted the vault when the variable was
+//     empty, so a value on the host silently beat the vault. The chassis makes
+//     the vault authoritative once USE_KEY_VAULT is on, falling back to the
+//     environment only when a fetch fails. That loses a local-override
+//     convenience and gains the property a regulated deployment needs: a stray
+//     or stale environment variable on a node cannot shadow the vault.
+//
+//  2. A MISSING KEY_VAULT_URI NOW FAILS FAST. It used to log a warning and
+//     return null, so a misconfigured node started up and failed later, opaquely,
+//     on whatever first needed a secret. The chassis throws while configuration
+//     is being read, naming the variable.
+//
+// The move also fixes a real defect. The old cache stored every outcome
+// including nulls, so one transient Key Vault failure pinned "no secret" for the
+// lifetime of the process — fatal in --continuous and service mode, where the
+// next cycle should simply retry. The chassis caches successful fetches only.
 
 namespace AltrataConnector.Infrastructure;
 
@@ -24,88 +37,11 @@ public interface ISecretProvider
     string? Get(string envName);
 }
 
-public sealed class SecretProvider : ISecretProvider
+/// <summary>
+/// Adapts the chassis's static <c>SecretProvider.GetSecret</c> to this
+/// connector's injectable <see cref="ISecretProvider"/>.
+/// </summary>
+public sealed class ChassisSecretProvider : ISecretProvider
 {
-    private static readonly IAppLogger Logger = Logging.GetLogger("altrata_connector.secrets");
-
-    private readonly ConcurrentDictionary<string, string?> _cache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Func<string, string?> _keyVaultFetch;
-
-    public SecretProvider(Func<string, string?>? keyVaultFetch = null)
-    {
-        _keyVaultFetch = keyVaultFetch ?? FetchFromKeyVault;
-    }
-
-    public static bool KeyVaultEnabled => EnvFlags.IsTrue("USE_KEY_VAULT");
-
-    public static string? KeyVaultUri
-    {
-        get
-        {
-            var raw = Environment.GetEnvironmentVariable("KEY_VAULT_URI");
-            return string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
-        }
-    }
-
-    /// <summary>SECRET_AAD_APP_CLIENT_SECRET → secret-aad-app-client-secret.</summary>
-    public static string ToVaultSecretName(string envName) =>
-        envName.ToLowerInvariant().Replace('_', '-');
-
-    public string? Get(string envName)
-    {
-        return _cache.GetOrAdd(envName, name =>
-        {
-            var fromEnv = Environment.GetEnvironmentVariable(name);
-            if (!string.IsNullOrEmpty(fromEnv))
-                return fromEnv;
-            if (!KeyVaultEnabled)
-                return null;
-            return _keyVaultFetch(name);
-        });
-    }
-
-    private static string? FetchFromKeyVault(string envName)
-    {
-        var uri = KeyVaultUri;
-        if (uri == null)
-        {
-            Logger.Warning("USE_KEY_VAULT=true but KEY_VAULT_URI is not set");
-            return null;
-        }
-        try
-        {
-            var client = new SecretClient(new Uri(uri), new DefaultAzureCredential());
-            var secret = client.GetSecret(ToVaultSecretName(envName));
-            return secret.Value.Value;
-        }
-        catch (Exception exc)
-        {
-            Logger.Warning($"Key Vault lookup failed for {envName}: {exc.Message}");
-            return null;
-        }
-    }
-}
-
-/// <summary>Shared boolean env-flag parsing: true / 1 / yes (case-insensitive).</summary>
-public static class EnvFlags
-{
-    public static bool IsTrue(string name)
-    {
-        var raw = Environment.GetEnvironmentVariable(name);
-        return raw != null &&
-               (raw.Equals("true", StringComparison.OrdinalIgnoreCase)
-                || raw.Equals("1", StringComparison.Ordinal)
-                || raw.Equals("yes", StringComparison.OrdinalIgnoreCase));
-    }
-
-    /// <summary>Explicitly false: false / 0 / no (case-insensitive). Used for
-    /// default-ON flags where unset means enabled.</summary>
-    public static bool IsFalse(string name)
-    {
-        var raw = Environment.GetEnvironmentVariable(name);
-        return raw != null &&
-               (raw.Equals("false", StringComparison.OrdinalIgnoreCase)
-                || raw.Equals("0", StringComparison.Ordinal)
-                || raw.Equals("no", StringComparison.OrdinalIgnoreCase));
-    }
+    public string? Get(string envName) => Connector.Chassis.SecretProvider.GetSecret(envName);
 }
