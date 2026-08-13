@@ -56,11 +56,11 @@ jobs:
           # Every exemption is reported as a warning annotation, so it stays in
           # front of reviewers on every run rather than decaying into a permanent
           # silent allowance.
+          # The register is currently EMPTY: every declared capability is present in
+          # every connector. The Salesforce tracing exemption that lived here was
+          # removed when the connector adopted the chassis Tracing.
           exemption_reason () {
             case "$1" in
-              "SalesforceConnector|OpenTelemetry tracing")
-                echo "Open since the Aug-2026 TOGAF assessment (concern #2). Salesforce is the only connector without tracing while the docs claim it is fleet-standard. Closing it means adopting the chassis Tracing (as Seismic and Altrata do), not just adding the package."
-                ;;
               *) echo "" ;;
             esac
           }
