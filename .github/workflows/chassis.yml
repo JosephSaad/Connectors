@@ -16,11 +16,13 @@ on:
     branches: [main]
     paths:
       - "Connector.Chassis/**"
+      - "Connector.Chassis.Tests/**"
       - ".github/workflows/chassis.yml"
   pull_request:
     branches: [main]
     paths:
       - "Connector.Chassis/**"
+      - "Connector.Chassis.Tests/**"
       - ".github/workflows/chassis.yml"
   workflow_dispatch:
 
@@ -38,6 +40,8 @@ env:
   DOTNET_NOLOGO: "1"
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
   CHASSIS_PROJECT: "Connector.Chassis/Connector.Chassis.csproj"
+  CHASSIS_SOLUTION: "Connector.Chassis/Chassis.sln"
+  CHASSIS_TESTS: "Connector.Chassis.Tests/Connector.Chassis.Tests.csproj"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -63,16 +67,33 @@ jobs:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Restore
-        run: dotnet restore ${{ env.CHASSIS_PROJECT }}
+        run: dotnet restore ${{ env.CHASSIS_SOLUTION }}
 
       - name: Build
-        run: dotnet build ${{ env.CHASSIS_PROJECT }} -c Release --no-restore
+        run: dotnet build ${{ env.CHASSIS_SOLUTION }} -c Release --no-restore
+
+      # The chassis is the single point of failure for all five connectors and
+      # until now nothing tested it directly: this job was restore + build +
+      # pack, and chassis coverage was whatever the connector suites happened to
+      # reach on the way past. On windows-latest especially -- the chassis owns
+      # the Event Log sink, the Windows service host and every FileShare mode in
+      # the fleet, and Windows is the only runner that ENFORCES share modes.
+      - name: Test
+        run: dotnet test ${{ env.CHASSIS_TESTS }} -c Release --no-build
 
   # ---------------------------------------------------------------------------
   # Pack once (the package is platform-neutral) and publish the .nupkg as a build
-  # artifact. Connectors consume the chassis by PackageReference, so this artifact
-  # is what makes a consolidated connector buildable off a clean clone — today by
-  # download, and as the connectors move onto the chassis, as the CI feed.
+  # artifact.
+  #
+  # NOTE ON WHY THIS EXISTS. The comment here used to say "Connectors consume the
+  # chassis by PackageReference, so this artifact is what makes a consolidated
+  # connector buildable off a clean clone". That is false and has been for some
+  # time: all five consume it by ProjectReference, which conformance.yml now
+  # asserts by resolving the reference through the csproj XML to a file on disk.
+  # Nothing consumes this .nupkg. It is kept because packing is the only check
+  # that the chassis remains packable -- IsPackable is true and the version is
+  # maintained -- and that is worth one 30-second job, but it is a build check,
+  # not a distribution channel.
   # ---------------------------------------------------------------------------
   pack:
     name: Pack
