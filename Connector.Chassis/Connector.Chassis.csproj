@@ -11,6 +11,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The chassis's own suite. First in the list because it is the only one
+         that tests these internals directly rather than through a connector. -->
+    <InternalsVisibleTo Include="Connector.Chassis.Tests" />
     <InternalsVisibleTo Include="SeismicConnector.Tests" />
     <InternalsVisibleTo Include="ClarizenConnector.Tests" />
     <InternalsVisibleTo Include="HadoopConnector.Tests" />

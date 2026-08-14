@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Tests for Connector.Chassis.
+
+    WHY THIS PROJECT SITS AT THE REPOSITORY ROOT rather than under
+    Connector.Chassis/tests/, which is where every connector keeps its suite:
+    Connector.Chassis.csproj is an SDK-style project rooted at
+    Connector.Chassis/, so it globs **/*.cs beneath itself. A tests folder
+    nested inside would be compiled INTO the shipped chassis assembly, taking
+    xunit with it. The connectors get away with the nested layout because their
+    csproj lives one level down in src/.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="10.0.1" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="Connector.Chassis" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Connector.Chassis\Connector.Chassis.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The chassis is built almost entirely out of process-global statics
+         (Logging.RunDirectory, Alerting.HttpClient, Chassis.Identity,
+         SecretProvider.OverrideFetch, environment variables). Collections must
+         not run in parallel or they will trample each other, exactly as in the
+         five connector suites. -->
+    <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
