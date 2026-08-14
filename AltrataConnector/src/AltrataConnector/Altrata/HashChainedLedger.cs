@@ -173,7 +173,8 @@ public abstract class HashChainedLedger<TEntry> where TEntry : class
         if (!File.Exists(Path))
             return entries;
         var lineNumber = 0;
-        foreach (var line in ReadLinesShared(Path))
+        var lines = ReadLinesShared(Path, out var unterminatedTail);
+        foreach (var line in lines)
         {
             lineNumber++;
             if (string.IsNullOrWhiteSpace(line))
@@ -193,6 +194,18 @@ public abstract class HashChainedLedger<TEntry> where TEntry : class
                 break;
             }
             entries.Add(entry);
+        }
+
+        // Append writes the record and its '\n' through one StreamWriter, flushed
+        // together, so a COMPLETE final record with no terminator cannot come
+        // from a legitimate append. It means the terminator was overwritten --
+        // the LF->CR flip lands here, because trimming the trailing CR makes the
+        // record parse perfectly -- or the tail was truncated. Either way the
+        // file is not physically intact, and a ledger that reports otherwise is
+        // not tamper-evident.
+        if (unterminatedTail && firstBadLine == 0 && entries.Count > 0)
+        {
+            firstBadLine = lineNumber;
         }
         return entries;
     }
@@ -243,20 +256,80 @@ public abstract class HashChainedLedger<TEntry> where TEntry : class
     }
 
     /// <summary>
-    /// Read the ledger tolerating a concurrent appender. Not
-    /// <see cref="File.ReadLines(string)"/>, which opens as
-    /// <see cref="FileShare.Read"/> — a share mode that does not permit the Write
-    /// access an appending writer holds, so on Windows (which enforces share
-    /// modes, unlike POSIX) verifying the ledger during a crawl is refused.
+    /// The ledger's PHYSICAL lines, split on the newline character and nothing
+    /// else, tolerating a concurrent appender.
     /// </summary>
-    private static IEnumerable<string> ReadLinesShared(string path)
+    /// <remarks>
+    /// <para>
+    /// TWO reasons this is not <see cref="File.ReadLines(string)"/>, and the
+    /// second is a tamper-evidence hole.
+    /// </para>
+    /// <para>
+    /// Sharing: ReadLines opens as <see cref="FileShare.Read"/>, a share mode
+    /// that does not permit the Write access an appending writer holds, so on
+    /// Windows (which enforces share modes, unlike POSIX) verifying the ledger
+    /// during a crawl is refused.
+    /// </para>
+    /// <para>
+    /// Separators: <c>StreamReader.ReadLine</c> breaks a line on '\r', '\n' AND
+    /// "\r\n" alike. <see cref="Append"/> only ever terminates a record with
+    /// '\n', so a lone CR between two records means that '\n' was OVERWRITTEN.
+    /// ReadLine healed that back into an ordinary line break, the two records
+    /// parsed exactly as before, and the hash chain — which only ever sees
+    /// parsed records — reported the file INTACT. A single-byte edit of the
+    /// record separator was therefore undetectable, which is the one thing a
+    /// tamper-evident ledger exists to prevent. Reproduced against the shipped
+    /// build: flipping one 0x0A to 0x0D left Verify() returning true, and it is
+    /// what made LedgerScaleTamperStressTests fail at random — the test probes
+    /// 500 positions and only fails when one lands on a separator.
+    /// </para>
+    /// <para>
+    /// Splitting on the same character the writer writes closes it: the flip
+    /// glues two records onto one physical line, that line is not valid JSON,
+    /// and the existing unreadable-line path reports the chain broken. A CR that
+    /// is part of a CRLF is still trimmed below, so ledgers written by the older
+    /// build that emitted <c>Environment.NewLine</c> continue to verify.
+    /// </para>
+    /// <para>
+    /// The chassis DecisionLedger fixed exactly this and says so in its own
+    /// PhysicalLines remark. This class never got it — it is a different type in
+    /// a different namespace, so a search for the fix by name found the chassis
+    /// copy and looked complete.
+    /// </para>
+    /// </remarks>
+    /// <param name="unterminatedTail">
+    /// True when the file is non-empty and does not end with '\n'. Reported
+    /// rather than swallowed: it is how a flip of the FINAL separator shows up,
+    /// and the storm test always probes that byte (pristine.Length - 1).
+    /// </param>
+    private static List<string> ReadLinesShared(string path, out bool unterminatedTail)
     {
-        using var stream = new FileStream(
-            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        using var reader = new StreamReader(stream, new UTF8Encoding(false));
-        while (reader.ReadLine() is { } line)
+        string content;
+        using (var stream = new FileStream(
+                   path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        using (var reader = new StreamReader(stream, new UTF8Encoding(false)))
         {
-            yield return line;
+            content = reader.ReadToEnd();
         }
+
+        unterminatedTail = content.Length > 0 && content[^1] != '\n';
+
+        var lines = new List<string>();
+        foreach (var raw in content.Split('\n'))
+        {
+            // A trailing CR is a CRLF terminator from the older writer: tolerated.
+            // A CR anywhere ELSE survives into the line and makes it unparseable,
+            // which is precisely the detection this method exists for.
+            lines.Add(raw.Length > 0 && raw[^1] == '\r' ? raw[..^1] : raw);
+        }
+
+        // Split yields a trailing empty element for the final '\n' that every
+        // well-formed ledger ends with; ReadLine did not. Dropped so line
+        // NUMBERS still match what Verify reports as the broken line.
+        if (lines.Count > 0 && lines[^1].Length == 0)
+        {
+            lines.RemoveAt(lines.Count - 1);
+        }
+        return lines;
     }
 }
