@@ -41,6 +41,7 @@
        name so call sites are untouched; not-yet-migrated local types don't collide. -->
   <ItemGroup>
     <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
+    <Using Include="Connector.Chassis.Alerting" Alias="Alerting" />
     <Using Include="Connector.Chassis.LogRedaction" Alias="LogRedaction" />
     <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />
     <Using Include="Connector.Chassis.Logging" Alias="Logging" />

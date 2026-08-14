@@ -30,6 +30,7 @@
   <ItemGroup>
     <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />
     <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
+    <Using Include="Connector.Chassis.Alerting" Alias="Alerting" />
   </ItemGroup>
 
   <ItemGroup>

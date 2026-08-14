@@ -56,6 +56,13 @@ public static class Program
         Connector.Chassis.Chassis.CorrelationIdProvider = () => CorrelationContext.Current;
         Logging.HardenDirectoryHook = SecureDirectories.CreateHardened;
         Logging.EventLogMirrorHook = EventLogSink.Mirror;
+        // This connector keeps its own transport for alert webhooks: four
+        // connectors have four CreateHandler implementations, all reading
+        // PROXY_URL and CA_BUNDLE_PATH, and picking a winner would change which
+        // TLS and proxy behaviour the others get. The chassis owns the alerting
+        // logic; the host keeps the transport it was hardened with.
+        Connector.Chassis.Alerting.HandlerFactory = HttpTransport.CreateHandler;
+
         Logging.UseStandardMode();
     }
 
