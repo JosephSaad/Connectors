@@ -74,20 +74,18 @@ public sealed class CircuitBreakerOptions
     {
         return new CircuitBreakerOptions
         {
-            Enabled = ReadBool(EnabledEnvVar, defaultValue: true),
+            // !IsFalse, not a truthy read with a true default: this is a
+            // protective default, so only a deliberate, recognised "off" may
+            // disable it. The private ReadBool that used to be here treated any
+            // unrecognised value as off, so CIRCUIT_BREAKER=on|enabled|Y|ture
+            // left both of Seismic's critical breakers in passthrough -- the
+            // exact failure EnvFlags.IsFalse's remark names this variable for.
+            Enabled = !EnvFlags.IsFalse(EnabledEnvVar),
             FailureThreshold = ReadInt("CIRCUIT_BREAKER_FAILURE_THRESHOLD", 5, min: 1),
             OpenDuration = TimeSpan.FromSeconds(ReadInt("CIRCUIT_BREAKER_OPEN_SECONDS", 30, min: 1)),
             Window = TimeSpan.FromSeconds(ReadInt("CIRCUIT_BREAKER_WINDOW_SECONDS", 60, min: 1)),
             HalfOpenTrials = ReadInt("CIRCUIT_BREAKER_HALF_OPEN_TRIALS", 1, min: 1),
         };
-    }
-
-    private static bool ReadBool(string name, bool defaultValue)
-    {
-        var raw = Environment.GetEnvironmentVariable(name);
-        if (string.IsNullOrWhiteSpace(raw))
-            return defaultValue;
-        return raw.Trim().ToLowerInvariant() is "true" or "1" or "yes";
     }
 
     private static int ReadInt(string name, int defaultValue, int min)

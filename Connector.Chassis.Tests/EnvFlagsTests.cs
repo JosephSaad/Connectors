@@ -208,20 +208,23 @@ public class EnvFlagsTests
     [InlineData(" 1 ")]
     [InlineData("\tyes")]
     [InlineData("yes\n")]
-    public void IsTrue_DoesNotTrim_UnlikeTheOtherEntryPoints(string raw)
+    public void IsTrue_TrimsLikeEveryOtherEntryPoint(string raw)
     {
-        // CURRENT BEHAVIOUR, pinned rather than endorsed (reported as a defect):
-        // IsTrue matches the raw string while IsTrueOrDefault and IsFalse both
-        // Trim() first. Padding is easy to introduce -- a trailing space in a
-        // .env line, a folded YAML scalar, `ENV FLAG=true ` in a Dockerfile --
-        // and it makes the same variable read as ON through one helper and OFF
-        // through the other. If a Trim() is ever added to IsTrue this test goes
-        // red, which is the moment to notice that some deployments just changed
-        // behaviour.
+        // This test used to assert the OPPOSITE, pinning IsTrue's missing Trim()
+        // as observed behaviour while reporting it as a defect. It was a defect:
+        // measured end to end, CLASSIFICATION_ENFORCE_ACL="true " read as OFF
+        // *and* suppressed the AppConfig.Validate() guard that would have failed
+        // the load, so Altrata indexed Restricted items without locking them to
+        // the enforcement group while validate-config reported success.
+        //
+        // Padding is deployment plumbing, not intent: a trailing space in a .env
+        // line, a folded YAML scalar, `ENV FLAG=true ` in a Dockerfile. Every
+        // entry point now trims, so all three agree on every input.
         using var env = new Scope((Flag, raw));
 
-        Assert.False(EnvFlags.IsTrue(Flag));
+        Assert.True(EnvFlags.IsTrue(Flag));
         Assert.True(EnvFlags.IsTrueOrDefault(Flag, fallback: false));
+        Assert.False(EnvFlags.IsFalse(Flag));
     }
 
     // ------------------------------------------------------- IsTrueOrDefault
@@ -299,7 +302,7 @@ public class EnvFlagsTests
         Assert.Equal(expected, EnvFlags.IsFalse(Flag));
     }
 
-    // ------------------------------------------- the asymmetry that must stay
+    // --------------------------------------- the asymmetry that was the defect
 
     [Theory]
     [InlineData("flase")]      // the actual typo this design exists to survive
@@ -312,18 +315,38 @@ public class EnvFlagsTests
     [InlineData("00")]
     [InlineData("-0")]
     [InlineData("0.0")]
-    public void UnrecognisedValue_TheTwoDefaultOnIdiomsDisagree_AndThatIsThePoint(string raw)
+    public void UnrecognisedValue_LeavesEveryDefaultOnIdiomON(string raw)
     {
+        // This test used to assert that the two idioms DISAGREE here, and called
+        // the disagreement the point. It was the defect. IsTrueOrDefault(x, true)
+        // returned false for a typo -- breaking its own name, since the caller
+        // asked for the value OR the default and got neither -- which is why
+        // IsFalse had to exist and why IdentitySyncOnIncremental was wrong.
+        //
+        // An unrecognised value now means "no opinion" everywhere: it falls back
+        // to the caller's declared default, and warns once naming the variable.
+        // A value nobody meant can no longer choose a setting in either
+        // direction, which is the only reading that is safe for both a
+        // default-ON and a default-OFF gate.
         using var env = new Scope((Flag, raw));
 
-        // What CircuitBreaker.cs and Settings.cs actually write. A value nobody
-        // meant leaves the protective default ON.
-        Assert.True(!EnvFlags.IsFalse(Flag));
+        Assert.True(!EnvFlags.IsFalse(Flag));                            // protective default stays ON
+        Assert.True(EnvFlags.IsTrueOrDefault(Flag, fallback: true));     // ... and so does this, now
+        Assert.False(EnvFlags.IsTrueOrDefault(Flag, fallback: false));   // a default-OFF gate stays OFF
+        Assert.False(EnvFlags.IsTrue(Flag));                             // still not an "on"
+    }
 
-        // What a careless consolidation would substitute for it. Same variable,
-        // same fallback, OPPOSITE answer: the breaker would be off and nothing
-        // would say so. Deleting IsFalse means shipping this column.
-        Assert.False(EnvFlags.IsTrueOrDefault(Flag, fallback: true));
+    [Theory]
+    [InlineData("flase")]
+    [InlineData("off")]
+    [InlineData("2")]
+    public void UnrecognisedValue_IsReportedAsAbsent_NotAsFalse(string raw)
+    {
+        // Parse is the single vocabulary. null means "the operator said nothing
+        // I can act on", which is what makes every caller fall back rather than
+        // invent an answer.
+        using var env = new Scope((Flag, raw));
+        Assert.Null(EnvFlags.Parse(Flag));
     }
 
     [Theory]
@@ -370,21 +393,39 @@ public class EnvFlagsTests
     [Fact]
     public void ARecognisedValueNeverConsultsTheFallback()
     {
-        // The fallback is for "the operator said nothing", not for "the operator
-        // said something I did not understand". Anything that survives
-        // IsNullOrWhiteSpace must answer the same regardless of fallback --
-        // including unrecognised values, which answer false both ways.
+        // The fallback is for "the operator gave me nothing I can act on" --
+        // which now includes a value outside the vocabulary, because inventing
+        // an answer from a typo is exactly how a gate flips silently. A
+        // RECOGNISED value must still answer the same regardless of fallback:
+        // when the operator did say something, the default is irrelevant.
         using var env = new Scope((Flag, null));
+        var recognised = 0;
         foreach (var raw in Vocabulary)
         {
-            if (string.IsNullOrWhiteSpace(raw))
-                continue;
-
             env.Set(Flag, raw);
+            if (EnvFlags.Parse(Flag) is null)
+                continue;   // unset, blank or unrecognised — the fallback SHOULD decide
+
+            recognised++;
             Assert.Equal(
                 EnvFlags.IsTrueOrDefault(Flag, fallback: true),
                 EnvFlags.IsTrueOrDefault(Flag, fallback: false));
         }
+
+        // Guards the guard: if Parse ever stopped recognising anything, the loop
+        // above would skip every case and pass vacuously.
+        Assert.True(recognised >= 6, $"only {recognised} recognised values in the vocabulary");
+    }
+
+    [Fact]
+    public void AnUnrecognisedValueDoesConsultTheFallback()
+    {
+        // The other half, stated explicitly so the pair reads as one rule:
+        // recognised -> the value; anything else -> the caller's default.
+        using var env = new Scope((Flag, "flase"));
+
+        Assert.True(EnvFlags.IsTrueOrDefault(Flag, fallback: true));
+        Assert.False(EnvFlags.IsTrueOrDefault(Flag, fallback: false));
     }
 
     [Fact]
@@ -485,17 +526,19 @@ public class EnvFlagsTests
     [InlineData("flase")]
     [InlineData("off")]
     [InlineData("disabled")]
-    public void IdentitySyncOnIncremental_UnrecognisedValueSilentlyTurnsItOff(string raw)
+    public void IdentitySyncOnIncremental_UnrecognisedValueLeavesItOn(string raw)
     {
-        // DEFECT, documented not fixed. The property is IsTrueOrDefault(name,
-        // true), so per UnrecognisedValue_* above a typo reads as OFF -- exactly
-        // the failure mode IsFalse's own remark says a default-ON gate must not
-        // have, and the opposite of how AltrataConnector reads the SAME variable
-        // (Config/Settings.cs writes !EnvFlags.IsFalse("IDENTITY_SYNC_ON_INCREMENTAL")).
-        // Consequence of a one-character typo: identity sync quietly reverts to
-        // full-crawl cadence in the chassis while Altrata keeps running it.
+        // Was the defect this test documented: the property read
+        // IsTrueOrDefault(name, true), so a one-character typo reverted identity
+        // sync to full-crawl cadence -- stretching ACL staleness from the
+        // incremental cadence to hours -- while AltrataConnector, reading the
+        // SAME variable as !EnvFlags.IsFalse, kept running it. Two consumers of
+        // one env var, opposite answers.
+        //
+        // Now spelled !IsFalse, and IsTrueOrDefault would give the same answer
+        // anyway. Only an explicit, recognised "false" turns it off.
         using var env = new Scope((IdentitySyncVar, raw));
-        Assert.False(EnvFlags.IdentitySyncOnIncremental);
+        Assert.True(EnvFlags.IdentitySyncOnIncremental);
     }
 
     [Fact]
