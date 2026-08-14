@@ -10,23 +10,40 @@ and CI runs from the workflows at the repository root.
 
 | Connector | Source system | Highlights | Tests |
 |---|---|---|---|
-| [SalesforceConnector](SalesforceConnector/) | Salesforce CRM | Sharing-model ACLs, standard + custom objects, sovereign-cloud ready, large-group ACL scale guard | 1206 |
-| [ClarizenConnector](ClarizenConnector/) | Planview AdaptiveWork (Clarizen) | REST v2 + TDW bulk, financial-field governance (filter by default), webhooks with anti-replay | 878 |
-| [SeismicConnector](SeismicConnector/) | Seismic (sales enablement) | Version-aware, fail-closed No-MNE exclusion filter, usage ranking, webhook anti-replay | 1017 |
-| [AltrataConnector](AltrataConnector/) | Altrata (relationship & wealth intelligence) | Licensed feeds, seat-only entitlement, purpose-of-use authz, DSAR erasure | 743 |
-| [HadoopConnector](HadoopConnector/) | BDH Hadoop data mart (nightly Salesforce mirror) | Filter-first at 150M+ scale, partition pruning, 24h-lag aware | 983 |
+| [SalesforceConnector](SalesforceConnector/) | Salesforce CRM | Sharing-model ACLs, standard + custom objects, sovereign-cloud ready, large-group ACL scale guard | 1213 |
+| [ClarizenConnector](ClarizenConnector/) | Planview AdaptiveWork (Clarizen) | REST v2 + TDW bulk, financial-field governance (filter by default), webhooks with anti-replay | 897 |
+| [SeismicConnector](SeismicConnector/) | Seismic (sales enablement) | Version-aware, fail-closed No-MNE exclusion filter, usage ranking, webhook anti-replay | 1025 |
+| [AltrataConnector](AltrataConnector/) | Altrata (relationship & wealth intelligence) | Licensed feeds, seat-only entitlement, purpose-of-use authz, DSAR erasure | 764 |
+| [HadoopConnector](HadoopConnector/) | BDH Hadoop data mart (nightly Salesforce mirror) | Filter-first at 150M+ scale, partition pruning, 24h-lag aware | 988 |
 
 ## Shared chassis
 
-`Connector.Chassis/` (v1.13.1) is one real shared project: all five connectors
+`Connector.Chassis/` (v1.18.0) is one real shared project: all five connectors
 consume it via `<ProjectReference>`. It is not a NuGet package — there is no
-version pinning and no feed. From it they take the identity/seams core and
-ServiceStop (all five), Logging (four — Salesforce keeps its own logging and
-bridges through `Chassis.LoggerFactory`), SecretProvider (four — Altrata keeps
-its own), SqlExecutor and MetricsRenderer (Seismic, Clarizen, Hadoop),
-SqlGateway (Clarizen, Hadoop) and Tracing (Seismic, Altrata). DecisionLedger,
-HaCoordinator, SqlStateStore, Alerting, EventLogSink, LogPruner, ServiceHost,
-EnvFlags and CircuitBreaker are still implemented separately in each connector.
+version pinning and no feed. `.github/workflows/conformance.yml` asserts that
+reference on every PR by resolving it through the csproj XML to a file on disk,
+so "on the fleet" is checked rather than claimed.
+
+Sharing is partial, and tracked rather than estimated. Of the chassis's 23
+modules, **9 have no local copy anywhere** — `Chassis` (identity/seams),
+`ServiceStop`, `SecretProvider`, `MetricsRenderer`, `SqlGateway`,
+`CircuitBreakerRegistry`, `ConfigException`, `LogRedaction` and
+`StandardLogDialect`. The other 14 still exist as per-connector implementations:
+`DecisionLedger`, `EventLogSink`, `HaCoordinator`, `LogPruner`, `ServiceHost`
+and `SqlStateStore` in four connectors each; `CircuitBreaker` and `EnvFlags` in
+three; `Tracing` in two; `Alerting`, `HttpTransport`, `Logging`,
+`SecureDirectory` and `SqlExecutor` in one.
+
+That comes to **67 declared divergences** — Salesforce 22, Clarizen 16,
+Hadoop 16, Altrata 13, **Seismic 0** — each recorded with a reason in
+[`.github/conformance/divergences.tsv`](.github/conformance/divergences.tsv).
+The register is a ratchet, not an amnesty: CI fails on a local copy that is not
+declared, and equally on a declared copy that no longer exists, so the number
+cannot drift and cannot quietly grow. Where a connector keeps its own contract
+the chassis exposes a seam instead of forking — `Chassis.LoggerFactory` (how
+Salesforce's CPython-style logging stack participates at all),
+`Logging.Dialect`, and `Alerting.HandlerFactory` (each connector keeps the HTTP
+transport it was hardened with).
 
 Every connector ships the same foundation:
 
@@ -40,8 +57,12 @@ Every connector ships the same foundation:
 - Circuit breakers with degraded-mode fail-safe
 - Unified data classification & sensitivity tagging (Public → Restricted) — an
   advisory connector-applied tag, with optional ACL enforcement of the top tier
-- SCM-aware Windows service, Docker image, GitHub Actions CI (one root
-  workflow per connector, plus one for the chassis)
+- SCM-aware Windows service, Docker image, GitHub Actions CI — eight workflows
+  at the repository root: one per connector (build + test on ubuntu **and**
+  windows, plus a Docker image build), one for the chassis (build, test, pack),
+  plus CodeQL and the chassis conformance gate. `main` is protected: linear
+  history, no force-push, and the two checks that run on every PR
+  (`Chassis conformance`, `Analyze (csharp)`) are required, admins included
 - Enterprise operations pack: Windows Event Log/SIEM integration, corporate
   proxy + TLS-inspection CA support, certificate-credential Graph auth,
   threat model, runbooks, DR plan, Grafana dashboards + alert rules (see each

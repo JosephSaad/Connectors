@@ -92,9 +92,9 @@
 <line x1="940" y1="638" x2="1000" y2="638" stroke="#8A93A6" stroke-width="2" marker-end="url(#ah)" stroke-dasharray="4 4"/>
 <rect x="1002" y="618" width="150" height="40" rx="8" fill="#fff" stroke="#C9D3E3" stroke-width="1" opacity="1"/>
 <text x="1012" y="642" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#595959" text-anchor="start" font-weight="700">OTLP collector</text>
-<text x="1170" y="642" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.5" fill="#8A93A6" text-anchor="start" font-style="italic">traces: 4 of 5 (not Salesforce)</text>
+<text x="1170" y="642" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.5" fill="#8A93A6" text-anchor="start" font-style="italic">traces: 5 of 5</text>
 <text x="40" y="710" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="16" fill="#1F3864" text-anchor="start" font-weight="800">Setup parameters</text>
-<text x="40" y="730" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#595959" text-anchor="start">Defaults are the shipped values; “Set for SIEM” is what turns the feed on. Every connector reads these (OTEL_* on all but Salesforce; EVENTLOG_LEVEL on all but Altrata).</text>
+<text x="40" y="730" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="11" fill="#595959" text-anchor="start">Defaults are the shipped values; “Set for SIEM” is what turns the feed on. Every connector reads these (OTEL_* on all five; EVENTLOG_LEVEL on all but Altrata).</text>
 <rect x="40" y="752" width="1400" height="30" rx="6" fill="#1F3864" stroke="none" stroke-width="1" opacity="1"/>
 <text x="50" y="772" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.5" fill="#fff" text-anchor="start" font-weight="700" letter-spacing="0.5">PARAMETER</text>
 <text x="350" y="772" font-family='"Segoe UI",Helvetica,Arial,sans-serif' font-size="10.5" fill="#fff" text-anchor="start" font-weight="700" letter-spacing="0.5">DEFAULT</text>

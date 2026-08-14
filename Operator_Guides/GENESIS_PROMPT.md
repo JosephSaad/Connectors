@@ -22,19 +22,30 @@ parallel work, and re-verify every agent's build/test claims by running
 
 Every connector has its own solution, tests, config, docs, Dockerfile and
 LICENSE/NOTICE, and all five consume one shared **chassis** project
-(`Connector.Chassis`, v1.13.1) by `<ProjectReference>` — never consumed as a
+(`Connector.Chassis`, v1.18.0) by `<ProjectReference>` — never consumed as a
 NuGet package, so no version pin and no feed. (Chassis CI still runs
 `dotnet pack` to produce an inspectable artifact; nothing consumes it, and it
 is pushed nowhere.) Because each project
 references `../Connector.Chassis`, images build with the repository root as
 the context (`docker build -f <Connector>/Dockerfile .`), governed by a single
-root `.dockerignore`. The chassis owns identity/seams and service-stop for all
-five; logging and the secret provider for four apiece (Salesforce keeps its
-own CPython-style logging and bridges via `Chassis.LoggerFactory`; Altrata
-keeps its own secret provider); the SQL executor and metrics renderer for
-three; the SQL gateway and tracing for two. Everything else below — decision
-ledger, HA coordinator, SQL state store, alerting, Event Log sink, log pruner,
-service host, env flags, circuit breaker — is still implemented per connector.
+root `.dockerignore`. Sharing is partial and tracked, not estimated. Nine of the chassis's 23 modules
+have no local copy anywhere — identity/seams (`Chassis`), `ServiceStop`,
+`SecretProvider`, `MetricsRenderer`, `SqlGateway`, `CircuitBreakerRegistry`,
+`ConfigException`, `LogRedaction` and `StandardLogDialect`. Alerting and
+logging reach four of five apiece (Altrata keeps its own alert sink, whose
+`IAlertSink` carries a severity the chassis envelope does not; Salesforce keeps
+its CPython-style logging and bridges via `Chassis.LoggerFactory`). The
+remaining modules — decision ledger, Event Log sink, HA coordinator, log
+pruner, service host and SQL state store at four copies each, circuit breaker
+and env flags at three, tracing at two — are still per connector.
+
+That is **67 declared divergences** (Salesforce 22, Clarizen 16, Hadoop 16,
+Altrata 13, Seismic 0), each recorded with a reason in
+`.github/conformance/divergences.tsv`. The register is a ratchet: CI fails on an
+undeclared copy and equally on a declared copy that no longer exists, so the
+count cannot drift or quietly grow. Where a connector must keep its own
+contract the chassis exposes a seam rather than forking — `Chassis.LoggerFactory`,
+`Logging.Dialect`, `Alerting.HandlerFactory`.
 The common capability set:
 
 - Unified CLI (`guide`, `setup-connection`, `full-deployment`, `ingest`,
@@ -317,7 +328,7 @@ the FTE model and the bank-realistic programme plan.*
 
 *Refreshed 20-Jul-2026. Since genesis the session ran **adversarial assurance
 rounds 7–10** (fix → independent hostile verify → claim audit → mutation test →
-re-attack), taking the fleet from 3,389 to **4,824 green tests at 0 warnings**
+re-attack), taking the fleet from 3,389 to **4,824 green tests at 0 warnings** (as of that wave; the fleet now stands at **5,445** — see the consolidation section)
 (Salesforce 1,206 · Clarizen 877 · Seismic 1,017 · Altrata 743 · Hadoop 981).
 Defects were closed as CLASSES: Salesforce field-level security with
 name-derived compound inference **removed** (components indexed individually);
