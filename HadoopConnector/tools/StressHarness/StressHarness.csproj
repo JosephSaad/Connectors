@@ -19,6 +19,7 @@
        to the chassis by simple name so this tool's call sites are untouched. -->
   <ItemGroup>
     <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
+    <Using Include="Connector.Chassis.Alerting" Alias="Alerting" />
     <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />
     <Using Include="Connector.Chassis.Logging" Alias="Logging" />
     <Using Include="Connector.Chassis.IAppLogger" Alias="IAppLogger" />

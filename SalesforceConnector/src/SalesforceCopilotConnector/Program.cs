@@ -85,6 +85,10 @@ public static class Program
         Connector.Chassis.Chassis.Init(
             new Connector.Chassis.ChassisIdentity(
                 "salesforce_connector", EventLogSink.SourceName, "salesforce_connector"));
+        // Alert webhooks keep this connector's own transport — its handler is the
+        // richest on TLS in the fleet, and the chassis must not silently swap it.
+        Connector.Chassis.Alerting.HandlerFactory = () => HttpClientFactory.CreateHandler();
+
         Connector.Chassis.Chassis.LoggerFactory =
             name => new ChassisLoggerAdapter(name, Logging.GetLogger(name));
     }

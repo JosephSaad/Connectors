@@ -355,11 +355,11 @@ public class DeletionSweepTests : IDisposable
         }
 
         using var alertScope = new EnvScope(
-            (Infrastructure.Alerting.WebhookUrlEnvVar, "https://hooks.example/x"),
+            (Alerting.WebhookUrlEnvVar, "https://hooks.example/x"),
             ("DELETION_SYNC_MAX_PERCENT", null));
         var alertHandler = new MockHttpHandler((_, _) =>
             MockHttpHandler.Json(HttpStatusCode.OK, "{}"));
-        Infrastructure.Alerting.HttpClient = new HttpClient(alertHandler);
+        Alerting.HttpClient = new HttpClient(alertHandler);
 
         var summary = await Pipeline().RunAsync(fullCrawl: true);
 
