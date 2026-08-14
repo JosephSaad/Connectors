@@ -193,7 +193,7 @@ public sealed class FileStateStore : IStateStore
             File.WriteAllText(tmp, content, new UTF8Encoding(false));
             if (failBeforeMove)
                 throw new IOException("injected mid-write failure (test seam)");
-            File.Move(tmp, path, overwrite: true);
+            ReplaceWithRetry(tmp, path);
         }
         catch
         {
@@ -210,6 +210,52 @@ public sealed class FileStateStore : IStateStore
                 // Best effort only — the original failure is the one that matters.
             }
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Publish the temp file over the target, retrying while the destination is
+    /// briefly unavailable.
+    /// </summary>
+    /// <remarks>
+    /// Granting readers FileShare.Delete is necessary but NOT sufficient, and the
+    /// two halves fail differently. Without shared delete access the rename fails
+    /// PERMANENTLY for as long as a reader holds the file. With it the rename
+    /// succeeds, but the replaced file object lingers in Windows' delete-pending
+    /// state until that reader closes, and a publish arriving inside that window
+    /// gets ERROR_ACCESS_DENIED — surfaced by .NET as UnauthorizedAccessException,
+    /// not the IOException the sharing-violation path produces. That is a
+    /// TRANSIENT condition whose correct response is to wait for the reader to
+    /// let go.
+    ///
+    /// This connector was the only one of the five publishing with a bare
+    /// File.Move; the other four have carried this retry in SyncState since the
+    /// state-file work, catching the same two exception types with the same
+    /// budget. The asymmetry survived because Altrata's state store is a
+    /// different class in a different namespace, so a search for the helper's
+    /// name found four of five and looked complete.
+    ///
+    /// Retrying does not weaken the guarantee: every attempt is still a
+    /// whole-file rename, so a reader sees either the old file or the new one and
+    /// never a torn one. Exhausting the attempts rethrows rather than falling
+    /// back to a non-atomic write — a torn checkpoint is read as "no checkpoint"
+    /// and silently restarts the delivery, so failing loudly is better.
+    /// </remarks>
+    private static void ReplaceWithRetry(string temp, string path)
+    {
+        const int Attempts = 20;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Move(temp, path, overwrite: true);
+                return;
+            }
+            catch (Exception exc) when (
+                (exc is UnauthorizedAccessException or IOException) && attempt < Attempts)
+            {
+                Thread.Sleep(10);
+            }
         }
     }
 
@@ -244,7 +290,21 @@ public sealed class FileStateStore : IStateStore
                 return null;
             try
             {
-                var checkpoint = JsonSerializer.Deserialize<CrawlCheckpoint>(File.ReadAllText(CheckpointPath));
+                // ReadAllTextShared, not File.ReadAllText: SaveCheckpoint below
+                // publishes this file through AtomicWrite, i.e. File.Move(tmp,
+                // path, overwrite: true). File.ReadAllText opens FileShare.Read,
+                // and Windows refuses to replace a file whose open handle has not
+                // shared delete access — so the rename fails, or the read does,
+                // depending on which side gets there first.
+                //
+                // StateLock only serialises this in-process. The scenario
+                // WriteAtomic itself documents — "an operator running ingest-item
+                // while a crawl runs under the same CONNECTOR_ID" — is two
+                // processes, where the lock is worth nothing.
+                //
+                // This is the same defect that was fixed for StatePath, one field
+                // over in the same class, with this helper already sitting below.
+                var checkpoint = JsonSerializer.Deserialize<CrawlCheckpoint>(ReadAllTextShared(CheckpointPath));
                 // Kind, not value: DATETIME2 carries no Kind, so the SQL
                 // backend stamps Utc on read. Do the same here so the two
                 // return EQUAL DateTimes and not merely equal ticks.
@@ -631,15 +691,25 @@ public sealed class FileStateStore : IStateStore
     /// Read the dead-letter queue while the crawl is still appending to it.
     /// </summary>
     /// <remarks>
-    /// No FileShare.Delete here, deliberately: the queue is only ever appended to
-    /// (FileMode.Append) and never republished by rename, so shared delete access
-    /// would grant a right nothing needs. Adding it everywhere on the strength of
-    /// a matching shape is the same mistake as omitting it where it is required.
+    /// FileShare.Delete IS required here, contrary to what this remark used to
+    /// say. The previous wording — "the queue is only ever appended to
+    /// (FileMode.Append) and never republished by rename" — was false in this
+    /// very file: ReplaceDeadLetters publishes DeadLetterPath through
+    /// AtomicWrite, i.e. File.Move(tmp, path, overwrite: true), and
+    /// ClearDeadLetters deletes it outright. Both are reachable in production
+    /// through MutateDeadLetters, while HealthEndpoint, Runtime and the retry
+    /// commands hold read handles on the same file.
+    ///
+    /// The rule the old wording was reaching for is still right — do not widen a
+    /// share mode on the strength of a matching shape — but it has to be applied
+    /// to what the writers actually DO, not to what the reader looks like. An
+    /// append-only queue would not need shared delete access; this queue is not
+    /// append-only.
     /// </remarks>
     private static IEnumerable<string> ReadLinesShared(string path)
     {
         using var stream = new FileStream(
-            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new StreamReader(stream, new UTF8Encoding(false));
         while (reader.ReadLine() is { } line)
         {

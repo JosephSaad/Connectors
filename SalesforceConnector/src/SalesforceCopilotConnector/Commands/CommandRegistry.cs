@@ -131,7 +131,12 @@ public static class CommandRegistry
         // command — and every --continuous cycle, which re-enters SetupLogging —
         // prunes aged run dirs once at start. Runs after the handlers are wired
         // so its one-line summary lands in this run's log file. No-op by default.
-        LogPruner.Prune();
+        //
+        // runDir is passed even though it was created moments ago and so cannot
+        // be older than any cutoff: it makes the "never delete the directory we
+        // are writing into" rule explicit here rather than an emergent property
+        // of the call ordering above. See the remarks on LogPruner.Prune.
+        LogPruner.Prune(activeRunDir: runDir);
 
         return (logFile, summaryFile);
     }

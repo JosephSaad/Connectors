@@ -28,7 +28,11 @@ public static class LogPruner
     }
 
     /// <summary>Delete run directories older than LOG_RETENTION_DAYS. Returns count removed.</summary>
-    public static int Prune(string? logsRoot = null, DateTime? utcNow = null)
+    /// <param name="activeRunDir">
+    /// The run directory this process is writing into, which is never pruned.
+    /// Defaults to <see cref="Logging.RunDirectory"/>; tests pass it explicitly.
+    /// </param>
+    public static int Prune(string? logsRoot = null, DateTime? utcNow = null, string? activeRunDir = null)
     {
         var days = RetentionDays;
         if (days <= 0)
@@ -40,6 +44,22 @@ public static class LogPruner
         var root = logsRoot ?? DirectoryHardening.LogsDir;
         if (!Directory.Exists(root))
             return 0;
+
+        // Normalised once, outside the loop. The previous guard compared the
+        // enumerated path to Logging.RunDirectory with a raw Ordinal string
+        // compare, which is only correct while both happen to be spelled the same
+        // way — and this connector deliberately resolves its logs root from
+        // LOGS_DIR (DirectoryHardening.LogsDir) rather than from
+        // Logging.LogsRoot, so the two are built independently. A relative
+        // LOGS_DIR, a trailing separator, or any difference in case on Windows
+        // makes the compare miss and the guard silently stop guarding.
+        //
+        // Altrata is not currently exposed the way Clarizen and Hadoop were —
+        // Prune runs once per process, immediately after RunLog.StartRun, so the
+        // active directory is always newer than the cutoff. This is defence
+        // against that ordering changing, not a live fix.
+        var active = activeRunDir ?? Logging.RunDirectory;
+        var activeFull = active is null ? null : Path.GetFullPath(active);
 
         var cutoff = (utcNow ?? DateTime.UtcNow).AddDays(-days);
         var removed = 0;
@@ -54,7 +74,8 @@ public static class LogPruner
                 if (!DateTime.TryParseExact(match.Groups[1].Value, "yyyyMMdd_HHmmss",
                         CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var stamp))
                     continue;
-                if (string.Equals(dir, Logging.RunDirectory, StringComparison.Ordinal))
+                if (activeFull is not null
+                    && string.Equals(Path.GetFullPath(dir), activeFull, StringComparison.OrdinalIgnoreCase))
                     continue;  // never delete the active run
                 if (stamp.ToUniversalTime() >= cutoff)
                     continue;

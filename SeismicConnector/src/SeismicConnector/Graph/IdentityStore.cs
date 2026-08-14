@@ -141,38 +141,83 @@ public sealed class SqliteIdentityStore : IIdentityStore
         // journal_mode is persisted in the database file, so this is a no-op after
         // the first connection; it is issued on every open so a file created by an
         // older build is upgraded in place.
-        using (var pragma = _connection.CreateCommand())
+        // The whole open — pragmas, DDL and the two column migrations — runs
+        // under one busy retry. The comment above names the exact collision (a
+        // restart or failover overlapping the outgoing process, every reopen
+        // re-running CREATE TABLE, which needs a write lock) but nothing here
+        // handled it: busy_timeout cannot cover the journal_mode switch, because
+        // the pragma that sets busy_timeout is in the same batch and the
+        // transition holds an exclusive lock the busy handler is deliberately not
+        // consulted for. SQLITE_BUSY came straight out of the constructor.
+        //
+        // Retrying is safe because every step is idempotent and one-way:
+        // journal_mode is persisted in the file, the tables are IF NOT EXISTS,
+        // and MigrateColumn checks table_info before altering. Whoever wins
+        // leaves the store ready; every later attempt confirms it.
+        WithBusyRetry(() =>
         {
-            pragma.CommandText =
-                $"PRAGMA busy_timeout={BusyTimeoutMs}; PRAGMA journal_mode=WAL;";
-            pragma.ExecuteNonQuery();
+            using (var pragma = _connection.CreateCommand())
+            {
+                pragma.CommandText =
+                    $"PRAGMA busy_timeout={BusyTimeoutMs}; PRAGMA journal_mode=WAL;";
+                pragma.ExecuteNonQuery();
+            }
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = """
+                    CREATE TABLE IF NOT EXISTS principals (
+                        seismic_id     TEXT PRIMARY KEY,
+                        principal_type TEXT NOT NULL,
+                        email          TEXT,
+                        entra_id       TEXT,
+                        display_name   TEXT,
+                        synced_at      TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS tracked_items (
+                        item_id         TEXT PRIMARY KEY,
+                        version_id      TEXT NOT NULL,
+                        teamsite_id     TEXT NOT NULL,
+                        expires_at      TEXT,
+                        last_seen       TEXT NOT NULL,
+                        status          TEXT NOT NULL,
+                        acl_fingerprint TEXT,
+                        classification_locked INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE INDEX IF NOT EXISTS ix_tracked_items_teamsite ON tracked_items(teamsite_id);
+                    """;
+                cmd.ExecuteNonQuery();
+            }
+            MigrateColumn("acl_fingerprint", "ALTER TABLE tracked_items ADD COLUMN acl_fingerprint TEXT");
+            MigrateColumn("classification_locked",
+                "ALTER TABLE tracked_items ADD COLUMN classification_locked INTEGER NOT NULL DEFAULT 0");
+        });
+    }
+
+    /// <summary>
+    /// Run the one-time open work, retrying while SQLite reports the file busy.
+    /// </summary>
+    /// <remarks>
+    /// Matches the helper the other four connectors already carry. It is a local
+    /// copy rather than a shared one because Connector.Chassis does not reference
+    /// Microsoft.Data.Sqlite, and adding that dependency to the chassis to host a
+    /// fifteen-line retry loop is a bigger decision than this fix.
+    /// </remarks>
+    private static void WithBusyRetry(Action work)
+    {
+        const int Attempts = 20;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                work();
+                return;
+            }
+            catch (SqliteException exc) when ((exc.SqliteErrorCode is 5 or 6) && attempt < Attempts)
+            {
+                // 5 = SQLITE_BUSY, 6 = SQLITE_LOCKED.
+                Thread.Sleep(25);
+            }
         }
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = """
-            CREATE TABLE IF NOT EXISTS principals (
-                seismic_id     TEXT PRIMARY KEY,
-                principal_type TEXT NOT NULL,
-                email          TEXT,
-                entra_id       TEXT,
-                display_name   TEXT,
-                synced_at      TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS tracked_items (
-                item_id         TEXT PRIMARY KEY,
-                version_id      TEXT NOT NULL,
-                teamsite_id     TEXT NOT NULL,
-                expires_at      TEXT,
-                last_seen       TEXT NOT NULL,
-                status          TEXT NOT NULL,
-                acl_fingerprint TEXT,
-                classification_locked INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS ix_tracked_items_teamsite ON tracked_items(teamsite_id);
-            """;
-        cmd.ExecuteNonQuery();
-        MigrateColumn("acl_fingerprint", "ALTER TABLE tracked_items ADD COLUMN acl_fingerprint TEXT");
-        MigrateColumn("classification_locked",
-            "ALTER TABLE tracked_items ADD COLUMN classification_locked INTEGER NOT NULL DEFAULT 0");
     }
 
     /// <summary>Add a column to tracked_items opened from an older DB (idempotent).</summary>

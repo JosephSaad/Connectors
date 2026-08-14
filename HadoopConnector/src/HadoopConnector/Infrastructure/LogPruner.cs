@@ -25,7 +25,12 @@ public static partial class LogPruner
     /// LOG_RETENTION_DAYS. No-op when the env var is unset/invalid/&lt;=0.
     /// Returns the number of directories removed. Never throws.
     /// </summary>
-    public static int PruneIfConfigured(string logsRoot, DateTime? nowLocal = null)
+    /// <param name="activeRunDir">
+    /// The run directory this process is writing into, which is never pruned.
+    /// Defaults to <see cref="Logging.RunDirectory"/>, which is what production
+    /// wants; tests pass it explicitly.
+    /// </param>
+    public static int PruneIfConfigured(string logsRoot, DateTime? nowLocal = null, string? activeRunDir = null)
     {
         try
         {
@@ -36,7 +41,7 @@ public static partial class LogPruner
             {
                 return 0;
             }
-            return Prune(logsRoot, days, nowLocal ?? DateTime.Now);
+            return Prune(logsRoot, days, nowLocal ?? DateTime.Now, activeRunDir);
         }
         catch (Exception exc)
         {
@@ -46,15 +51,41 @@ public static partial class LogPruner
     }
 
     /// <summary>Core pruning (testable): delete run dirs older than <paramref name="retentionDays"/>.</summary>
-    internal static int Prune(string logsRoot, int retentionDays, DateTime nowLocal)
+    internal static int Prune(string logsRoot, int retentionDays, DateTime nowLocal, string? activeRunDir = null)
     {
         if (!Directory.Exists(logsRoot))
             return 0;
+
+        // The run directory this process is writing into is chosen ONCE, by the
+        // first Logging.Initialize (later calls are no-ops), and never changes.
+        // This method runs on every --continuous cycle, so after
+        // LOG_RETENTION_DAYS of uptime the active directory ages past the cutoff
+        // and the pruner starts targeting its own live logs on every cycle.
+        //
+        // The two platforms fail differently and the quiet one is worse. On
+        // Windows the recursive delete removes the directory's other entries
+        // first and only then throws on the locked connector.log, so live
+        // artifacts are destroyed every cycle behind a warning that repeats
+        // forever. On macOS and Linux the unlink simply SUCCEEDS: the open handle
+        // keeps writing into an unlinked inode and every log line for the
+        // remaining life of the service goes nowhere, silently.
+        //
+        // Same guard as Connector.Chassis.LogPruner, which fixed this for the one
+        // connector that consumes the chassis pruner. This copy is why that was
+        // not enough.
+        var active = activeRunDir ?? Logging.RunDirectory;
+        var activeFull = active is null ? null : Path.GetFullPath(active);
 
         var cutoff = nowLocal.AddDays(-retentionDays);
         var removed = 0;
         foreach (var dir in Directory.GetDirectories(logsRoot))
         {
+            if (activeFull is not null
+                && string.Equals(Path.GetFullPath(dir), activeFull, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;  // never prune the run we are writing into
+            }
+
             var name = Path.GetFileName(dir);
             var match = RunDirPattern().Match(name);
             if (!match.Success)
