@@ -1,22 +1,35 @@
 # Chassis conformance
 # -------------------
 # Fails when a capability the fleet claims is uniform is missing from a
-# connector.
+# connector, AND when a connector carries its own copy of a chassis type without
+# declaring it.
 #
-# The TOGAF assessment named this as a distinct concern from the copied chassis
-# itself: "observable chassis drift — Salesforce lacks OpenTelemetry tracing the
-# others (and the docs) claim is standard". Drift of that kind is invisible in
-# the per-connector suites, because each one only tests what it has. Nothing
-# fails when a connector quietly lacks something; the docs keep asserting the
-# fleet is uniform, and the claim rots.
+# The TOGAF assessment named the first as a distinct concern from the copied
+# chassis itself: "observable chassis drift — Salesforce lacks OpenTelemetry
+# tracing the others (and the docs) claim is standard". Drift of that kind is
+# invisible in the per-connector suites, because each one only tests what it has.
 #
-# This is the cheap half of the remedy. It does not make connectors uniform — it
-# makes non-uniformity loud, so a gap is a decision someone took rather than
-# something nobody noticed.
+# The second half is new, and it is the half that matters. The original gate was
+# `grep -rqE` over *.cs and *.csproj with no compilation, no XML parsing and no
+# negative assertion. Two consequences, both demonstrated rather than assumed:
 #
-# Adding a capability here is deliberate: it asserts the fleet genuinely intends
-# every connector to carry it. A legitimate exemption belongs in EXEMPT below,
-# with a reason, not as a silently absent row.
+#   * a .cs file containing ONLY COMMENTS satisfied all six checks, including the
+#     "Connector.Chassis project reference" one — so a connector could drop its
+#     reference, leave a commented-out line behind, and stay green;
+#   * with nothing asserting ABSENCE, the gate was green while 70 local copies of
+#     chassis types sat in four connectors. It was green precisely while the
+#     condition it exists to police was being violated.
+#
+# The logic now lives in .github/conformance/conformance.py so it can be tested,
+# and the run below tests it BEFORE trusting it: --self-test asserts the gate
+# still rejects the comments-only file, the commented-out ProjectReference and
+# the unresolvable one. A gate nobody can test is the thing being replaced here,
+# so shipping a new one without a test would repeat the mistake in a nicer
+# language.
+#
+# Accepted divergences live in .github/conformance/divergences.tsv. It is a
+# ratchet, not an amnesty: an undeclared copy fails, and so does a register line
+# whose copy no longer exists, so the register cannot outlive the debt.
 
 name: Conformance
 
@@ -31,6 +44,9 @@ concurrency:
   group: conformance-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   chassis-conformance:
     name: Chassis conformance
@@ -40,76 +56,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # Runs first and on its own: if the checker cannot prove it has teeth,
+      # a passing conformance result below would mean nothing.
+      - name: Self-test the gate
+        run: python3 .github/conformance/conformance.py --self-test
+
       - name: Every connector carries every declared chassis capability
-        run: |
-          set -uo pipefail
-          CONNECTORS="SalesforceConnector ClarizenConnector HadoopConnector SeismicConnector AltrataConnector"
-          fail=0
-
-          # ---- Recorded exemptions -------------------------------------------
-          # "<Connector>|<capability>" => the reason it is absent, and what closes
-          # it. An exemption is a DATED, VISIBLE decision, which is the whole point
-          # of this job: the failure mode being prevented is a gap nobody noticed,
-          # not a gap someone chose. Each line here is a debt with a name on it,
-          # and deleting the line is the definition of done.
-          #
-          # Every exemption is reported as a warning annotation, so it stays in
-          # front of reviewers on every run rather than decaying into a permanent
-          # silent allowance.
-          # The register is currently EMPTY: every declared capability is present in
-          # every connector. The Salesforce tracing exemption that lived here was
-          # removed when the connector adopted the chassis Tracing.
-          exemption_reason () {
-            case "$1" in
-              *) echo "" ;;
-            esac
-          }
-
-          # capability | how it is detected | why it is fleet-wide
-          check () {
-            local name="$1" pattern="$2" scope="$3"
-            printf '\n== %s ==\n' "$name"
-            for c in $CONNECTORS; do
-              if grep -rqE "$pattern" "$c/$scope" --include='*.cs' --include='*.csproj' 2>/dev/null; then
-                printf '   ok      %s\n' "$c"
-                # An exemption for something now present is stale — say so, so the
-                # register cannot quietly outlive the gap it describes.
-                if [ -n "$(exemption_reason "$c|$name")" ]; then
-                  printf '   ^^ STALE EXEMPTION — remove it\n'
-                  echo "::error title=Stale exemption::$c now provides '$name'. Delete its exemption from .github/workflows/conformance.yml."
-                  fail=1
-                fi
-                continue
-              fi
-
-              local reason; reason="$(exemption_reason "$c|$name")"
-              if [ -n "$reason" ]; then
-                printf '   EXEMPT  %s — %s\n' "$c" "$reason"
-                echo "::warning title=Conformance exemption::$c does not provide '$name'. $reason"
-              else
-                printf '   MISSING %s\n' "$c"
-                echo "::error title=Chassis conformance::$c does not provide '$name'. Either add it, or record an exemption in .github/workflows/conformance.yml with a reason."
-                fail=1
-              fi
-            done
-          }
-
-          # The chassis project reference is the definition of being on the fleet.
-          check "Connector.Chassis project reference" 'Connector\.Chassis\.csproj' "src"
-
-          # Operational surfaces the enterprise pack and the docs promise for all five.
-          check "OpenTelemetry tracing"  'OpenTelemetry'                "src"
-          check "health endpoint"        'HealthEndpoint|"/health"'     "src"
-          check "metrics endpoint"       'MetricsRenderer|"/metrics"'   "src"
-          check "Windows service host"   'UseWindowsService|WindowsServiceHelpers' "src"
-
-          # State-file hardening: the defect class that cost five separate fixes.
-          # A connector reading shared state with a default share mode is drift.
-          check "shared-read state helper" 'FileShare\.ReadWrite'        "src"
-
-          echo
-          if [ "$fail" -ne 0 ]; then
-            echo "Chassis conformance FAILED — see the annotations above."
-            exit 1
-          fi
-          echo "All connectors carry every declared capability."
+        run: python3 .github/conformance/conformance.py --annotate
