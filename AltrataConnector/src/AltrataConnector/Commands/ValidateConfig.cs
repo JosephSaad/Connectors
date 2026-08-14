@@ -78,7 +78,7 @@ public static class ValidateConfig
                 }
                 else
                 {
-                    var seats = SeatService.ParseSeatFile(File.ReadAllText(config.SeatListPath));
+                    var seats = SeatService.ParseSeatFile(SeatService.ReadSeatFileShared(config.SeatListPath));
                     if (seats.Count == 0)
                         throw new EntitlementViolationException("seat list is empty (ingestion would fail closed)");
                     Pass($"Seat list: {seats.Count} principal(s) from {config.SeatListPath}");

@@ -73,11 +73,7 @@ public sealed class SeatService
             // read-during-replace are one defect, and ReadWrite only fixes one
             // of them — which is why this still failed on windows-latest after
             // the first fix.
-            using var stream = new FileStream(
-                path, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete);
-            using var reader = new StreamReader(stream);
-            return ParseSeatFile(reader.ReadToEnd());
+            return ParseSeatFile(ReadSeatFileShared(path));
         }
         catch (Exception exc) when (exc is JsonException or FormatException)
         {
@@ -166,4 +162,29 @@ public sealed class SeatService
 
     /// <summary>Persist the seat hash after items are consistent with it.</summary>
     public void CommitSeatHash(string hash) => _state.SetValue(StateKeys.SeatListHash, hash);
+
+    /// <summary>
+    /// Read the seat file with the share mode a concurrent publisher requires.
+    /// </summary>
+    /// <remarks>
+    /// Public so nothing has to re-derive it. ValidateConfig previously read the
+    /// same file with a bare File.ReadAllText, which re-introduced the exact
+    /// defect this share mode exists to fix — the same way RetryFailed bypassed
+    /// the dead-letter reader across four connectors. A correct helper that
+    /// callers cannot reach is not a fix, it is a second implementation waiting
+    /// to be written badly.
+    ///
+    /// Delete is part of the contract: a publisher that swaps the seat file by
+    /// renaming a temp over it cannot do so while a reader holds a handle without
+    /// shared delete access.
+    /// </remarks>
+    public static string ReadSeatFileShared(string path)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
 }

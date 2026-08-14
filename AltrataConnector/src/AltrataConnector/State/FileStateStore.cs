@@ -148,7 +148,7 @@ public sealed class FileStateStore : IStateStore
             return new StateDoc();
         try
         {
-            var doc = JsonSerializer.Deserialize<StateDoc>(File.ReadAllText(StatePath)) ?? new StateDoc();
+            var doc = JsonSerializer.Deserialize<StateDoc>(ReadAllTextShared(StatePath)) ?? new StateDoc();
             // Re-impose the semantics the TYPE declares but the wire cannot
             // carry (see StateDoc.SuppressedSubjectsRaw). Every load goes
             // through here, so there is no path that yields a doc whose
@@ -334,7 +334,7 @@ public sealed class FileStateStore : IStateStore
         {
             Directory.CreateDirectory(_logsDir);
             using var stream = new FileStream(
-                DeadLetterPath, FileMode.Append, FileAccess.Write, FileShare.Read);
+                DeadLetterPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
             using var writer = new StreamWriter(stream, new UTF8Encoding(false));
             foreach (var record in storable)
                 writer.WriteLine(JsonSerializer.Serialize(record, JsonlOptions));
@@ -363,7 +363,7 @@ public sealed class FileStateStore : IStateStore
             var malformed = 0;
             var firstMalformedLine = 0;
             var lineNumber = 0;
-            foreach (var line in File.ReadLines(DeadLetterPath))
+            foreach (var line in ReadLinesShared(DeadLetterPath))
             {
                 lineNumber++;
                 if (string.IsNullOrWhiteSpace(line))
@@ -605,4 +605,46 @@ public sealed class FileStateStore : IStateStore
                 File.Delete(DeadLetterPath);
         }
     }
+
+    /// <summary>
+    /// Read a file that a writer publishes by RENAMING a temp over it.
+    /// </summary>
+    /// <remarks>
+    /// FileShare.Delete is required, not optional. WriteAtomic publishes every
+    /// state write with File.Move(tmp, path, overwrite: true), and Windows
+    /// refuses to replace a file whose open handle has not shared delete access —
+    /// so a plain FileShare.ReadWrite reader would still make the publish fail.
+    /// Read-during-write and read-during-replace are one defect, and ReadWrite
+    /// alone fixes only the first; that is exactly how the seat file failed on CI
+    /// after already carrying a "shared read" fix.
+    /// </remarks>
+    private static string ReadAllTextShared(string path)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream, new UTF8Encoding(false));
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>
+    /// Read the dead-letter queue while the crawl is still appending to it.
+    /// </summary>
+    /// <remarks>
+    /// No FileShare.Delete here, deliberately: the queue is only ever appended to
+    /// (FileMode.Append) and never republished by rename, so shared delete access
+    /// would grant a right nothing needs. Adding it everywhere on the strength of
+    /// a matching shape is the same mistake as omitting it where it is required.
+    /// </remarks>
+    private static IEnumerable<string> ReadLinesShared(string path)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream, new UTF8Encoding(false));
+        while (reader.ReadLine() is { } line)
+        {
+            yield return line;
+        }
+    }
+
 }
