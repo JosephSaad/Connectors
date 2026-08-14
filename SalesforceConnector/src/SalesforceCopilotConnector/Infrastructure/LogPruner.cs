@@ -47,9 +47,28 @@ public static class LogPruner
     /// Prune run directories (and SQL history in SQL Server mode) older than
     /// LOG_RETENTION_DAYS days. No-op when the variable is unset or ``0``.
     /// </summary>
-    public static void Prune(IAppLogger? logger = null)
+    /// <param name="activeRunDir">
+    /// The run directory this process is writing into, which is never pruned.
+    /// </param>
+    /// <remarks>
+    /// This connector is NOT exposed to the defect the parameter guards against,
+    /// and the guard is here so that stays true by construction rather than by
+    /// coincidence. Prune is reached only from SetupLogging, which creates a
+    /// fresh run directory immediately before calling it and — via ResetLogging —
+    /// closes the previous cycle's handlers first. The directory being pruned
+    /// into is therefore always stamped "now" and can never be older than the
+    /// cutoff, however long a --continuous process runs.
+    ///
+    /// Clarizen and Hadoop had the same pruner shape with the opposite ordering:
+    /// one run directory for the life of the process, pruned every cycle. After
+    /// LOG_RETENTION_DAYS of uptime they deleted their own live logs. Nothing but
+    /// call ordering separated the two designs, and nothing recorded that the
+    /// ordering was load-bearing.
+    /// </remarks>
+    public static void Prune(IAppLogger? logger = null, string? activeRunDir = null)
     {
         logger ??= Logger;
+        var activeFull = activeRunDir is null ? null : Path.GetFullPath(activeRunDir);
 
         var raw = Environment.GetEnvironmentVariable("LOG_RETENTION_DAYS");
         if (string.IsNullOrWhiteSpace(raw))
@@ -88,6 +107,12 @@ public static class LogPruner
 
             foreach (var dir in runDirs)
             {
+                if (activeFull is not null
+                    && string.Equals(Path.GetFullPath(dir), activeFull, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;  // never prune the run we are writing into
+                }
+
                 var name = Path.GetFileName(dir);
                 var match = RunDirPattern.Match(name);
                 if (!match.Success)

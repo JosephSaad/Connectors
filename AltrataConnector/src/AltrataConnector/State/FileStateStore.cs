@@ -244,7 +244,21 @@ public sealed class FileStateStore : IStateStore
                 return null;
             try
             {
-                var checkpoint = JsonSerializer.Deserialize<CrawlCheckpoint>(File.ReadAllText(CheckpointPath));
+                // ReadAllTextShared, not File.ReadAllText: SaveCheckpoint below
+                // publishes this file through AtomicWrite, i.e. File.Move(tmp,
+                // path, overwrite: true). File.ReadAllText opens FileShare.Read,
+                // and Windows refuses to replace a file whose open handle has not
+                // shared delete access — so the rename fails, or the read does,
+                // depending on which side gets there first.
+                //
+                // StateLock only serialises this in-process. The scenario
+                // WriteAtomic itself documents — "an operator running ingest-item
+                // while a crawl runs under the same CONNECTOR_ID" — is two
+                // processes, where the lock is worth nothing.
+                //
+                // This is the same defect that was fixed for StatePath, one field
+                // over in the same class, with this helper already sitting below.
+                var checkpoint = JsonSerializer.Deserialize<CrawlCheckpoint>(ReadAllTextShared(CheckpointPath));
                 // Kind, not value: DATETIME2 carries no Kind, so the SQL
                 // backend stamps Utc on read. Do the same here so the two
                 // return EQUAL DateTimes and not merely equal ticks.
@@ -631,15 +645,25 @@ public sealed class FileStateStore : IStateStore
     /// Read the dead-letter queue while the crawl is still appending to it.
     /// </summary>
     /// <remarks>
-    /// No FileShare.Delete here, deliberately: the queue is only ever appended to
-    /// (FileMode.Append) and never republished by rename, so shared delete access
-    /// would grant a right nothing needs. Adding it everywhere on the strength of
-    /// a matching shape is the same mistake as omitting it where it is required.
+    /// FileShare.Delete IS required here, contrary to what this remark used to
+    /// say. The previous wording — "the queue is only ever appended to
+    /// (FileMode.Append) and never republished by rename" — was false in this
+    /// very file: ReplaceDeadLetters publishes DeadLetterPath through
+    /// AtomicWrite, i.e. File.Move(tmp, path, overwrite: true), and
+    /// ClearDeadLetters deletes it outright. Both are reachable in production
+    /// through MutateDeadLetters, while HealthEndpoint, Runtime and the retry
+    /// commands hold read handles on the same file.
+    ///
+    /// The rule the old wording was reaching for is still right — do not widen a
+    /// share mode on the strength of a matching shape — but it has to be applied
+    /// to what the writers actually DO, not to what the reader looks like. An
+    /// append-only queue would not need shared delete access; this queue is not
+    /// append-only.
     /// </remarks>
     private static IEnumerable<string> ReadLinesShared(string path)
     {
         using var stream = new FileStream(
-            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new StreamReader(stream, new UTF8Encoding(false));
         while (reader.ReadLine() is { } line)
         {

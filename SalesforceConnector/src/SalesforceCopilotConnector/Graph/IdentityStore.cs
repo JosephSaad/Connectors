@@ -235,14 +235,63 @@ CREATE TABLE IF NOT EXISTS fls_cache (
         // Autocommit; we manage transactions explicitly.
         _conn = new SqliteConnection($"Data Source={_dbPath}");
         _conn.Open();
-        Execute("PRAGMA journal_mode=WAL");
-        // Contended writes wait rather than failing immediately. WAL above
-        // removes the SHARED->RESERVED upgrade that returns SQLITE_BUSY without
-        // consulting the busy handler; this covers the write-write contention
-        // that remains, which does honour it.
-        Execute("PRAGMA busy_timeout=10000");
-        Execute("PRAGMA foreign_keys=ON");
-        InitSchema();
+        WithBusyRetry(() =>
+        {
+            Execute("PRAGMA journal_mode=WAL");
+            // Contended writes wait rather than failing immediately. WAL above
+            // removes the SHARED->RESERVED upgrade that returns SQLITE_BUSY without
+            // consulting the busy handler; this covers the write-write contention
+            // that remains, which does honour it.
+            Execute("PRAGMA busy_timeout=10000");
+            Execute("PRAGMA foreign_keys=ON");
+            InitSchema();
+        });
+    }
+
+    /// <summary>
+    /// Run the one-time open work, retrying while SQLite reports the file busy.
+    /// </summary>
+    /// <remarks>
+    /// Neither half of opening this store is covered by busy_timeout, and both
+    /// need a brief EXCLUSIVE lock: switching journal_mode to WAL, and the
+    /// CREATE TABLE / ALTER TABLE that InitSchema runs on every open. Two
+    /// processes opening the same identity database together — a service restart
+    /// overlapping the outgoing process, an HA pair starting up — collide on
+    /// either and get SQLITE_BUSY ("database is locked") thrown straight out of
+    /// the constructor.
+    ///
+    /// busy_timeout cannot cover the journal_mode switch because the pragma that
+    /// SETS busy_timeout has not run yet; it cannot cover the DDL because a
+    /// journal_mode transition holds an exclusive lock that the busy handler is
+    /// deliberately not consulted for. This is why the retry wraps the whole
+    /// operation rather than one statement: an earlier fix elsewhere in the fleet
+    /// wrapped only the pragmas and the DDL one statement later failed on a
+    /// contended Windows runner in exactly the same way.
+    ///
+    /// Retrying is safe because every step is idempotent and one-way —
+    /// journal_mode is persisted in the file, and the schema DDL is
+    /// IF NOT EXISTS / additive — so whoever wins leaves the store ready and
+    /// every later attempt simply confirms it.
+    ///
+    /// Windows enforces the locking that exposes this; POSIX hides it, so it only
+    /// ever fails on Windows Server, the deployment target.
+    /// </remarks>
+    private static void WithBusyRetry(Action work)
+    {
+        const int Attempts = 20;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                work();
+                return;
+            }
+            catch (SqliteException exc) when ((exc.SqliteErrorCode is 5 or 6) && attempt < Attempts)
+            {
+                // 5 = SQLITE_BUSY, 6 = SQLITE_LOCKED.
+                Thread.Sleep(25);
+            }
+        }
     }
 
     /// <summary>Create tables if they don't exist, and migrate if needed.</summary>
