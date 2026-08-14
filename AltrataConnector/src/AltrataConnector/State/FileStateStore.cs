@@ -193,7 +193,7 @@ public sealed class FileStateStore : IStateStore
             File.WriteAllText(tmp, content, new UTF8Encoding(false));
             if (failBeforeMove)
                 throw new IOException("injected mid-write failure (test seam)");
-            File.Move(tmp, path, overwrite: true);
+            ReplaceWithRetry(tmp, path);
         }
         catch
         {
@@ -210,6 +210,52 @@ public sealed class FileStateStore : IStateStore
                 // Best effort only — the original failure is the one that matters.
             }
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Publish the temp file over the target, retrying while the destination is
+    /// briefly unavailable.
+    /// </summary>
+    /// <remarks>
+    /// Granting readers FileShare.Delete is necessary but NOT sufficient, and the
+    /// two halves fail differently. Without shared delete access the rename fails
+    /// PERMANENTLY for as long as a reader holds the file. With it the rename
+    /// succeeds, but the replaced file object lingers in Windows' delete-pending
+    /// state until that reader closes, and a publish arriving inside that window
+    /// gets ERROR_ACCESS_DENIED — surfaced by .NET as UnauthorizedAccessException,
+    /// not the IOException the sharing-violation path produces. That is a
+    /// TRANSIENT condition whose correct response is to wait for the reader to
+    /// let go.
+    ///
+    /// This connector was the only one of the five publishing with a bare
+    /// File.Move; the other four have carried this retry in SyncState since the
+    /// state-file work, catching the same two exception types with the same
+    /// budget. The asymmetry survived because Altrata's state store is a
+    /// different class in a different namespace, so a search for the helper's
+    /// name found four of five and looked complete.
+    ///
+    /// Retrying does not weaken the guarantee: every attempt is still a
+    /// whole-file rename, so a reader sees either the old file or the new one and
+    /// never a torn one. Exhausting the attempts rethrows rather than falling
+    /// back to a non-atomic write — a torn checkpoint is read as "no checkpoint"
+    /// and silently restarts the delivery, so failing loudly is better.
+    /// </remarks>
+    private static void ReplaceWithRetry(string temp, string path)
+    {
+        const int Attempts = 20;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Move(temp, path, overwrite: true);
+                return;
+            }
+            catch (Exception exc) when (
+                (exc is UnauthorizedAccessException or IOException) && attempt < Attempts)
+            {
+                Thread.Sleep(10);
+            }
         }
     }
 

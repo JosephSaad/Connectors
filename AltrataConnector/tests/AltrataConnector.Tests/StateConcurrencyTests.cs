@@ -7,20 +7,36 @@
 // ingest-item while a crawl runs under the same CONNECTOR_ID". Two processes,
 // two independent sets of handles.
 //
-// WHY THESE TESTS DRIVE File.Move DIRECTLY RATHER THAN CALLING SaveCheckpoint.
-// Every FileStateStore method takes StateLock, a process-wide lock keyed on the
-// state path, so a reader and a writer in the SAME process can never overlap and
-// an in-process race test would prove nothing. The second process is therefore
-// simulated the only way it can be: by performing the publish — a temp file plus
-// File.Move(tmp, path, overwrite: true), exactly what AtomicWrite does — outside
-// the lock, while the store's own reader runs against it.
+// WHY THESE TESTS PUBLISH OUTSIDE StateLock RATHER THAN CALLING SaveCheckpoint.
+// Every public FileStateStore method takes StateLock, a process-wide lock keyed
+// on the state path, so a reader and a writer in the SAME process can never
+// overlap and an in-process race test would prove nothing. The second process is
+// simulated by driving AtomicWrite — the real publisher — through its test seam,
+// which sits below the lock, while the store's own reader runs against it.
 //
 // Windows enforces share modes; POSIX treats them as advisory. On POSIX these
 // tests still assert the atomicity half (a reader must never observe the file as
 // missing or torn); on windows-latest they assert the share modes too, which is
-// where both of the defects behind this file actually failed.
+// where every defect behind this file actually failed.
+//
+// THREE DEFECTS, and the third was found by the first version of these tests
+// failing on CI:
+//
+//   1. GetCheckpoint read with File.ReadAllText (FileShare.Read) while
+//      SaveCheckpoint publishes by rename — the rename fails permanently while a
+//      reader holds the file.
+//   2. The dead-letter reader omitted FileShare.Delete on the strength of a
+//      comment claiming the queue is never republished by rename.
+//      ReplaceDeadLetters republishes it by rename.
+//   3. AtomicWrite published with a bare File.Move. Shared delete access lets
+//      the rename succeed, but the replaced file lingers delete-pending until
+//      the reader closes, and a publish inside that window gets
+//      ERROR_ACCESS_DENIED. The other four connectors have retried this since
+//      the state-file work; Altrata never did.
+//
+// 1 and 2 make the failure permanent, 3 makes it transient, and fixing only the
+// first two leaves the test red — which is how 3 surfaced.
 
-using System.Text;
 using System.Text.Json;
 using AltrataConnector.State;
 
@@ -56,15 +72,21 @@ public class StateConcurrencyTests
     };
 
     /// <summary>
-    /// Publish a file the way AtomicWrite does — unique temp, then rename over
-    /// the target — without taking StateLock, i.e. as a second process would.
+    /// Publish through the PRODUCTION writer, outside StateLock — i.e. exactly
+    /// what a second process does.
     /// </summary>
-    private static void PublishByRename(string path, string content)
-    {
-        var tmp = $"{path}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
-        File.WriteAllText(tmp, content, new UTF8Encoding(false));
-        File.Move(tmp, path, overwrite: true);
-    }
+    /// <remarks>
+    /// This deliberately calls AtomicWriteForTests rather than hand-rolling a
+    /// temp-and-rename. The first version of this test did hand-roll it, and it
+    /// failed on windows-latest inside the test helper — which was the correct
+    /// result for the wrong reason: it proved the race was real but told us
+    /// nothing about whether production survives it, because the hand-rolled
+    /// publisher and the real one had drifted. Driving the real writer is what
+    /// makes the assertion mean "Altrata publishes state safely" instead of
+    /// "this test file publishes state safely".
+    /// </remarks>
+    private static void PublishByRename(string path, string content) =>
+        FileStateStore.AtomicWriteForTests(path, content);
 
     /// <summary>
     /// Reading the checkpoint while another process republishes it must neither
@@ -114,10 +136,12 @@ public class StateConcurrencyTests
                     scope.Store.CheckpointPath,
                     JsonSerializer.Serialize(Checkpoint(i)));
             }
-            catch (IOException)
+            catch (Exception exc) when (exc is UnauthorizedAccessException or IOException)
             {
-                // The other half of the same defect: a reader holding the file
-                // without shared delete access makes the rename itself fail.
+                // The other half of the same defect. Without FileShare.Delete on
+                // the reader this fails permanently; with it, but without the
+                // publisher's retry, it fails transiently inside Windows'
+                // delete-pending window. Both land here.
                 Interlocked.Increment(ref publishErrors);
             }
         }
@@ -184,7 +208,7 @@ public class StateConcurrencyTests
                         Error = $"error {i}",
                     }) + "\n");
             }
-            catch (IOException)
+            catch (Exception exc) when (exc is UnauthorizedAccessException or IOException)
             {
                 Interlocked.Increment(ref publishErrors);
             }
