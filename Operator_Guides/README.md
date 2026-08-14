@@ -42,6 +42,23 @@ Entra ID, the Copilot semantic index and the supporting services on one canvas.
 | 04 | [Altrata Connector Guide](04_Altrata_Connector_Guide.docx) | [Quick ref](04_Altrata_QuickRef.pdf) | Altrata — seat-only entitlement, DSAR erasure (personal data) |
 | 05 | [Hadoop BDH Connector Guide](05_Hadoop_BDH_Connector_Guide.docx) | [Quick ref](05_Hadoop_BDH_QuickRef.pdf) | BDH data mart — filter-first at 150M+ scale, fail-closed guard, 24h lag |
 
+## Architecture, governance and commercial
+
+Not indexed above, but part of the delivered set:
+
+| Document | What it is |
+|---|---|
+| [Connector_Parameter_Reference.html](Connector_Parameter_Reference.html) | Every environment variable across all five connectors — 440 parameters with meaning, default, suggested value and owning team. Reconciled against the source on 14 Aug 2026. |
+| [Connectors_Architecture_Diagram.svg](Connectors_Architecture_Diagram.svg) | Deployment and data flow on one canvas. |
+| [SIEM_Integration_Diagram.svg](SIEM_Integration_Diagram.svg) | Event Log / SIEM and OpenTelemetry wiring. |
+| [Release_Notes_Hardening_Programme.docx](Release_Notes_Hardening_Programme.docx) | Hardening and consolidation release notes (v3.0 covers the chassis re-platform). |
+| [Connector_Platform_Gap_Analysis.docx](Connector_Platform_Gap_Analysis.docx) | Platform gaps with remediation sizing. |
+| [Availability_Tier_ARB_Decision_Paper.docx](Availability_Tier_ARB_Decision_Paper.docx) | Availability tier for ARB. **Still unapproved.** |
+| [Wave1_External_Dependency_Requests.docx](Wave1_External_Dependency_Requests.docx) | External dependency requests, incl. R1 to Microsoft on Purview enforcement. |
+| [Enterprise_Architect_Role_Charter.pptx](Enterprise_Architect_Role_Charter.pptx) | EA role charter and architecture principles. |
+| [Connector_Operations_Deck.pptx](Connector_Operations_Deck.pptx) | The full operator guidance as slides (831). |
+| [Webzion_SoW_Copilot_Connector_Programme.docx](Webzion_SoW_Copilot_Connector_Programme.docx) | Statement of work. |
+
 ## Notes for readers
 
 - **Full guides are Word (`.docx`)**; quick references are one-page **PDFs**. The
@@ -50,7 +67,11 @@ Entra ID, the Copilot semantic index and the supporting services on one canvas.
 - **Table of contents:** each Word guide has an auto-updating contents field.
   Word shows a "right-click → Update Field" placeholder until you open the file
   and update it — this is normal for generated documents.
-- These guides are grounded in the connector code as of this commit, so exact
-  environment-variable names, metric names and limits match what is deployed.
-  See also [`../TENANT_GOVERNANCE.md`](../TENANT_GOVERNANCE.md) for the shared
-  tenant quota and capacity plan.
+- **Currency.** The Word guides, the decks, the diagrams, the SoW and the
+  parameter reference were reconciled against the connector source on
+  **14 August 2026** — environment-variable names, test counts, the chassis
+  version and the architecture description all match the tree at that date.
+  The one-page **PDF quick references have NOT been regenerated** and still
+  carry July test counts; treat the `.docx` guides as authoritative where they
+  disagree. See also [`../TENANT_GOVERNANCE.md`](../TENANT_GOVERNANCE.md) for
+  the shared tenant quota and capacity plan.
