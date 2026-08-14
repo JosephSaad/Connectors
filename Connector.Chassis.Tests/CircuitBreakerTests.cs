@@ -770,16 +770,39 @@ public class CircuitBreakerOptionsEnvTests : IDisposable
     [InlineData("enabled")]
     [InlineData("ture")]
     [InlineData("Y")]
-    public void AnUnRECOGNISEDValueAlsoDisablesTheBreaker(string raw)
+    public void AnUnrecognisedValueLeavesTheBreakerEnabled(string raw)
     {
-        // DOCUMENTS A DEFECT, does not endorse it. CIRCUIT_BREAKER is a
-        // default-ON protective switch, and the chassis's own EnvFlags.IsFalse
-        // doc names this very variable as the reason it exists: "a mistyped env
-        // var must not be what silently switches it off". FromEnv nonetheless
-        // uses IsTrueOrDefault semantics, so CIRCUIT_BREAKER=on ships a
-        // connector with no breaker at all. Reported in `defects`; if it is
-        // fixed to !IsFalse, this test is the one that should change.
+        // This test used to assert the opposite and called it a defect, which it
+        // was: CIRCUIT_BREAKER is a default-ON protective switch, and the
+        // chassis's own EnvFlags.IsFalse doc names THIS VARIABLE as the reason
+        // that helper exists -- "a mistyped env var must not be what silently
+        // switches it off" -- while FromEnv, twenty lines away, used its own
+        // private parser that did exactly that. CIRCUIT_BREAKER=on shipped
+        // Seismic with both critical breakers in passthrough.
+        //
+        // FromEnv now reads !EnvFlags.IsFalse. Only a deliberate, recognised
+        // "off" disables it; anything else leaves the protection in place and
+        // warns once naming the variable.
         Environment.SetEnvironmentVariable(CircuitBreakerOptions.EnabledEnvVar, raw);
-        Assert.False(CircuitBreakerOptions.FromEnv().Enabled);
+        Assert.True(CircuitBreakerOptions.FromEnv().Enabled);
+    }
+
+    [Fact]
+    public void OnlyTheRecognisedOffVocabularyCanDisableIt()
+    {
+        // The whole vocabulary in one place, so "what actually turns the breaker
+        // off" is answerable without reading three files.
+        foreach (var off in new[] { "false", "FALSE", " no ", "0" })
+        {
+            Environment.SetEnvironmentVariable(CircuitBreakerOptions.EnabledEnvVar, off);
+            Assert.False(CircuitBreakerOptions.FromEnv().Enabled, $"'{off}' should disable it");
+        }
+        foreach (var on in new[] { "true", "1", " YES ", "on", "ture", "", "   " })
+        {
+            Environment.SetEnvironmentVariable(CircuitBreakerOptions.EnabledEnvVar, on);
+            Assert.True(CircuitBreakerOptions.FromEnv().Enabled, $"'{on}' should NOT disable it");
+        }
+        Environment.SetEnvironmentVariable(CircuitBreakerOptions.EnabledEnvVar, null);
+        Assert.True(CircuitBreakerOptions.FromEnv().Enabled);
     }
 }

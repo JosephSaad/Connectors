@@ -129,15 +129,17 @@ public sealed class EventLogSink : LogHandler
     }
 
     /// <summary>
-    /// Truthy env-var read (<c>true</c>/<c>1</c>/<c>yes</c>, case-insensitive;
-    /// unset → false). Kept local so the chassis stays free of the connector's
-    /// Settings-coupled flag helper while preserving identical semantics.
+    /// Truthy env-var read. Delegates to <see cref="EnvFlags.IsTrue"/> so the
+    /// vocabulary is defined once.
     /// </summary>
-    private static bool IsEnvTrue(string name)
-    {
-        var value = (Environment.GetEnvironmentVariable(name) ?? "false").ToLowerInvariant();
-        return value is "true" or "1" or "yes";
-    }
+    /// <remarks>
+    /// This was a local copy, justified by keeping the chassis free of the
+    /// connector's Settings-coupled helper. That reason expired when EnvFlags
+    /// moved into the chassis, and the copy had quietly drifted: it did not trim,
+    /// so EVENTLOG_ENABLED with a trailing space read as OFF and the Event Log
+    /// mirror silently never attached.
+    /// </remarks>
+    private static bool IsEnvTrue(string name) => EnvFlags.IsTrue(name);
 
     /// <summary>
     /// Attach a configured sink to the root logger (idempotent per SetupLogging

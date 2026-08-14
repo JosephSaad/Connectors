@@ -130,12 +130,15 @@ public static class SecretProvider
         }
     }
 
-    /// <summary>Whether Key Vault resolution is enabled. Matches <c>Settings.BoolEnv</c> semantics.</summary>
-    private static bool UseKeyVault()
-    {
-        var value = (Environment.GetEnvironmentVariable("USE_KEY_VAULT") ?? "false").ToLowerInvariant();
-        return value is "true" or "1" or "yes";
-    }
+    /// <summary>Whether Key Vault resolution is enabled.</summary>
+    /// <remarks>
+    /// Delegates to <see cref="EnvFlags.IsTrue"/> so the truthy vocabulary is
+    /// defined once. The local copy this replaces did not trim, so
+    /// USE_KEY_VAULT with a trailing space fell back to environment-variable
+    /// secrets without a word — the opposite of the intended posture, and
+    /// invisible until someone audited where secrets were actually coming from.
+    /// </remarks>
+    private static bool UseKeyVault() => EnvFlags.IsTrue("USE_KEY_VAULT");
 
     /// <summary>Lazily construct (and cache) the shared <see cref="SecretClient"/>. Thread-safe.</summary>
     private static SecretClient GetClient()
