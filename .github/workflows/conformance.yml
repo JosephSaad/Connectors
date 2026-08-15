@@ -30,6 +30,10 @@
 # Accepted divergences live in .github/conformance/divergences.tsv. It is a
 # ratchet, not an amnesty: an undeclared copy fails, and so does a register line
 # whose copy no longer exists, so the register cannot outlive the debt.
+#
+# The same job also gates TENANT_GOVERNANCE.md, the fleet's shared-quota plan.
+# Both are the same species of problem -- a coordination artifact that nothing
+# verifies -- and both now fail the build rather than drift.
 
 name: Conformance
 
@@ -63,3 +67,17 @@ jobs:
 
       - name: Every connector carries every declared chassis capability
         run: python3 .github/conformance/conformance.py --annotate
+
+      # TOGAF concern 5, second half. TENANT_GOVERNANCE.md allocates one
+      # tenant's Graph quota across five connectors that deploy independently,
+      # and says so itself: "nothing in code coordinates them -- this document
+      # is that coordination." Nothing checked it either; a grep of .github/
+      # for TENANT_GOVERNANCE or shard budgets returned nothing. Now the plan's
+      # arithmetic, its own published limits, its coverage of every connector
+      # in the repo, and the shard counts the repo SHIPS to operators are all
+      # asserted on every PR.
+      - name: Self-test the tenant capacity gate
+        run: python3 .github/conformance/tenant_capacity.py --self-test
+
+      - name: The tenant capacity plan holds
+        run: python3 .github/conformance/tenant_capacity.py --annotate
