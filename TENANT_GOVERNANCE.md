@@ -1,9 +1,19 @@
 # Tenant governance & capacity plan
 
 Five connectors share one Microsoft 365 tenant's Graph-connector quotas. Each
-connector deploys and runs independently, so nothing in code coordinates them
-— this document is that coordination. Re-run this plan whenever a connector is
-added, an object scope widens, or Microsoft raises the published limits.
+connector deploys and runs independently, so nothing at RUNTIME coordinates
+them — this document is that coordination. Re-run this plan whenever a
+connector is added, an object scope widens, or Microsoft raises the published
+limits.
+
+**This file is CI-enforced.** `.github/conformance/tenant_capacity.py` runs on
+every pull request and fails the build when the allocation table stops adding
+up, when a connector's item budget exceeds its shards × the per-connection cap,
+when a connector in the repository has no row here (or a row here has no
+connector), or when a connector's shipped `env/.env.local.example` provisions
+more connections than it is allocated. It cannot see the live tenant — actual
+indexed-item counts are a `/metrics` concern, per *Monitoring the shared budget*
+below — but the plan itself can no longer drift from what the repository ships.
 
 ## Hard limits that bind the fleet (Microsoft-published)
 
