@@ -10,7 +10,7 @@
 //           (open ⇒ indexed + stamped incomplete + WARN + metric,
 //            closed ⇒ quarantined).
 //   P5..P8  FIX 2 — a source field mapped onto a RESERVED connector property
-//           name ("SensitivityLabel" / "DetectedCategories") escaped the gate
+//           name ("advisorySensitivity" / "DetectedCategories") escaped the gate
 //           entirely, because ContentGateStage.ScanItem delegated to
 //           SensitivityClassifier.ScanText, which deliberately skips those two
 //           names. The gate now sees every indexed string, and such a mapping is
@@ -267,7 +267,7 @@ public class VerifierRound5ReservedPropertyProbes
     private static ContentGateStage Stage() =>
         new(TestConfig.Make(contentGate: true), InjectionScanner.Load());
 
-    // P7: mapping a source field onto "SensitivityLabel" used to make its value
+    // P7: mapping a source field onto "advisorySensitivity" used to make its value
     // invisible to the gate while still being indexed as grounding context.
     [Fact]
     public void P7_SourceFieldOnSensitivityLabel_IsStillScanned()

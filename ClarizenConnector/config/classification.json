@@ -1,5 +1,5 @@
 {
-  "_comment": "Dependency-free content classifier pattern set (docs/CLASSIFICATION.md). Each category has named regex patterns matched against ingested text + attachment text. luhn:true means candidate digit runs must additionally pass the Luhn check (so PCI never false-positives on ordinary numbers). Categories PII/PCI/Secret raise the item's SensitivityLabel to Restricted. Edit patterns here; no code change or redeploy of logic needed. Case-insensitive matching.",
+  "_comment": "Dependency-free content classifier pattern set (docs/CLASSIFICATION.md). Each category has named regex patterns matched against ingested text + attachment text. luhn:true means candidate digit runs must additionally pass the Luhn check (so PCI never false-positives on ordinary numbers). Categories PII/PCI/Secret raise the item's advisorySensitivity tag to Restricted. Edit patterns here; no code change or redeploy of logic needed. Case-insensitive matching.",
   "categories": [
     {
       "name": "PII",

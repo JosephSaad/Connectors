@@ -104,7 +104,7 @@ public class ClassificationPipelineTests : IDisposable
         Assert.Equal(1, summary.Ingested);
 
         var props = IngestedProperties();
-        Assert.Equal("Restricted", props["SensitivityLabel"]!.GetValue<string>());  // PII in description
+        Assert.Equal("Restricted", props["advisorySensitivity"]!.GetValue<string>());  // PII in description
         Assert.Contains("PII", props["DetectedCategories"]!.AsArray().Select(n => n!.GetValue<string>()));
     }
 
@@ -116,7 +116,7 @@ public class ClassificationPipelineTests : IDisposable
         Assert.Equal(1, summary.Ingested);
 
         var props = IngestedProperties();
-        Assert.Null(props["SensitivityLabel"]);
+        Assert.Null(props["advisorySensitivity"]);
         Assert.Null(props["DetectedCategories"]);
     }
 
@@ -154,7 +154,7 @@ public class ClassificationPipelineTests : IDisposable
         Assert.Equal(1, summary.Ingested);
 
         var props = IngestedProperties();
-        Assert.Equal("Confidential", props["SensitivityLabel"]!.GetValue<string>());
+        Assert.Equal("Confidential", props["advisorySensitivity"]!.GetValue<string>());
         Assert.Empty(props["DetectedCategories"]!.AsArray());
     }
 
@@ -198,7 +198,7 @@ public class ClassificationPipelineTests : IDisposable
         var summary = await Pipeline(TestConfig.Make(allowFullScan: true, classification: true))
             .RunAsync(fullCrawl: true);
         Assert.Equal(1, summary.Ingested);
-        Assert.Equal("Restricted", IngestedProperties()["SensitivityLabel"]!.GetValue<string>());
+        Assert.Equal("Restricted", IngestedProperties()["advisorySensitivity"]!.GetValue<string>());
 
         var acl = IngestedAcl();
         Assert.Contains(acl, e => e!["type"]!.GetValue<string>() == "user"

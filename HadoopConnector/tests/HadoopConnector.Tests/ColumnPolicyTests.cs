@@ -384,7 +384,7 @@ public class ColumnPolicyTests : IDisposable
          {"name": "IconUrl", "type": "String"},
          {"name": "SourceSystem", "type": "String"},
          {"name": "DataAsOf", "type": "String"},
-         {"name": "SensitivityLabel", "type": "String"},
+         {"name": "advisorySensitivity", "type": "String"},
          {"name": "DetectedCategories", "type": "StringCollection"}]
         """);
 
@@ -435,7 +435,7 @@ public class ColumnPolicyTests : IDisposable
              {"name": "IconUrl", "type": "String"},
              {"name": "SourceSystem", "type": "String"},
              {"name": "DataAsOf", "type": "String"},
-             {"name": "SensitivityLabel", "type": "String"},
+             {"name": "advisorySensitivity", "type": "String"},
              {"name": "DetectedCategories", "type": "StringCollection"}]
             """);
         var schema = Write("cp-typed.json", """
@@ -466,7 +466,7 @@ public class ColumnPolicyTests : IDisposable
              {"name": "IconUrl", "type": "String"},
              {"name": "SourceSystem", "type": "String"},
              {"name": "DataAsOf", "type": "String"},
-             {"name": "SensitivityLabel", "type": "String"},
+             {"name": "advisorySensitivity", "type": "String"},
              {"name": "DetectedCategories", "type": "StringCollection"}]
             """);
         var schema = Write("cp-typed2.json", """

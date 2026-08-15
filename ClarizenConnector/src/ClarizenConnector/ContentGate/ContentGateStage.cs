@@ -324,7 +324,7 @@ public sealed class ContentGateStage
     /// scanners cannot drift, but passes
     /// <c>includeTaxonomyProperties: true</c>. The classifier skips its own two
     /// output properties to avoid re-detecting its own labels; the gate must not,
-    /// because a schema mapping like <c>"Description": "SensitivityLabel"</c>
+    /// because a schema mapping like <c>"Description": "advisorySensitivity"</c>
     /// puts source-controlled text under that reserved name and it is indexed as
     /// grounding context all the same. Skipping it hid that text from the gate
     /// entirely — a silent bypass. Such a mapping is now ALSO rejected at config

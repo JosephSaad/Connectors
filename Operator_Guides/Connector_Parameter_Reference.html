@@ -1309,7 +1309,7 @@ const PAYLOAD = {
     "name": "CLASSIFICATION",
     "section": "UNIFIED CLASSIFICATION",
     "required": "optional",
-    "meaning": "Derive an advisory SensitivityLabel and DetectedCategories per item from detected PII/PCI/secrets and financial signal.",
+    "meaning": "Derive an advisory advisorySensitivity and DetectedCategories per item from detected PII/PCI/secrets and financial signal.",
     "default": "off",
     "suggested": "true for governance visibility",
     "provider": "Data governance / DPO"
@@ -4006,7 +4006,7 @@ const PAYLOAD = {
     "name": "CLASSIFICATION",
     "section": "CONNECTOR-APPLIED DATA CLASSIFICATION",
     "required": "optional",
-    "meaning": "True stamps the advisory SensitivityLabel + DetectedCategories from a PII/PCI/Secret scan against config/classification.json patterns.",
+    "meaning": "True stamps the advisory advisorySensitivity + DetectedCategories from a PII/PCI/Secret scan against config/classification.json patterns.",
     "default": "false",
     "suggested": "true where data classification tagging is required",
     "provider": "Data governance / DPO"
