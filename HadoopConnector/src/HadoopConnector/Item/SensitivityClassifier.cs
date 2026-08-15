@@ -5,7 +5,9 @@
 // properties — it is NOT a Microsoft Purview-enforced sensitivity label: on its
 // own it does not encrypt content or gate access (see CLASSIFICATION_ENFORCE_ACL
 // in Graph/Ingest.cs for the optional, opt-in ACL enforcement). The wire property
-// name stays "SensitivityLabel" for schema back-compat.
+// The WIRE PROPERTY is "advisorySensitivity" -- renamed from "SensitivityLabel",
+// which an auditor reads as a Microsoft Purview label and which this is not.
+// The C# enum below keeps its name: it is internal and reads correctly in code.
 //
 // Derives, for every externalItem, a single taxonomy:
 //
@@ -42,7 +44,7 @@ public readonly record struct ClassificationOutcome(
 
 public sealed class SensitivityClassifier
 {
-    public const string LabelProperty = "SensitivityLabel";
+    public const string LabelProperty = "advisorySensitivity";
     public const string CategoriesProperty = "DetectedCategories";
 
     /// <summary>

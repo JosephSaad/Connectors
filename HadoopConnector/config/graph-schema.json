@@ -33,6 +33,6 @@
   { "name": "LeadSource", "type": "String", "isQueryable": true, "isRetrievable": true },
   { "name": "Rating", "type": "String", "isRetrievable": true },
   { "name": "LastModified", "type": "String", "isQueryable": true, "isRetrievable": true },
-  { "name": "SensitivityLabel", "type": "String", "isQueryable": true, "isRetrievable": true, "isRefinable": true },
+  { "name": "advisorySensitivity", "type": "String", "isQueryable": true, "isRetrievable": true, "isRefinable": true, "description": "Advisory connector-applied classification TAG (Public|Internal|Confidential|Restricted) derived from detected PII/PCI/secrets and the per-object default. NOT a Microsoft Purview-enforced sensitivity label. Set only when CLASSIFICATION=true; enforce with CLASSIFICATION_ENFORCE_ACL. See docs/CLASSIFICATION.md." },
   { "name": "DetectedCategories", "type": "StringCollection", "isQueryable": true, "isRetrievable": true, "isRefinable": true }
 ]

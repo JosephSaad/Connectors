@@ -2,14 +2,17 @@
 // -----------------------------
 // Unified data-classification & sensitivity tagging (docs/CLASSIFICATION.md).
 //
-// IMPORTANT: the "SensitivityLabel" this derives is a connector-applied,
+// IMPORTANT: the "advisorySensitivity" tag this derives is a connector-applied,
 // ADVISORY classification TAG stamped as a Graph external-item property. It is
 // NOT a Microsoft Purview / MIP sensitivity label and is NOT enforced by
 // Purview, DLP, or encryption. By itself it only informs search verticals and
 // downstream tooling. To make the top tier actually restrictive, turn on
 // CLASSIFICATION_ENFORCE_ACL (see EnforceRestrictedAcl) — that locks Restricted
 // items to a configured Entra group at the connector's own ACL layer. The Graph
-// property name stays "SensitivityLabel" for wire back-compat.
+// The WIRE PROPERTY is "advisorySensitivity" -- renamed from "SensitivityLabel",
+// which an auditor reads as a Microsoft Purview label and which this is not.
+// The C# enum below keeps its name: it is internal and reads correctly in code.
+// Seismic and Altrata made the same split in #41.
 //
 // Derives, for every externalItem, a single taxonomy:
 //
@@ -52,7 +55,7 @@ public readonly record struct ClassificationOutcome(
 
 public sealed class SensitivityClassifier
 {
-    public const string LabelProperty = "SensitivityLabel";
+    public const string LabelProperty = "advisorySensitivity";
     public const string CategoriesProperty = "DetectedCategories";
     public const string FinancialCategory = "Financial";
 

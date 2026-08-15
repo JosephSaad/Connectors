@@ -110,7 +110,7 @@ public class ClassificationPipelineTests : IDisposable
         Assert.Equal(1, summary.Ingested);
 
         var props = IngestedProperties();
-        Assert.Equal("Restricted", props["SensitivityLabel"]!.GetValue<string>());  // PII in description
+        Assert.Equal("Restricted", props["advisorySensitivity"]!.GetValue<string>());  // PII in description
         Assert.Contains("PII", props["DetectedCategories"]!.AsArray().Select(n => n!.GetValue<string>()));
     }
 
@@ -121,7 +121,7 @@ public class ClassificationPipelineTests : IDisposable
         Assert.Equal(1, summary.Ingested);
 
         var props = IngestedProperties();
-        Assert.Null(props["SensitivityLabel"]);
+        Assert.Null(props["advisorySensitivity"]);
         Assert.Null(props["DetectedCategories"]);
     }
 

@@ -195,14 +195,14 @@ Two code paths write Graph properties on every item **outside**
 | emitter | properties | when |
 | --- | --- | --- |
 | `ItemConverter.Convert` | `ObjectName`, `Url`, `IconUrl`, `SourceSystem`, `DataAsOf` | always (`IconUrl` / `DataAsOf` only when non-empty) |
-| `SensitivityClassifier.Classify` | `SensitivityLabel`, `DetectedCategories` | whenever `CLASSIFICATION=true` |
+| `SensitivityClassifier.Classify` | `advisorySensitivity`, `DetectedCategories` | whenever `CLASSIFICATION=true` |
 
 The validation reads **`AlwaysEmittedProperties.Names`** — the aggregate each
 emitter contributes its own list to, never a copy. That indirection is the fix
 for a real defect: the check used to read `ItemConverter.StandardPropertyNames`
 directly, which was the *correct* symbol for that emitter and still missed the
 classifier's two entirely. `Classify` runs *after* `Convert`, so a column mapped
-onto `SensitivityLabel` was converted, then silently overwritten with the label
+onto `advisorySensitivity` was converted, then silently overwritten with the label
 on every record, with preflight green throughout.
 
 Conditional emission is no excuse for leaving a name out of the set: whether

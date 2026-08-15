@@ -101,7 +101,7 @@ Review the four config files:
   nothing (no declaration needed), a `mask`ed column still emits its property
   (declaration required), a `_bdh_` placeholder routes to the content body and
   is not a Graph property. The always-emitted set — `ObjectName`, `Url`,
-  `IconUrl`, `SourceSystem`, `DataAsOf`, `SensitivityLabel`,
+  `IconUrl`, `SourceSystem`, `DataAsOf`, `advisorySensitivity`,
   `DetectedCategories` — is required **unconditionally, whether or not
   `CLASSIFICATION` is on**: the flag is what operators flip last, and a schema
   gap discovered on flag-flip day is an incident. The reverse direction
@@ -361,12 +361,12 @@ pure-passthrough escape hatch. Details: `docs/RESILIENCE.md`.
 
 ### Connector-applied data classification (optional)
 
-With `CLASSIFICATION=true` every item gets a `SensitivityLabel`
+With `CLASSIFICATION=true` every item gets a `advisorySensitivity`
 (Public/Internal/Confidential/Restricted) and `DetectedCategories`
 (PII/PCI/Secret) derived from a dependency-free, timeout-bounded regex scan
 (`config/classification.json`) floored at the object's `sensitivityDefault`;
 `CLASSIFICATION_MANIFEST=true` additionally writes a per-crawl advisory
-catalog/DLP JSONL export. `SensitivityLabel` is a **connector-applied advisory
+catalog/DLP JSONL export. `advisorySensitivity` is a **connector-applied advisory
 tag** (a Graph refiner), **not** a Microsoft Purview-enforced label — it does
 not gate access on its own; `CLASSIFICATION_ENFORCE_ACL=true` (with a group)
 opts into narrowing `Restricted` items' ACLs. Off by default — no properties

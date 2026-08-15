@@ -352,7 +352,7 @@ public class Round7ValidateConfigReportsDrift
     // property, so no single name is special-cased.
     [Theory]
     [InlineData("ContentGateStatus")]
-    [InlineData("SensitivityLabel")]
+    [InlineData("advisorySensitivity")]
     [InlineData("DetectedCategories")]
     [InlineData("ContainsFinancialData")]
     [InlineData("DataClassification")]

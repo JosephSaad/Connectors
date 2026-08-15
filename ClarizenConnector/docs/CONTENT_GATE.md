@@ -67,7 +67,7 @@ in principle match `zeroWidthHiddenText`.
 
 The gate scans the **content body plus every string / string[] property**, with
 no exceptions. That includes the connector's own taxonomy properties
-(`SensitivityLabel`, `DetectedCategories`) — the *classifier* skips those two
+(`advisorySensitivity`, `DetectedCategories`) — the *classifier* skips those two
 because they are its own outputs, but the gate must not, because it is asking a
 different question: *what text reaches the index?*, not *what did I derive?*
 
@@ -77,7 +77,7 @@ context. Two changes close it:
 
 1. The gate scans those properties (above).
 2. **`config/schema.json` rejects the mapping at load.** Pointing a source field
-   at a connector-computed property name — `SensitivityLabel`,
+   at a connector-computed property name — `advisorySensitivity`,
    `DetectedCategories`, `DataClassification`, `ContainsFinancialData`,
    `ContentGateStatus`, `AttachmentExtractionStatus` — is a hard startup error
    naming the offending object and field. Source data must not be published

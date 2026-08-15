@@ -8,12 +8,12 @@ for catalog/DLP ingestion. Implementation: `Content/ContentClassifier.cs`
 `Item/ClassificationManifest.cs` (export), wired in `Graph/Ingest.cs`.
 
 > **This is an advisory, connector-applied TAG — not a Purview label.**
-> `SensitivityLabel` is a value the connector computes and stamps as a Graph
+> `advisorySensitivity` is a value the connector computes and stamps as a Graph
 > refiner property. It is **not** a Microsoft Purview-enforced sensitivity
 > label: on its own it does **not** encrypt content and does **not** gate
 > access. To make the tag actually restrict access, opt into
 > `CLASSIFICATION_ENFORCE_ACL` (below). The wire property name stays
-> `SensitivityLabel` for schema back-compat.
+> `advisorySensitivity` on the wire; the internal C# enum keeps the name `advisorySensitivity`.
 
 > **Off = untouched.** With `CLASSIFICATION` unset/false the classifier is
 > never constructed, no properties are added, and behaviour is byte-identical
@@ -23,7 +23,7 @@ for catalog/DLP ingestion. Implementation: `Content/ContentClassifier.cs`
 
 | Env var | Default | Effect |
 |---|---|---|
-| `CLASSIFICATION` | `false` | `true` → every converted item gets the advisory `SensitivityLabel` + `DetectedCategories` properties, derived from a content scan + the per-object default. |
+| `CLASSIFICATION` | `false` | `true` → every converted item gets the advisory `advisorySensitivity` + `DetectedCategories` properties, derived from a content scan + the per-object default. |
 | `CLASSIFICATION_MANIFEST` | `false` | `true` (with `CLASSIFICATION=true`) → additionally write a per-crawl classification JSONL under `logs/` (advisory catalog/DLP export; **no** live Purview call). Without `CLASSIFICATION` it has no effect. |
 | `CLASSIFICATION_ENFORCE_ACL` | `false` | `true` (with a group configured) → **enforce** the tag: top-tier (`Restricted`) items have their ACL narrowed to the configured group so the tag gates retrieval. Non-`Restricted` items are untouched. Off = advisory only (non-breaking). |
 | `CLASSIFICATION_RESTRICTED_GROUP_ID` | _(unset)_ | The Entra group object id `Restricted` items are limited to when enforcement is on. |
@@ -44,7 +44,7 @@ without `CLASSIFICATION=true` (nothing would be classified, so nothing narrowed)
 
 ## The taxonomy
 
-`SensitivityLabel` is a single ordered scale:
+`advisorySensitivity` is a single ordered scale:
 
 ```
 Public (0) < Internal (1) < Confidential (2) < Restricted (3)
@@ -180,7 +180,7 @@ File: `logs/classification_{CONNECTOR_ID}_{yyyyMMdd_HHmmss}.jsonl`
 retrievable **refiners**:
 
 ```json
-{ "name": "SensitivityLabel",   "type": "String",           "isQueryable": true, "isRetrievable": true, "isRefinable": true },
+{ "name": "advisorySensitivity",   "type": "String",           "isQueryable": true, "isRetrievable": true, "isRefinable": true },
 { "name": "DetectedCategories", "type": "StringCollection", "isQueryable": true, "isRetrievable": true, "isRefinable": true }
 ```
 
