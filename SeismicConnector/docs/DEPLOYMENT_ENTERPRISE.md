@@ -9,7 +9,7 @@ privilege. Baseline install mechanics are in README ("Windows service") and
 
 | Artifact | Use when | Notes |
 | --- | --- | --- |
-| Release zip bundle | Default; SCCM/Intune script deploys | Checksummed (`.zip.sha256`), SBOM inside, cosign `.sig` when org signing is enabled |
+| Release zip bundle | Default; SCCM/Intune script deploys | Checksummed (`.zip.sha256`), cosign `.sig` when org signing is enabled. The SBOM is a separate release asset (`seismic-connector.cdx.json`), one per release rather than a copy inside each bundle — download it alongside the zip |
 | MSI (`packaging/msi/`, **experimental**) | MSI-only software catalogs | Registers the service but never starts it; zip remains the supported path until the MSI graduates |
 | Container image (GHCR) | Linux container estates | Same env contract; webhook/health ports published explicitly |
 

@@ -198,6 +198,8 @@ jobs:
       # conditions — that alone would have failed workflow validation.)
       AUTHENTICODE_PFX_BASE64: ${{ secrets.AUTHENTICODE_PFX_BASE64 }}
       AUTHENTICODE_PFX_PASSWORD: ${{ secrets.AUTHENTICODE_PFX_PASSWORD }}
+      COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -226,6 +228,12 @@ jobs:
           else
             echo "authenticode=false" >> "$GITHUB_OUTPUT"
             echo "::notice::AUTHENTICODE_PFX_BASE64 not configured — shipping the win-x64 binary unsigned."
+          fi
+          if [[ -n "$COSIGN_PRIVATE_KEY" ]]; then
+            echo "cosign=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cosign=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::COSIGN_PRIVATE_KEY not configured — shipping the bundle without a .zip.sig."
           fi
 
       - name: Publish (self-contained single file)
@@ -279,6 +287,23 @@ jobs:
           fi
           (cd bundle && zip -qr "$NAME.zip" "$NAME" && sha256sum "$NAME.zip" > "$NAME.zip.sha256")
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      # Detached cosign signature over the bundle zip, gated on the same secret
+      # as the image signature. Four of the five unported workflows produced
+      # this `.zip.sig` and the operator guides tell people to check it, so it
+      # is part of the bundle contract, not an extra:
+      #   cosign verify-blob --key cosign.pub --signature X.zip.sig X.zip
+      # `bundle/*.zip*` already carries it to the release alongside the .sha256.
+      - name: Install cosign
+        if: ${{ steps.signing.outputs.cosign == 'true' }}
+        uses: sigstore/cosign-installer@v4
+
+      - name: Cosign-sign bundle
+        if: ${{ steps.signing.outputs.cosign == 'true' }}
+        run: |
+          ZIP="bundle/${{ steps.bundle.outputs.name }}.zip"
+          cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY \
+            --output-signature "$ZIP.sig" "$ZIP"
 
       # A single-file self-contained publish can build cleanly and still fail to
       # bootstrap (missing native libs). --help exercises startup and the CLI
@@ -466,10 +491,17 @@ jobs:
   # ---------------------------------------------------------------------------
   # The release itself. Tag builds only — a workflow_dispatch dry run gets this
   # far with every artifact built and published to the run, and stops here.
+  #
+  # Gated on `container` as well as the artifact jobs. The release announces a
+  # GHCR image, so publishing it while the push or the image signature failed
+  # would advertise a release that is only partly there — and because
+  # `gh release create` cannot run twice against the same tag, the rerun that
+  # would fix it fails too. The experimental `msi` job stays out of this list on
+  # purpose: it is continue-on-error and must not block the release train.
   # ---------------------------------------------------------------------------
   release:
     name: Create GitHub release
-    needs: [package, sbom]
+    needs: [package, sbom, container]
     if: ${{ startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20

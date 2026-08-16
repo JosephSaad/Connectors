@@ -26,7 +26,11 @@ called by `.github/workflows/release-seismic.yml`.
 - The SBOM is now built by a dedicated job and attached to the release as its
   own asset, rather than generated inside the package job and copied into each
   zip. One SBOM per release instead of one per bundle, and it is validated as
-  parseable JSON before it can be attached.
+  parseable JSON before it can be attached. **Operators who scanned the SBOM
+  from inside an extracted bundle now download it beside the zip**
+  (`docs/DEPLOYMENT_ENTERPRISE.md`).
+- The detached `cosign` bundle signature (`<bundle>.zip.sig`) is unchanged and
+  still produced when `COSIGN_PRIVATE_KEY` is configured.
 - `workflow_dispatch` runs the identical build → smoke-test → package path as a
   dry run: nothing is pushed and no release is created.
 
