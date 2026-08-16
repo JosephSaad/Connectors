@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Enterprise hardening package.
 
+### Changed — release automation now runs, and the tag format changed
+
+The release pipeline is wired to the repository root and produces releases for
+real. It had been authored under
+`SalesforceConnector/.github/workflows/release.yml` — one level below the only
+directory GitHub executes workflows from — so no tag had ever triggered it and
+no bundle, GHCR image or SBOM was ever published by it. The logic now lives once
+in `.github/workflows/release-connector.yml`, called by
+`.github/workflows/release-salesforce.yml`.
+
+- **Release tags are now `salesforce-v1.2.0`, not `v1.2.0`.** The five
+  connectors share one repository and version independently; an unprefixed tag
+  would start all five pipelines against a single tag, and only the first to
+  finish could create the release.
+- Signing secrets moved to the fleet-wide set: `AUTHENTICODE_PFX_BASE64` /
+  `AUTHENTICODE_PFX_PASSWORD` for the win-x64 binary, `COSIGN_PRIVATE_KEY` /
+  `COSIGN_PASSWORD` for the image — replacing this connector's
+  `SIGNING_CERT_PFX_BASE64` / `SIGNING_COSIGN_PRIVATE_KEY` spellings, which were
+  never read by anything. All optional; signing steps skip with a notice and the
+  release ships unsigned.
+- The unported file gated five steps on `secrets.*` inside a step-level `if:`,
+  where the `secrets` context is not available. Signing availability is now
+  resolved once into a step output, which is valid.
+- `workflow_dispatch` runs the identical build → smoke-test → package path as a
+  dry run: nothing is pushed and no release is created.
+
 ### Security
 - **Field-level security enforcement (WP-SF-2)** — `FLS_ENFORCEMENT` (**default ON**),
   `FLS_MODE=strict|permissive` (**default `strict`**), `FLS_CACHE_TTL_HOURS` (default 24).
@@ -196,7 +222,7 @@ Enterprise hardening package.
   `SECURITY.md` (supported versions, secret rotation, data-at-rest inventory).
 - CI: code-coverage gate (line ≥ 47.9%; measured 52.9% at introduction) and a
   perf-smoke job (20k items; floors ≥ 3,000 items/s, < 500 MB RSS). Both live in
-  the connector's `ci.yml`, which is now inert — see **Changed** below; neither
+  the connector's `ci.yml`, which was deleted in the consolidation; neither
   gates a build today.
 - Release: CycloneDX SBOM attached to releases; Authenticode (win-x64 binary)
   and cosign (container image) signing steps, gated on `SIGNING_*` secrets and
@@ -220,9 +246,9 @@ Enterprise hardening package.
   connector's own.
 - **CI runs from the repository root** — `.github/workflows/salesforce.yml`
   (build + test on `ubuntu-latest` and `windows-latest`, plus a Docker image
-  job) is the workflow GitHub executes. The connector's own
-  `.github/workflows/*.yml` are inert leftovers from when it was a standalone
-  repository. Suite: 1206 tests, green on both operating systems.
+  job) is the workflow GitHub executes, alongside `release-salesforce.yml`.
+  The connector's own `.github/workflows/*.yml`, inert since the consolidation,
+  have been deleted. Suite: 1206 tests, green on both operating systems.
 - **Docker builds use the repository root as their build context**
   (`docker build -f SalesforceConnector/Dockerfile .`; compose sets
   `context: ..`), because the project references `../Connector.Chassis` and a

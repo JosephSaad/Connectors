@@ -122,13 +122,11 @@ plus the ACL table. SQL Server deployments should enable TDE.
 
 ## Release integrity
 
-`ClarizenConnector/.github/workflows/release.yml` describes the intended
-release — a CycloneDX SBOM, SHA-256 checksums, and Authenticode (exe/MSI) plus
-cosign signatures when the repository's signing secrets are configured (steps
-skip gracefully when absent). That file is an **inert** leftover from when this
-connector was its own repository: GitHub only executes the workflows at the
-repository root, and there is no release workflow among them — so verify what
-your channel actually publishes rather than assuming it was produced here.
-Verify: `sha256sum -c <bundle>.zip.sha256`, `cosign verify-blob --key <pubkey>
---signature <artifact>.sig <artifact>`, `Get-AuthenticodeSignature` on
-Windows binaries.
+`.github/workflows/release-clarizen.yml` at the repository root produces every
+`clarizen-v*` release: a CycloneDX SBOM, SHA-256 checksums, and Authenticode
+(exe) plus cosign (image) signatures when the repository's signing secrets are
+configured. Signing steps skip gracefully when the secrets are absent, so an
+unsigned artifact is a valid outcome rather than evidence of tampering — check
+the run log if you expected a signature. Verify: `sha256sum -c
+<bundle>.zip.sha256`, `cosign verify --key <pubkey> <image>@<digest>`,
+`Get-AuthenticodeSignature` on Windows binaries.

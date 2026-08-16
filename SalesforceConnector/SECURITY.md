@@ -78,10 +78,11 @@ With Key Vault, steps "update every node" collapse to one write:
 5. Vault hygiene: the connector's identity needs `get` only; rotation
    automation needs `set`; nobody needs `purge`.
 
-Also rotate on: staff departure with vault/env access, any node compromise,
-`SIGNING_*` CI secrets on repository-access changes (see the connector's
-`.github/workflows/release.yml` — signing is skipped, never failed, while
-absent; that workflow is currently inert, so no signing runs today).
+Also rotate on: staff departure with vault/env access, any node compromise, and
+the release-signing CI secrets (`AUTHENTICODE_PFX_BASE64` /
+`AUTHENTICODE_PFX_PASSWORD`, `COSIGN_PRIVATE_KEY` / `COSIGN_PASSWORD`) on
+repository-access changes — see `.github/workflows/release-connector.yml`, where
+signing is skipped with a notice, never failed, while a secret is absent.
 
 ## Vulnerability reporting
 
@@ -96,12 +97,11 @@ absent; that workflow is currently inert, so no signing runs today).
   the fix is out).
 - Upstream code inherited from Microsoft's Python original: report here first;
   we coordinate upstream if it applies there too.
-- Dependency CVEs: the Dependabot and CodeQL configs under
-  `SalesforceConnector/.github/` are leftovers from when this connector was its
-  own repository — GitHub reads neither from a subdirectory, so neither runs
-  today. Scan dependencies yourself until they are re-established at the
-  repository root; the CycloneDX SBOM (`sbom.cdx.json`) is produced by the
-  release workflow, which is likewise inert.
+- Dependency CVEs: Dependabot (`.github/dependabot.yml`) and CodeQL
+  (`.github/workflows/codeql.yml`) both run from the repository root and cover
+  this connector. The CycloneDX SBOM (`salesforce-connector.cdx.json`) is
+  produced by the release pipeline and attached to every `salesforce-v*`
+  release — see [Releasing](../README.md#releasing).
 
 ## Data-at-rest inventory
 

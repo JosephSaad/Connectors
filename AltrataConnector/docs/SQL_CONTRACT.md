@@ -18,8 +18,8 @@ stay byte-equivalent — the offline validation suite
    (`TSql150Parser`);
 2. every DDL statement is idempotent by construction (existence-guarded
    CREATEs) — the job that also proved this live by provisioning the schema
-   twice sits in this connector's own `.github/workflows/ci.yml`, inert since
-   the move into the connector monorepo;
+   twice was lost with this connector's own `ci.yml` in the move into the
+   connector monorepo, and has not been reinstated at the root;
 3. no drift between the script and the embedded constants, and every
    `dbo.altrata_*` table the C# touches exists in the script;
 4. a DacFx semantic model builds and validates the declarative schema.

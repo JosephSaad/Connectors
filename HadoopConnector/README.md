@@ -59,7 +59,7 @@ Salesforce API call** — at the cost of freshness and ACL fidelity:
 | `scripts/` | `install-windows-service.ps1`, `sql/create-database.sql` |
 | `tests/HadoopConnector.Tests/` | xUnit suite (mock HTTP / temp dirs — no network) |
 | `Dockerfile` / `docker-compose.yml` | container image + local SQL/HA dev topology |
-| `.github/workflows/` | `ci.yml`, `codeql.yml`, `release.yml` — **inert leftovers** from when this connector was its own repository; GitHub executes only the workflows at the repository root, so the live pipeline is `../.github/workflows/hadoop.yml` |
+| — | This connector carries no workflows of its own: GitHub executes only the workflows at the repository root, so the live pipelines are `../.github/workflows/hadoop.yml` (CI) and `../.github/workflows/release-hadoop.yml` (releases) |
 
 ## Requirements
 
@@ -446,11 +446,11 @@ only the one at the context root).
 CI is `.github/workflows/hadoop.yml` **at the repository root** — the workflows
 GitHub executes all live there. It builds + tests the solution on
 ubuntu-latest and windows-latest (Windows Server is the deployment target) and
-builds the Docker image with the repository-root context (not pushed). The
-`ci.yml`, `release.yml` and `codeql.yml` under this connector's own
-`.github/workflows/` are inert leftovers from when it was a separate
-repository: GitHub never runs them, so no release bundle, GHCR image or CodeQL
-scan is produced from them.
+builds the Docker image with the repository-root context (not pushed). CodeQL
+runs from the root too (`.github/workflows/codeql.yml`). Releases are
+`.github/workflows/release-hadoop.yml`: pushing a `hadoop-v*` tag produces the
+bundles, SBOM, GHCR image and GitHub release — see
+[Releasing](../README.md#releasing).
 
 ## SQL Server backend & high availability
 

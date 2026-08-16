@@ -118,7 +118,7 @@ CLOSED so a future binary path starts safe.
 | STRIDE | Threat | Mitigation (actual) | Residual |
 |---|---|---|---|
 | T | Malicious config flip (e.g. everyone-ACL) | Everyone-grants are structurally impossible regardless of config; bad enum values fail fast naming the setting (`DEADLETTER_PAYLOAD_MODE`, `PROXY_URL`, `CA_BUNDLE_PATH`, `GRAPH_CLIENT_CERT_*`) | Config controls WHICH seats: change control on seats.json is an operator duty |
-| T | Build/dependency tampering | CI test gate on 2 OSes (the repository-root workflow `.github/workflows/altrata.yml`); release bundles carry SHA-256 checksums, optional Authenticode + cosign signatures; CycloneDX SBOM attached to every release | Signing is secret-gated: unsigned artifacts ship when secrets are absent (forks). The release and CodeQL workflows are in this connector's own `.github/workflows/`, inert since the move into the connector monorepo — no release automation currently runs |
+| T | Build/dependency tampering | CI test gate on 2 OSes (the repository-root workflow `.github/workflows/altrata.yml`); release bundles carry SHA-256 checksums, optional Authenticode + cosign signatures; CycloneDX SBOM attached to every release | Signing is secret-gated: unsigned artifacts ship when secrets are absent (forks), so an unsigned bundle is not by itself evidence of tampering — confirm against the run log. The experimental MSI is not attached to releases and is unsigned |
 
 ## FIPS audit result (2026-07-18)
 

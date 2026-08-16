@@ -38,7 +38,7 @@ still lives here.
 | `scripts/` | `install-windows-service.ps1`, `sql/create-database.sql` |
 | `tests/ClarizenConnector.Tests/` | xUnit suite (878 tests, mock HTTP — no network) |
 | `Dockerfile` / `docker-compose.yml` | container image (built with the repository root as context) + local SQL/HA dev topology |
-| `.github/workflows/` | `ci.yml`, `codeql.yml`, `release.yml` — **inert** leftovers from when this connector was its own repository; GitHub only runs the workflows at the repository root (`.github/workflows/clarizen.yml`) |
+| — | This connector carries no workflows of its own: GitHub only runs the workflows at the repository root — CI is `.github/workflows/clarizen.yml`, releases are `.github/workflows/release-clarizen.yml` |
 
 ## Requirements
 
@@ -312,9 +312,9 @@ docker compose up --build           # from ClarizenConnector/: SQL + connector, 
 CI is the repository-root workflow `.github/workflows/clarizen.yml`: it builds
 and tests the solution on ubuntu-latest and windows-latest (Windows Server is
 the deployment target) and builds the Docker image with the repository root as
-context. The `ci.yml`, `codeql.yml` and `release.yml` files under
-`ClarizenConnector/.github/workflows/` are inert leftovers from when this
-connector was its own repository — GitHub never runs them.
+context. Releases run from the repository root too: pushing a `clarizen-v*` tag
+starts `.github/workflows/release-clarizen.yml` — see
+[Releasing](../README.md#releasing).
 
 ## SQL Server backend & high availability
 

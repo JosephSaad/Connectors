@@ -7,8 +7,8 @@ name: Seismic
 # consumer, so it must re-run this suite.
 #
 # NOTE: workflows only execute from `.github/workflows` at the repository root.
-# SeismicConnector/.github/workflows/*.yml is inert and is left in place
-# untouched by this change.
+# Every workflow lives there; the connectors carry none of their own. Releases
+# for this connector are release-seismic.yml.
 
 on:
   push:

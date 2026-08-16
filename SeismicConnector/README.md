@@ -24,11 +24,11 @@ scripts/
   sql/create-database.sql       idempotent schema provisioning (validated offline in CI)
   sql/create-login.sql          least-privilege app login
 Dockerfile / docker-compose.yml container image + local SQL-backed dev topology
-.github/workflows/              inert leftovers from when this connector was its
-                                own repository (ci.yml, codeql.yml, release.yml);
-                                GitHub only runs workflows at the REPOSITORY ROOT
-                                — ../.github/workflows/seismic.yml builds and
-                                tests on ubuntu+windows and builds the image
+                                (no workflows here — GitHub only runs workflows
+                                at the REPOSITORY ROOT: ../.github/workflows/
+                                seismic.yml builds and tests on ubuntu+windows
+                                and builds the image; release-seismic.yml ships
+                                a release on a seismic-v* tag)
 src/SeismicConnector/
   Program.cs             unified CLI entry point (SCM-aware)
   Dashboard.cs           Spectre.Console live dashboard (--continuous)

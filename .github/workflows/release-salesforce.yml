@@ -1,0 +1,43 @@
+name: Release Salesforce
+
+# Thin caller for the shared release pipeline in release-connector.yml.
+#
+# Tags are per-connector (salesforce-v1.2.0), not fleet-wide: the five connectors
+# version and ship independently (TENANT_GOVERNANCE.md), and a shared "v*"
+# tag would fire all five pipelines against one tag, where the first to
+# finish creates the release and the other four fail on it already existing.
+
+on:
+  push:
+    tags: ["salesforce-v*"]
+  # Dry run: builds, smoke-tests and packages everything, pushes nothing
+  # and creates no release.
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-salesforce-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    uses: ./.github/workflows/release-connector.yml
+    permissions:
+      contents: write   # create the GitHub release
+      packages: write   # push the image to GHCR
+    secrets: inherit    # signing material is optional; see release-connector.yml
+    with:
+      connector: SalesforceConnector
+      solution: SalesforceCopilotConnector.sln
+      project: src/SalesforceCopilotConnector
+      test_project: tests/SalesforceCopilotConnector.Tests/SalesforceCopilotConnector.Tests.csproj
+      binary: SalesforceCopilotConnector
+      product_name: "Salesforce Copilot Connector"
+      image_name: salesforce-copilot-connector
+      tag_prefix: salesforce-v
+      sbom_file: salesforce-connector.cdx.json
+      wxs: packaging/msi/SalesforceConnector.wxs
+      msi_root_var: RepoRoot
+      msi_version_var: ProductVersion
