@@ -23,6 +23,8 @@
     <!-- Chassis migration aliases (mirror src): migrated types resolve to the
          chassis by simple name so test call sites are untouched. -->
     <Using Include="Connector.Chassis.EnvFlags" Alias="EnvFlags" />
+    <Using Include="Connector.Chassis.EventLogEntryKind" Alias="EventLogEntryKind" />
+    <Using Include="Connector.Chassis.ServiceHost" Alias="ServiceHost" />
     <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
     <Using Include="Connector.Chassis.Alerting" Alias="Alerting" />
     <Using Include="Connector.Chassis.LogRedaction" Alias="LogRedaction" />

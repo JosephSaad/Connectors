@@ -1,16 +1,23 @@
-// SqlStateStore.cs
-// ----------------
-// SQL Server backend for SyncState (USE_SQL_SERVER=true): sync timestamps,
-// checkpoints and the dead-letter queue move from files into shared tables so
-// every HA node observes the same crawl state. See docs/SQL_CONTRACT.md.
+// Config/SqlStateStore.cs
+// -----------------------
+// SQL Server backend for SyncState (USE_SQL_SERVER=true).
 //
-// Shared chassis infrastructure: the schema (dbo.SyncTimestamps / Checkpoints /
-// DeadLetter) is keyed by ConnectorId and is connector-agnostic, so every
-// connector's SyncState persists through this one store.
+// This lived in Connector.Chassis until it was moved here, because it was never
+// shared: this connector was its only consumer, it had no chassis tests, and the
+// other four connectors will not adopt it -- each has a recorded, permanent
+// reason to keep its own (Clarizen and Hadoop reach SQL through an injectable
+// ISqlGateway seam their tests mock; Altrata's implements IStateStore with
+// DSAR-suppression and billable-lookup operations; Salesforce's is bound to its
+// own stored-procedure contract). A reference implementation with no reachable
+// migration target is not a shared component -- it is one connector's code in a
+// shared project, validated against one consumer while its location implies the
+// fleet. See Connector.Chassis/CONSOLIDATION.md.
+//
+// It still reads SQL through the chassis SqlExecutor, which IS shared.
 
 using System.Text.Json.Nodes;
 
-namespace Connector.Chassis;
+namespace SeismicConnector.Config;
 
 public static class SqlStateStore
 {

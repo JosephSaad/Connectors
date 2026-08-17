@@ -234,6 +234,43 @@ def local_copies(repo: Path, types: dict[str, str]) -> set[tuple[str, str, str]]
     return found
 
 
+def shared_but_unchassised(repo: Path, types: dict[str, str], min_connectors: int = 2):
+    """
+    Types declared by two or more connectors that the chassis does NOT declare.
+
+    The check above measures divergence FROM THE CHASSIS: it can only see a local
+    type whose name collides with one the chassis already has. A capability the
+    connectors built independently and the chassis never acquired is therefore
+    invisible to it — there is nothing for the name to collide with.
+
+    That is not hypothetical. ContentGate and InjectionScanner each exist in three
+    connectors, in three different shapes, and had zero rows in the register while
+    the gate reported "none undeclared". The register was measuring the wrong
+    question: divergence from the chassis, not duplication across the fleet.
+
+    Reported per type with the connectors that declare it. Enforced the same way
+    as `copy`: undeclared is a failure, and a declaration whose copies have gone
+    is stale, so the count cannot drift in either direction.
+    """
+    owners: dict[str, set[str]] = {}
+    where: dict[tuple[str, str], str] = {}
+    for connector in CONNECTORS:
+        src = repo / connector / "src"
+        if not src.is_dir():
+            continue
+        for path in cs_files(src):
+            for name in declared_types(path):
+                if name in types:
+                    continue  # already covered by the chassis-divergence check
+                owners.setdefault(name, set()).add(connector)
+                where.setdefault((connector, name), str(path.relative_to(repo)))
+    return {
+        name: sorted((c, where[(c, name)]) for c in connectors)
+        for name, connectors in owners.items()
+        if len(connectors) >= min_connectors
+    }
+
+
 def read_register(repo: Path) -> list[dict]:
     path = repo / REGISTER
     if not path.is_file():
@@ -341,6 +378,50 @@ def run(repo: Path, annotate: bool) -> int:
 
     if not undeclared and not stale:
         rep.ok(f"{len(declared)} declared, none undeclared, none stale")
+
+    # ----------------------------------------------------------------------- #
+    # The other half of the question: duplication ACROSS connectors that the
+    # chassis never acquired, which the check above is structurally blind to.
+    #
+    # REPORTED, NOT ENFORCED — the same treatment, and for the same reason, as
+    # kind=renamed above. Name collision alone cannot tell shared capability from
+    # per-connector design: five connectors each declaring Program, AppConfig,
+    # GraphClient and Dashboard is five connectors, not four pieces of debt.
+    # Separating those needs semantic comparison, and this file's own header
+    # records what happens to a gate that guesses — it gets switched off.
+    #
+    # So this prints the census and names what is worth arguing about, and the
+    # rows that ARE debt get a kind=duplicated line with a reason, which the
+    # stale-entry check below does enforce. The number is visible either way,
+    # which is the thing the register previously could not do at all.
+    # ----------------------------------------------------------------------- #
+    print("\n== Duplicated across connectors (no chassis equivalent) ==")
+    duplicated = shared_but_unchassised(repo, types)
+    dup_declared = {
+        (r["connector"], r["type"], r["path"]) for r in register if r["kind"] == "duplicated"
+    }
+    dup_actual = {
+        (connector, name, path)
+        for name, entries in duplicated.items()
+        for connector, path in entries
+    }
+
+    print(f"   types duplicated in 2+ connectors: {len(duplicated)}   "
+          f"rows: {len(dup_actual)}   declared as debt: {len(dup_declared)}   (reported, not enforced)")
+
+    for name in sorted({t for _, t, _ in dup_declared}):
+        owners = ", ".join(c for c, _ in duplicated.get(name, []))
+        rep.ok(f"declared duplication: {name} ({owners or 'no longer duplicated'})")
+
+    # A declared row whose copy has gone IS enforced: like the copy register,
+    # this one must not outlive the debt it records.
+    for connector, typename, path in sorted(dup_declared - dup_actual):
+        rep.error(
+            "Stale duplication register entry",
+            f"{REGISTER} still records {connector} '{typename}' at {path} as "
+            f"cross-connector duplication, but it is no longer duplicated (or no "
+            f"longer exists). Delete the register line in the same change.",
+        )
 
     print()
     if rep.failed:

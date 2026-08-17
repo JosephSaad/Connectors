@@ -30,14 +30,6 @@ using System.Runtime.Versioning;
 
 namespace ClarizenConnector.Infrastructure;
 
-/// <summary>Event Log entry severity, platform-neutral (test-assertable off Windows).</summary>
-public enum EventLogEntryKind
-{
-    Information,
-    Warning,
-    Error,
-}
-
 /// <summary>Destination abstraction for Event Log writes (fake in tests, real on Windows).</summary>
 public interface IEventLogWriter
 {

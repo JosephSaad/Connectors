@@ -41,7 +41,22 @@ public static class Program
     {
         Connector.Chassis.Chassis.Init(
             new Connector.Chassis.ChassisIdentity(
-                "altrata_connector", Infrastructure.EventLogSink.SourceName, "altrata_connector"));
+                "altrata_connector", Infrastructure.EventLogSink.SourceName, "altrata_connector")
+            {
+                ServiceName = "AltrataConnector",
+                HomeEnvVar = "ALTRATA_CONNECTOR_HOME",
+            });
+
+        // Windows-service lifecycle → this connector's own Event Log sink,
+        // wording verbatim from the local ServiceHost this replaced. No
+        // stop-requested entry: the local copy emitted none, and the chassis
+        // must not add one on this connector's behalf.
+        Connector.Chassis.ServiceHost.OnStarting = (args, _) =>
+            Infrastructure.EventLogSink.Lifecycle(
+                $"Service command starting: {string.Join(" ", args)}");
+        Connector.Chassis.ServiceHost.OnFinished = exitCode =>
+            Infrastructure.EventLogSink.Lifecycle(
+                $"Service command finished with exit code {exitCode}");
 
         // Host seams. The chassis deliberately knows nothing about this
         // connector's correlation scope, Event Log sink or directory hardening,

@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Enterprise hardening package.
 
+### Changed — the Windows-service host is now the shared chassis one
+
+This connector no longer carries its own `Infrastructure/ServiceHost.cs`. The four copies were
+identical in mechanism — SCM start/stop handshake, working directory, graceful stop at the next
+chunk boundary — and differed only in two identity strings and in what each told the Windows
+Event Log, so the mechanism moved to `Connector.Chassis.ServiceHost` and the wording stayed here.
+
+- The home directory variable (`SFCONNECTOR_HOME`) and the SCM service name (`SalesforceCopilotConnector`) are now supplied as
+  `ChassisIdentity.HomeEnvVar` / `.ServiceName`. **Both keep their existing values**, because they
+  appear in deployed service definitions and operator runbooks — nothing to change on an installed
+  host.
+- This connector emitted **no** Windows Event Log entry for service start/stop, and still does
+  not: the shared host's lifecycle hooks are left unset rather than the chassis emitting one on
+  its behalf. The two service-mode-only steps that ran inside the old host — attaching the Event
+  Log mirror and raising the service logger to INFO — now run at the call site in `Program.cs`,
+  still only in service mode.
+
+No behaviour change is intended: same service name, same home variable, same log lines, same Event
+Log entries, same graceful-stop semantics and 90-second shutdown budget.
+
 ### Changed — release automation now runs, and the tag format changed
 
 The release pipeline is wired to the repository root and produces releases for

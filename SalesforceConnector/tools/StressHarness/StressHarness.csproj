@@ -10,6 +10,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Using Include="Connector.Chassis.LogLevels" Alias="LogLevels" />
+    <Using Include="Connector.Chassis.LogRecord" Alias="LogRecord" />
     <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />
     <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
     <Using Include="Connector.Chassis.Alerting" Alias="Alerting" />

@@ -11,6 +11,24 @@ All notable changes to the BDH Hadoop Copilot Connector. The format follows
 Bank-grade hardening follow-ups. Two safe-default flips (operators should note
 them); everything else is additive and off/unchanged by default.
 
+### Changed — the Windows-service host is now the shared chassis one
+
+This connector no longer carries its own `Infrastructure/ServiceHost.cs`. The four copies were
+identical in mechanism — SCM start/stop handshake, working directory, graceful stop at the next
+chunk boundary — and differed only in two identity strings and in what each told the Windows
+Event Log, so the mechanism moved to `Connector.Chassis.ServiceHost` and the wording stayed here.
+
+- The home directory variable (`HADOOP_CONNECTOR_HOME`) and the SCM service name (`HadoopConnector`) are now supplied as
+  `ChassisIdentity.HomeEnvVar` / `.ServiceName`. **Both keep their existing values**, because they
+  appear in deployed service definitions and operator runbooks — nothing to change on an installed
+  host.
+- This connector emitted **no** Windows Event Log entry for service start/stop, and still does
+  not: the shared host's lifecycle hooks are left unset rather than the chassis emitting one on
+  its behalf.
+
+No behaviour change is intended: same service name, same home variable, same log lines, same Event
+Log entries, same graceful-stop semantics and 90-second shutdown budget.
+
 ### Changed — release automation now runs, and the tag format changed
 
 The release pipeline is wired to the repository root and produces releases for

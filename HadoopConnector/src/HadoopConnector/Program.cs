@@ -50,9 +50,16 @@ public static class Program
     /// test bootstrap so tests and production behave identically.</summary>
     private static void WireChassisLogging()
     {
+        // No ServiceHost lifecycle hooks: this connector's local ServiceHost
+        // emitted no Windows Event Log entries for service start/stop, and the
+        // shared host must not start emitting them on its behalf.
         Connector.Chassis.Chassis.Init(
             new Connector.Chassis.ChassisIdentity(
-                "hadoop_connector", EventLogSink.SourceName, "hadoop_connector"));
+                "hadoop_connector", EventLogSink.SourceName, "hadoop_connector")
+            {
+                ServiceName = "HadoopConnector",
+                HomeEnvVar = "HADOOP_CONNECTOR_HOME",
+            });
         Connector.Chassis.Chassis.CorrelationIdProvider = () => CorrelationContext.Current;
         Logging.HardenDirectoryHook = SecureDirectories.CreateHardened;
         Logging.EventLogMirrorHook = EventLogSink.Mirror;

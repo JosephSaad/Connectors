@@ -25,6 +25,7 @@
     <Using Include="Connector.Chassis.Logging" Alias="Logging" />
     <Using Include="Connector.Chassis.IAppLogger" Alias="IAppLogger" />
     <Using Include="Connector.Chassis.EnvFlags" Alias="EnvFlags" />
+    <Using Include="Connector.Chassis.ServiceHost" Alias="ServiceHost" />
     <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
   </ItemGroup>
 

@@ -58,10 +58,22 @@ public static class Program
         WireChassis();
 
         // Started by the Windows Service Control Manager → run the requested
-        // command under the SCM-aware host (see Infrastructure/ServiceHost.cs).
+        // command under the shared SCM-aware host (Connector.Chassis.ServiceHost).
         // Always false when launched from a console or on non-Windows platforms.
         if (WindowsServiceHelpers.IsWindowsService())
-            return await ServiceHost.RunAsync(args, ExecuteAsync);
+        {
+            // These two lines ran inside this connector's own ServiceHost before
+            // it adopted the chassis host, and they must still run only in
+            // service mode. Windows Event Log mirroring (EVENTLOG_ENABLED=true)
+            // is attached before the host starts so service lifecycle records
+            // reach the event log even though file/console logging is wired
+            // later by SetupLogging; the lifecycle logger is raised to INFO so
+            // those records pass the root level gate, which still defaults to
+            // WARNING at this point.
+            EventLogSink.AttachIfEnabled();
+            Logging.GetLoggerObject("salesforce_connector.service").Level = LogLevels.Info;
+            return await Connector.Chassis.ServiceHost.RunAsync(args, ExecuteAsync);
+        }
 
         return await ExecuteAsync(args);
     }
@@ -82,9 +94,16 @@ public static class Program
     /// </remarks>
     internal static void WireChassis()
     {
+        // No ServiceHost lifecycle hooks: this connector's local ServiceHost
+        // emitted no Windows Event Log entries for service start/stop, and the
+        // shared host must not start emitting them on its behalf.
         Connector.Chassis.Chassis.Init(
             new Connector.Chassis.ChassisIdentity(
-                "salesforce_connector", EventLogSink.SourceName, "salesforce_connector"));
+                "salesforce_connector", EventLogSink.SourceName, "salesforce_connector")
+            {
+                ServiceName = "SalesforceCopilotConnector",
+                HomeEnvVar = "SFCONNECTOR_HOME",
+            });
         // Alert webhooks keep this connector's own transport — its handler is the
         // richest on TLS in the fleet, and the chassis must not silently swap it.
         Connector.Chassis.Alerting.HandlerFactory = () => HttpClientFactory.CreateHandler();

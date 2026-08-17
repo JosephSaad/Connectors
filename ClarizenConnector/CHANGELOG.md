@@ -8,6 +8,26 @@ versioning follows [SemVer](https://semver.org/).
 
 Enterprise hardening package.
 
+### Changed — the Windows-service host is now the shared chassis one
+
+This connector no longer carries its own `Infrastructure/ServiceHost.cs`. The four copies were
+identical in mechanism — SCM start/stop handshake, working directory, graceful stop at the next
+chunk boundary — and differed only in two identity strings and in what each told the Windows
+Event Log, so the mechanism moved to `Connector.Chassis.ServiceHost` and the wording stayed here.
+
+- The home directory variable (`CLARIZEN_CONNECTOR_HOME`) and the SCM service name (`ClarizenConnector`) are now supplied as
+  `ChassisIdentity.HomeEnvVar` / `.ServiceName`. **Both keep their existing values**, because they
+  appear in deployed service definitions and operator runbooks — nothing to change on an installed
+  host.
+- Service lifecycle still goes through **this connector's own** `EventLogSink.ServiceLifecycle`,
+  wired via the host's hooks in `Program.cs`, with the wording unchanged. The chassis could not
+  call it directly: this sink's API takes `(message, starting)` where the chassis's takes
+  `(message)`, and routing lifecycle events through a different sink than the rest of the
+  connector uses would have split the Event Log.
+
+No behaviour change is intended: same service name, same home variable, same log lines, same Event
+Log entries, same graceful-stop semantics and 90-second shutdown budget.
+
 ### Changed — release automation now runs, and the tag format changed
 
 The release pipeline is wired to the repository root and produces releases for
