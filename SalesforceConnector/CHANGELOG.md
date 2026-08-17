@@ -36,6 +36,23 @@ in `.github/workflows/release-connector.yml`, called by
   dry run: nothing is pushed and no release is created.
 
 ### Security
+- **The ACL-engine switches no longer flip on a mistyped value.** This connector
+  carried its own `EnvFlags` plus a second private parser in
+  `Salesforce/Settings.BoolEnv`, both holding the pre-hardening semantics: no
+  trimming, and any unrecognised value read as `false`. `BoolEnv` is what reads
+  `USE_NEW_ACL_ENGINE`, `USE_GROUP_ACL` and `USE_ENTITY_DEFINITION_OWD`, so
+  `USE_GROUP_ACL="true "` — one trailing space, as a `.env` line or folded YAML
+  scalar produces — silently selected a different ACL engine than the operator
+  asked for.
+
+  Both now route through `Connector.Chassis.EnvFlags`, which trims and treats an
+  unrecognised value as absent (warning once, naming the variable and value) so
+  the declared default stands rather than a typo choosing one. The
+  connector-specific gates that remained — `DELETION_SYNC` and
+  `DELETION_SYNC_MAX_PERCENT` — moved to a new `SalesforceFlags` type, keeping
+  their behaviour and their default-ON opt-out semantics; a second type named
+  `EnvFlags` is the drift the shared chassis exists to prevent.
+
 - **Field-level security enforcement (WP-SF-2)** — `FLS_ENFORCEMENT` (**default ON**),
   `FLS_MODE=strict|permissive` (**default `strict`**), `FLS_CACHE_TTL_HOURS` (default 24).
   Previously the connector reproduced Salesforce's *record*-level sharing faithfully

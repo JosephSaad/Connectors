@@ -66,8 +66,7 @@ public sealed class DecisionLedger
     {
         get
         {
-            var raw = Environment.GetEnvironmentVariable("DECISION_LEDGER");
-            return string.IsNullOrWhiteSpace(raw) || EnvFlags.IsTrue("DECISION_LEDGER");
+            return !EnvFlags.IsFalse("DECISION_LEDGER");
         }
     }
 

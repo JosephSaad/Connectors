@@ -317,7 +317,7 @@ public sealed class DeletionSweepTests : IDisposable
     public void DeletionSync_DefaultsOn_WhenUnset()
     {
         Environment.SetEnvironmentVariable("DELETION_SYNC", null);
-        Assert.True(EnvFlags.DeletionSync);
+        Assert.True(SalesforceFlags.DeletionSync);
     }
 
     [Theory]
@@ -329,7 +329,7 @@ public sealed class DeletionSweepTests : IDisposable
     public void DeletionSync_Disabled_ByFalseyValue(string value)
     {
         Environment.SetEnvironmentVariable("DELETION_SYNC", value);
-        Assert.False(EnvFlags.DeletionSync);
+        Assert.False(SalesforceFlags.DeletionSync);
     }
 
     [Theory]
@@ -340,22 +340,22 @@ public sealed class DeletionSweepTests : IDisposable
     public void DeletionSync_On_ForNonFalseyValue(string value)
     {
         Environment.SetEnvironmentVariable("DELETION_SYNC", value);
-        Assert.True(EnvFlags.DeletionSync);
+        Assert.True(SalesforceFlags.DeletionSync);
     }
 
     [Fact]
     public void DeletionSyncMaxPercent_Defaults25_WhenUnsetOrUnparseable()
     {
         Environment.SetEnvironmentVariable("DELETION_SYNC_MAX_PERCENT", null);
-        Assert.Equal(25, EnvFlags.DeletionSyncMaxPercent);
+        Assert.Equal(25, SalesforceFlags.DeletionSyncMaxPercent);
         Environment.SetEnvironmentVariable("DELETION_SYNC_MAX_PERCENT", "not-a-number");
-        Assert.Equal(25, EnvFlags.DeletionSyncMaxPercent);
+        Assert.Equal(25, SalesforceFlags.DeletionSyncMaxPercent);
     }
 
     [Fact]
     public void DeletionSyncMaxPercent_ParsesInteger()
     {
         Environment.SetEnvironmentVariable("DELETION_SYNC_MAX_PERCENT", "40");
-        Assert.Equal(40, EnvFlags.DeletionSyncMaxPercent);
+        Assert.Equal(40, SalesforceFlags.DeletionSyncMaxPercent);
     }
 }

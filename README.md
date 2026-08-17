@@ -11,31 +11,37 @@ and CI runs from the workflows at the repository root.
 | Connector | Source system | Highlights | Tests |
 |---|---|---|---|
 | [SalesforceConnector](SalesforceConnector/) | Salesforce CRM | Sharing-model ACLs, standard + custom objects, sovereign-cloud ready, large-group ACL scale guard | 1213 |
-| [ClarizenConnector](ClarizenConnector/) | Planview AdaptiveWork (Clarizen) | REST v2 + TDW bulk, financial-field governance (filter by default), webhooks with anti-replay | 897 |
+| [ClarizenConnector](ClarizenConnector/) | Planview AdaptiveWork (Clarizen) | REST v2 + TDW bulk, financial-field governance (filter by default), webhooks with anti-replay | 929 |
 | [SeismicConnector](SeismicConnector/) | Seismic (sales enablement) | Version-aware, fail-closed No-MNE exclusion filter, usage ranking, webhook anti-replay | 1025 |
 | [AltrataConnector](AltrataConnector/) | Altrata (relationship & wealth intelligence) | Licensed feeds, seat-only entitlement, purpose-of-use authz, DSAR erasure | 764 |
-| [HadoopConnector](HadoopConnector/) | BDH Hadoop data mart (nightly Salesforce mirror) | Filter-first at 150M+ scale, partition pruning, 24h-lag aware | 988 |
+| [HadoopConnector](HadoopConnector/) | BDH Hadoop data mart (nightly Salesforce mirror) | Filter-first at 150M+ scale, partition pruning, 24h-lag aware | 1021 |
 
 ## Shared chassis
 
-`Connector.Chassis/` (v1.18.0) is one real shared project: all five connectors
+`Connector.Chassis/` (v1.19.0) is one real shared project: all five connectors
 consume it via `<ProjectReference>`. It is not a NuGet package — there is no
 version pinning and no feed. `.github/workflows/conformance.yml` asserts that
 reference on every PR by resolving it through the csproj XML to a file on disk,
 so "on the fleet" is checked rather than claimed.
 
 Sharing is partial, and tracked rather than estimated. Of the chassis's 23
-modules, **9 have no local copy anywhere** — `Chassis` (identity/seams),
+modules, **10 have no local copy anywhere** — `Chassis` (identity/seams),
 `ServiceStop`, `SecretProvider`, `MetricsRenderer`, `SqlGateway`,
-`CircuitBreakerRegistry`, `ConfigException`, `LogRedaction` and
-`StandardLogDialect`. The other 14 still exist as per-connector implementations:
-`DecisionLedger`, `EventLogSink`, `HaCoordinator`, `LogPruner`, `ServiceHost`
-and `SqlStateStore` in four connectors each; `CircuitBreaker` and `EnvFlags` in
+`CircuitBreakerRegistry`, `ConfigException`, `LogRedaction`,
+`StandardLogDialect` and `EnvFlags`. The other 13 still exist as per-connector
+implementations: `DecisionLedger`, `EventLogSink`, `HaCoordinator`, `LogPruner`,
+`ServiceHost` and `SqlStateStore` in four connectors each; `CircuitBreaker` in
 three; `Tracing` in two; `Alerting`, `HttpTransport`, `Logging`,
 `SecureDirectory` and `SqlExecutor` in one.
 
-That comes to **67 declared divergences** — Salesforce 22, Clarizen 16,
-Hadoop 16, Altrata 13, **Seismic 0** — each recorded with a reason in
+`EnvFlags` was the most recent to consolidate, and it is the one case where the
+divergence was not merely duplication: Clarizen, Hadoop and Salesforce were
+still carrying the parser from *before* the fleet's boolean vocabulary was
+hardened, so a security-relevant fix applied to the chassis had never reached
+them (`Connector.Chassis/CONSOLIDATION.md`).
+
+That comes to **64 declared divergences** — Salesforce 21, Clarizen 15,
+Hadoop 15, Altrata 13, **Seismic 0** — each recorded with a reason in
 [`.github/conformance/divergences.tsv`](.github/conformance/divergences.tsv).
 The register is a ratchet, not an amnesty: CI fails on a local copy that is not
 declared, and equally on a declared copy that no longer exists, so the number

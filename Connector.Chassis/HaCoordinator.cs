@@ -76,7 +76,7 @@ public class HaCoordinator
 
     public string NodeId { get; }
 
-    public static bool Enabled => EnvFlags.IsTrue("HA_MODE");
+    public static bool Enabled => EnvFlags.HaMode;
 
     public static int ClaimTimeoutSeconds =>
         int.TryParse(Environment.GetEnvironmentVariable("HA_CLAIM_TIMEOUT_SECONDS"), out var v) && v > 0

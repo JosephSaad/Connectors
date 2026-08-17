@@ -33,6 +33,32 @@ in `.github/workflows/release-connector.yml`, called by
 - `workflow_dispatch` runs the identical build → smoke-test → package path as a
   dry run: nothing is pushed and no release is created.
 
+### Security
+- **A typo in a protective env var no longer switches it off.** This connector
+  carried its own `EnvFlags`, which held the parser from *before* the fleet's
+  boolean vocabulary was hardened in the chassis: it did not trim, and it read
+  any unrecognised value as `false`. Because the hardening landed in
+  `Connector.Chassis` only, the two failures it was written to fix were still
+  live here:
+  - `CLASSIFICATION_ENFORCE_ACL="true "` — one trailing space, the kind a `.env`
+    line or a folded YAML scalar produces — read as **off**. `ValidateConfig`
+    reads the same flag through the same parser, so `validate-config` reported
+    success while Restricted items were indexed without the enforcement-group
+    lock.
+  - `CIRCUIT_BREAKER=on` (or `ture`, or `true `) put **every breaker into
+    passthrough**. The value is neither blank nor truthy, and the gate was
+    spelled `blank-or-IsTrue` while its own summary said "only an explicit false
+    disables it".
+
+  The local copy is deleted and the name now binds to `Connector.Chassis.EnvFlags`
+  via a csproj alias, so every call site is unchanged. Four protective defaults
+  that had the same contradiction — the circuit breaker, the decision ledger,
+  `DELETION_SYNC`, and the webhook signed-timestamp anti-replay requirement —
+  are now spelled `!EnvFlags.IsFalse(...)`: only an explicit `false`/`0`/`no`
+  turns them off, and an unrecognised value warns once and leaves the default
+  standing. `BooleanVocabularyRegressionTests` pins all of it, and fails against
+  the code it replaced.
+
 ### Fixed
 - **A blank Graph property name is now as loud as an undeclared one.**
   `GraphPropertyRegistry.AssertDeclared` rejected a blank/whitespace-only name

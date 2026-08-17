@@ -28,6 +28,7 @@
        connector's own logging via Chassis.LoggerFactory - see
        Infrastructure/ChassisLoggerAdapter.cs. -->
   <ItemGroup>
+    <Using Include="Connector.Chassis.EnvFlags" Alias="EnvFlags" />
     <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />
     <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
     <Using Include="Connector.Chassis.Alerting" Alias="Alerting" />

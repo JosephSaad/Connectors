@@ -68,8 +68,7 @@ public sealed class WebhookAuthenticator
     /// <summary>Construct from the environment (defaults: require=true, tolerance=300s).</summary>
     public static WebhookAuthenticator FromEnv(string secret)
     {
-        var raw = Environment.GetEnvironmentVariable(RequireTimestampEnvVar);
-        var require = string.IsNullOrWhiteSpace(raw) || EnvFlags.IsTrue(RequireTimestampEnvVar);
+        var require = !EnvFlags.IsFalse(RequireTimestampEnvVar);
         var toleranceSeconds = Math.Max(1, EnvFlags.GetInt(ToleranceEnvVar, DefaultToleranceSeconds));
         var header = EnvFlags.GetString(TimestampHeaderEnvVar, DefaultTimestampHeader);
         return new WebhookAuthenticator(secret, require, TimeSpan.FromSeconds(toleranceSeconds))
