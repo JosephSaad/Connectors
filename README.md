@@ -24,15 +24,22 @@ version pinning and no feed. `.github/workflows/conformance.yml` asserts that
 reference on every PR by resolving it through the csproj XML to a file on disk,
 so "on the fleet" is checked rather than claimed.
 
-Sharing is partial, and tracked rather than estimated. Of the chassis's 23
+Sharing is partial, and tracked rather than estimated. Of the chassis's 22
 modules, **11 have no local copy anywhere** — `Chassis` (identity/seams),
 `ServiceStop`, `ServiceHost`, `SecretProvider`, `MetricsRenderer`, `SqlGateway`,
 `CircuitBreakerRegistry`, `ConfigException`, `LogRedaction`,
-`StandardLogDialect` and `EnvFlags`. The other 12 still exist as per-connector
-implementations: `DecisionLedger`, `EventLogSink`, `HaCoordinator`, `LogPruner`
-and `SqlStateStore` in four connectors each; `CircuitBreaker` in three;
-`Tracing` in two; `Alerting`, `HttpTransport`, `Logging`, `SecureDirectory` and
-`SqlExecutor` in one.
+`StandardLogDialect` and `EnvFlags`. The other 11 still exist as per-connector
+implementations: `DecisionLedger`, `EventLogSink`, `HaCoordinator` and
+`LogPruner` in four connectors each; `CircuitBreaker` in three; `Tracing` in
+two; `Alerting`, `HttpTransport`, `Logging`, `SecureDirectory` and `SqlExecutor`
+in one.
+
+`SqlStateStore` used to be a twelfth. It was removed from the chassis rather
+than consolidated: Seismic was its only consumer, it had no chassis tests, and
+all four other connectors have recorded, permanent reasons not to adopt it — a
+reference implementation nobody can migrate to is not a reference. It now lives
+in `SeismicConnector/Config/`, and the five implementations are tracked as
+cross-connector duplication so the count moved rather than vanished.
 
 The two most recent consolidations are the two shapes this work comes in.
 `EnvFlags` was **stale**: Clarizen, Hadoop and Salesforce carried the parser from
@@ -42,8 +49,8 @@ four copies identical in mechanism that differed only in two identity strings an
 in what each told the Windows Event Log, so the mechanism moved to the chassis and
 the wording stayed behind a host hook (`Connector.Chassis/CONSOLIDATION.md`).
 
-That comes to **56 declared divergences** — Salesforce 19, Clarizen 13,
-Hadoop 13, Altrata 11, **Seismic 0** — each recorded with a reason in
+That comes to **49 declared divergences** — Salesforce 16, Clarizen 11,
+Hadoop 12, Altrata 10, **Seismic 0** — each recorded with a reason in
 [`.github/conformance/divergences.tsv`](.github/conformance/divergences.tsv).
 The register is a ratchet, not an amnesty: CI fails on a local copy that is not
 declared, and equally on a declared copy that no longer exists, so the number

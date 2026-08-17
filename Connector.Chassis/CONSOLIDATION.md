@@ -28,9 +28,43 @@ Consumed from the chassis, with the number of connectors on the shared version:
 | LogLevels · LogRecord | all 5 — Salesforce's copies were byte-identical (see below) |
 | EventLogEntryKind | all 5 — Clarizen's copy was byte-identical (see below) |
 
+### Single-consumer modules — in the chassis, but shared by nobody
+
+Nine chassis modules have exactly **one** consumer: Seismic. They are in the chassis because the
+chassis is largely Seismic's extracted infrastructure, not because the fleet adopted them. The
+distinction matters for a reason that is easy to miss: a change to one of these is validated
+against **one** connector, while its location implies fleet-wide validation.
+
+| Module | Consumers | Keep in the chassis because |
+|---|---|---|
+| `HttpTransport` | Seismic — **plus** every host of `Alerting` | Not single-consumer in effect: `Alerting` (4 connectors) falls back to `HttpTransport.CreateHandler` when `HandlerFactory` is unset. Removing it leaves `Alerting` with no default transport. |
+| `CircuitBreakerRegistry` | Seismic — **plus** every host of `MetricsRenderer` | Not single-consumer in effect: `MetricsRenderer` (3 connectors) calls `CircuitBreakerRegistry.All` directly, not through a hook. Removing it breaks `/metrics` for Clarizen, Seismic and Hadoop. |
+| `DecisionLedger` | Seismic | The chassis ledger is the more *robust* implementation and is the migration target if a connector's own ledger ever needs replacing. Covered by chassis tests. |
+| `LogPruner` | Seismic | The chassis version is the superset (195 lines against Altrata's 101 — run-dir regex, `RetentionDays`, ledger-file pruning). It is what a connector would migrate **to**. Covered by chassis tests. |
+| `CircuitBreaker` (+`Options`/`State`/`Exception`) | Seismic | Functional `ExecuteAsync` paradigm; the reference the three imperative copies are measured against. Covered by chassis tests. |
+| `EventLogSink` | Seismic | The `LogHandler`-instance model the four static copies are measured against. |
+| `HaCoordinator` | Seismic | The per-crawl claim model the per-object and async copies are measured against. |
+| `SecureDirectory` | Seismic | Reference for the renamed equivalents (`DirectoryHardening`, `SecureDirectories`). |
+
+Deleting these would not remove a line of duplicated code — it would only remove the thing the
+duplication is measured **against**, and the gate detects a local copy by collision with a type
+the chassis declares. With no chassis declaration there is nothing to collide with, and the
+register goes quiet while five copies persist. That is precisely the failure the gate's own
+header records: *"with nothing asserting ABSENCE, the gate was green while 70 local copies sat in
+four connectors."*
+
+**`SqlStateStore` was the exception, and has been moved out.** It failed every test above: one
+consumer, **zero** chassis tests, and no reachable migration target — all four other connectors
+have recorded, permanent reasons not to adopt it (two need the injectable `ISqlGateway` seam their
+tests mock, Altrata's carries DSAR-suppression and billable-lookup operations, Salesforce's is
+bound to its own stored-procedure contract). A reference implementation nobody can migrate to is
+not a reference. It now lives in `SeismicConnector/Config/SqlStateStore.cs`, and the five
+implementations are tracked as `kind=duplicated` so the duplication stays counted rather than
+vanishing with the chassis declaration.
+
 Present in the chassis but **outside** the consolidated surface — the per-type migrations left
-these connector-side: DecisionLedger · HaCoordinator · SqlStateStore · Alerting · EventLogSink ·
-LogPruner · CircuitBreaker (+Registry).
+these connector-side: DecisionLedger · HaCoordinator · Alerting · EventLogSink · LogPruner ·
+CircuitBreaker (+Registry).
 
 ### EnvFlags: why this one was not an accepted divergence
 
@@ -132,19 +166,6 @@ class, therefore a different contract: consolidating them would have silently re
 Salesforce's handlers onto the chassis hierarchy. Text identity is necessary and not sufficient;
 what matters is whether the type's dependencies are also shared.
 
-## Not yet decided (measured, not argued)
-
-`SqlStateStore` carries copies but appears in neither the shared list nor the accepted
-divergences, so the register records it without saying whether it is debt. Measured against the
-chassis rather than judged by eye — lines in common after stripping comments, blanks and the
-namespace:
-
-| Component | Copies | Overlap with the chassis | Reading |
-|---|---|---|---|
-| `SqlStateStore` | 4 | 9–18 lines (Altrata is 585 lines against the chassis's 173) | **Not** duplication. These are different implementations of the same idea; consolidating means choosing one and rewriting three, which is a design decision, not cleanup. |
-
-The distinction matters because "56 divergences" reads as one backlog and is not: most rows are
-deliberate, and `SqlStateStore` is divergent-but-correct rather than debt.
 
 ## What the register cannot see: duplication across connectors
 
