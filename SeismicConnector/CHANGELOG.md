@@ -6,6 +6,34 @@ All notable changes to the Seismic Copilot Connector. Versions follow
 
 ## Unreleased — bank-grade hardening
 
+### Changed — release automation now runs, and the tag format changed
+
+The release pipeline is wired to the repository root and produces releases for
+real. It had been authored under `SeismicConnector/.github/workflows/release.yml`
+— one level below the only directory GitHub executes workflows from — so no tag
+had ever triggered it and no bundle, GHCR image or SBOM was ever published by
+it. The logic now lives once in `.github/workflows/release-connector.yml`,
+called by `.github/workflows/release-seismic.yml`.
+
+- **Release tags are now `seismic-v1.2.0`, not `v1.2.0`.** The five connectors
+  share one repository and version independently; an unprefixed tag would start
+  all five pipelines against a single tag, and only the first to finish could
+  create the release.
+- Signing secrets are the fleet-wide set, which is this connector's existing
+  spelling: `AUTHENTICODE_PFX_BASE64` / `AUTHENTICODE_PFX_PASSWORD` for the
+  win-x64 binary, `COSIGN_PRIVATE_KEY` / `COSIGN_PASSWORD` for the image. All
+  optional; signing steps skip with a notice and the release ships unsigned.
+- The SBOM is now built by a dedicated job and attached to the release as its
+  own asset, rather than generated inside the package job and copied into each
+  zip. One SBOM per release instead of one per bundle, and it is validated as
+  parseable JSON before it can be attached. **Operators who scanned the SBOM
+  from inside an extracted bundle now download it beside the zip**
+  (`docs/DEPLOYMENT_ENTERPRISE.md`).
+- The detached `cosign` bundle signature (`<bundle>.zip.sig`) is unchanged and
+  still produced when `COSIGN_PRIVATE_KEY` is configured.
+- `workflow_dispatch` runs the identical build → smoke-test → package path as a
+  dry run: nothing is pushed and no release is created.
+
 ### Fixed — decision-ledger durability, round 10
 
 * **BLOCKER — the backslash case: an altered byte disguised as a torn write.**
@@ -346,9 +374,9 @@ All notable changes to the Seismic Copilot Connector. Versions follow
     --build` is unchanged.
   * **CI runs from the repository root.** `.github/workflows/seismic.yml` at
     the root builds and tests on ubuntu-latest and windows-latest (1017 tests
-    green on both) and builds the container image. The connector's own
-    `.github/workflows/` files are inert leftovers from when this was its own
-    repository — GitHub never executes them.
+    green on both) and builds the container image. Releases are
+    `release-seismic.yml` there too. The connector's own `.github/workflows/`
+    files, inert since the consolidation, have been deleted.
 
 ## 1.0.0 — 2026-07-18
 

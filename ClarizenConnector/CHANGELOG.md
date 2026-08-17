@@ -8,6 +8,31 @@ versioning follows [SemVer](https://semver.org/).
 
 Enterprise hardening package.
 
+### Changed — release automation now runs, and the tag format changed
+
+The release pipeline is wired to the repository root and produces releases for
+real. It had been authored under
+`ClarizenConnector/.github/workflows/release.yml` — one level below the only
+directory GitHub executes workflows from — so no tag had ever triggered it and
+no bundle, GHCR image or SBOM was ever published by it. The logic now lives once
+in `.github/workflows/release-connector.yml`, called by
+`.github/workflows/release-clarizen.yml`.
+
+- **Release tags are now `clarizen-v1.2.0`, not `v1.2.0`.** The five connectors
+  share one repository and version independently; an unprefixed tag would start
+  all five pipelines against a single tag, and only the first to finish could
+  create the release.
+- Signing secrets moved to the fleet-wide set: `AUTHENTICODE_PFX_BASE64` /
+  `AUTHENTICODE_PFX_PASSWORD` for the win-x64 binary, `COSIGN_PRIVATE_KEY` /
+  `COSIGN_PASSWORD` for the image — replacing this connector's
+  `WINDOWS_CODESIGN_PFX` / `WINDOWS_CODESIGN_PASSWORD` spellings, which were
+  never read by anything. All optional; signing steps skip with a notice and the
+  release ships unsigned.
+- The CycloneDX SBOM is now validated as parseable JSON before it can be
+  attached — a malformed SBOM looks like supply-chain evidence and is not.
+- `workflow_dispatch` runs the identical build → smoke-test → package path as a
+  dry run: nothing is pushed and no release is created.
+
 ### Fixed
 - **A blank Graph property name is now as loud as an undeclared one.**
   `GraphPropertyRegistry.AssertDeclared` rejected a blank/whitespace-only name
@@ -293,9 +318,8 @@ Enterprise hardening package.
 - **CI moved to the repository root.** GitHub only executes workflows found in
   the root `.github/workflows/`; the Clarizen job is `clarizen.yml` there
   (build + test on ubuntu-latest and windows-latest, plus a Docker image
-  build). The `ci.yml`, `codeql.yml` and `release.yml` files under
-  `ClarizenConnector/.github/workflows/` are inert leftovers from when this
-  connector was its own repository and are left in place untouched.
+  build). Releases are `release-clarizen.yml` there too. The connector's own
+  `.github/workflows/`, inert since the consolidation, has been deleted.
 - **Docker builds from the repository root.** Because the project references
   `../Connector.Chassis` and a build cannot reach outside its context, the
   image is built as `docker build -f ClarizenConnector/Dockerfile .` from the

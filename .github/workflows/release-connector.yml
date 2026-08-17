@@ -1,0 +1,533 @@
+name: Release connector
+
+# Reusable release pipeline — one implementation, five callers.
+#
+# This is the port of the five per-connector `<Connector>/.github/workflows/
+# release.yml` files, which never ran: GitHub Actions only executes workflows
+# found in `.github/workflows` at the REPOSITORY ROOT, and those sat one level
+# down, left from when each connector was its own repository. Everything they
+# designed — CycloneDX SBOM, self-contained single-file publish, Authenticode
+# and cosign signing, GHCR push, WiX MSI, GitHub release creation — is here.
+#
+# They were ported as ONE workflow rather than five because they had drifted
+# apart while inert: five signing-secret vocabularies (SIGNING_CERT_PFX_BASE64 /
+# WINDOWS_CODESIGN_PFX / AUTHENTICODE_PFX_B64 / AUTHENTICODE_PFX_BASE64), three
+# SBOM designs, and Seismic with no SBOM job at all. Nothing had ever executed,
+# so none of that divergence was load-bearing. The genuine per-connector
+# differences — solution and project paths, image name, WiX file and its
+# defines — are inputs below.
+#
+# Secret vocabulary is now one set, the majority spelling of the five:
+#   AUTHENTICODE_PFX_BASE64 / AUTHENTICODE_PFX_PASSWORD   Windows binary signing
+#   COSIGN_PRIVATE_KEY      / COSIGN_PASSWORD             container signing
+# All four are OPTIONAL. Each signing step is gated on its secret being present
+# and skips with a ::notice:: when it is not, so forks and dry runs never fail
+# here — they just ship unsigned.
+#
+# Two entry points, both via the per-connector caller workflows:
+#   - tag push (`<connector>-v*`): full pipeline, ends by creating a GitHub
+#     release with bundles + SBOM attached.
+#   - workflow_dispatch: dry run — identical build/smoke/package path, artifacts
+#     upload to the run only, nothing is pushed and no release is created.
+
+on:
+  workflow_call:
+    inputs:
+      connector:
+        description: "Connector directory at the repository root, e.g. SalesforceConnector"
+        type: string
+        required: true
+      solution:
+        description: "Solution file, relative to the connector directory"
+        type: string
+        required: true
+      project:
+        description: "Publishable project directory, relative to the connector directory"
+        type: string
+        required: true
+      test_project:
+        description: "Test project file, relative to the connector directory"
+        type: string
+        required: true
+      binary:
+        description: "Published assembly/executable name, without extension"
+        type: string
+        required: true
+      product_name:
+        description: "Human-readable product name (release title, Authenticode -n)"
+        type: string
+        required: true
+      image_name:
+        description: "GHCR image name (lowercase), without the registry or owner"
+        type: string
+        required: true
+      tag_prefix:
+        description: "Tag prefix this connector releases on, e.g. salesforce-v"
+        type: string
+        required: true
+      sbom_file:
+        description: "CycloneDX SBOM filename"
+        type: string
+        required: true
+      wxs:
+        description: "WiX source file, relative to the connector directory"
+        type: string
+        required: true
+      msi_root_var:
+        description: "WiX define naming the connector root — RepoRoot or ProjectRoot"
+        type: string
+        required: true
+      msi_version_var:
+        description: "WiX define carrying the version (ProductVersion / Version); empty when the .wxs hardcodes it"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Release gate. A tag on a red commit must not ship, so this runs the full
+  # suite before anything is packaged.
+  #
+  # Both OSes, matching the per-connector PR workflows: Windows Server is the
+  # primary deployment target and every Windows-only defect found in this
+  # repository so far was invisible on Linux. A release gate weaker than the
+  # pull-request gate would be worse than no gate.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Full test suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: ${{ inputs.connector }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore ${{ inputs.solution }}
+
+      - name: Build
+        run: dotnet build ${{ inputs.solution }} -c Release --no-restore
+
+      - name: Test
+        run: dotnet test ${{ inputs.test_project }} -c Release --no-build
+
+  # ---------------------------------------------------------------------------
+  # SBOM: CycloneDX bill of materials over the whole solution's NuGet graph,
+  # attached to the release so consumers can correlate vulnerabilities without
+  # building anything (see each connector's SECURITY.md).
+  # ---------------------------------------------------------------------------
+  sbom:
+    name: SBOM (CycloneDX)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ${{ inputs.connector }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          dotnet tool install --global CycloneDX
+          dotnet restore ${{ inputs.solution }}
+          dotnet CycloneDX ${{ inputs.solution }} \
+            --json --output sbom --filename ${{ inputs.sbom_file }} \
+            --disable-github-licenses
+          # A malformed SBOM is worse than none — it looks like supply-chain
+          # evidence and is not. Parse it before it can be attached.
+          python3 -c "import json,sys; json.load(open('sbom/${{ inputs.sbom_file }}')); print('SBOM is valid JSON')"
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: ${{ inputs.connector }}/sbom/${{ inputs.sbom_file }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Bundles. Self-contained single-file publish per RID, Authenticode-signed on
+  # win-x64 when secrets allow, assembled into a zip whose layout mirrors a
+  # checkout — the app resolves config/ and env/ against its working directory,
+  # so the zip extracts to a directory you run it from.
+  # ---------------------------------------------------------------------------
+  package:
+    name: Package (${{ matrix.rid }})
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # win-x64 first-class: Windows Server + service mode is the primary
+        # deployment target. linux-x64 covers containers and VMs.
+        rid: [win-x64, linux-x64]
+    defaults:
+      run:
+        working-directory: ${{ inputs.connector }}
+    env:
+      # `secrets` is not a valid context in a step-level `if:`, so signing
+      # material lands in job env and the gate below turns it into step outputs.
+      # (The unported Salesforce file tested `secrets.*` in five step `if:`
+      # conditions — that alone would have failed workflow validation.)
+      AUTHENTICODE_PFX_BASE64: ${{ secrets.AUTHENTICODE_PFX_BASE64 }}
+      AUTHENTICODE_PFX_PASSWORD: ${{ secrets.AUTHENTICODE_PFX_PASSWORD }}
+      COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Resolve version
+        id: ver
+        env:
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF_NAME#"$TAG_PREFIX"}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-ci.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve signing availability
+        id: signing
+        run: |
+          if [[ -n "$AUTHENTICODE_PFX_BASE64" ]]; then
+            echo "authenticode=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "authenticode=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AUTHENTICODE_PFX_BASE64 not configured — shipping the win-x64 binary unsigned."
+          fi
+          if [[ -n "$COSIGN_PRIVATE_KEY" ]]; then
+            echo "cosign=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cosign=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::COSIGN_PRIVATE_KEY not configured — shipping the bundle without a .zip.sig."
+          fi
+
+      - name: Publish (self-contained single file)
+        run: >-
+          dotnet publish ${{ inputs.project }} -c Release
+          -r ${{ matrix.rid }} --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.ver.outputs.version }}
+          -o publish/${{ matrix.rid }}
+
+      # osslsigncode signs PE files from the linux runner; timestamped so the
+      # signature outlives the certificate.
+      - name: Authenticode sign win-x64 binary
+        if: ${{ matrix.rid == 'win-x64' && steps.signing.outputs.authenticode == 'true' }}
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q osslsigncode
+          umask 077
+          echo "$AUTHENTICODE_PFX_BASE64" | base64 -d > signing-cert.pfx
+          EXE="publish/win-x64/${{ inputs.binary }}.exe"
+          osslsigncode sign \
+            -pkcs12 signing-cert.pfx -pass "$AUTHENTICODE_PFX_PASSWORD" \
+            -n "${{ inputs.product_name }}" \
+            -t http://timestamp.digicert.com \
+            -in "$EXE" -out "$EXE.signed"
+          mv "$EXE.signed" "$EXE"
+          osslsigncode verify -in "$EXE" || true
+          rm -f signing-cert.pfx
+
+      - name: Assemble bundle
+        id: bundle
+        run: |
+          NAME="${{ inputs.binary }}-${{ steps.ver.outputs.version }}-${{ matrix.rid }}"
+          ROOT="bundle/$NAME"
+          mkdir -p "$ROOT/env" "$ROOT/scripts"
+          find "publish/${{ matrix.rid }}" -maxdepth 1 -type f \
+            ! -name "*.pdb" -exec cp {} "$ROOT/" \;
+          cp -r config "$ROOT/config"
+          cp -r docs "$ROOT/docs"
+          cp -r scripts/sql "$ROOT/scripts/sql"
+          cp env/.env.local.example "$ROOT/env/"
+          # Clarizen and Hadoop ship no env/README.md; copy by existence rather
+          # than per-connector input, so adding one needs no workflow change.
+          # Spelled as `if` rather than `[[ ]] && cp`: the latter is correct here
+          # but returns 1 when the file is absent, so it would fail the step
+          # under `set -e` if it ever became the last line of this block.
+          if [[ -f env/README.md ]]; then cp env/README.md "$ROOT/env/"; fi
+          cp README.md LICENSE NOTICE SECURITY.md CHANGELOG.md "$ROOT/"
+          if [[ "${{ matrix.rid }}" == "win-x64" ]]; then
+            cp scripts/install-windows-service.ps1 "$ROOT/scripts/"
+          fi
+          (cd bundle && zip -qr "$NAME.zip" "$NAME" && sha256sum "$NAME.zip" > "$NAME.zip.sha256")
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      # Detached cosign signature over the bundle zip, gated on the same secret
+      # as the image signature. Four of the five unported workflows produced
+      # this `.zip.sig` and the operator guides tell people to check it, so it
+      # is part of the bundle contract, not an extra:
+      #   cosign verify-blob --key cosign.pub --signature X.zip.sig X.zip
+      # `bundle/*.zip*` already carries it to the release alongside the .sha256.
+      - name: Install cosign
+        if: ${{ steps.signing.outputs.cosign == 'true' }}
+        uses: sigstore/cosign-installer@v4
+
+      - name: Cosign-sign bundle
+        if: ${{ steps.signing.outputs.cosign == 'true' }}
+        run: |
+          ZIP="bundle/${{ steps.bundle.outputs.name }}.zip"
+          cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY \
+            --output-signature "$ZIP.sig" "$ZIP"
+
+      # A single-file self-contained publish can build cleanly and still fail to
+      # bootstrap (missing native libs). --help exercises startup and the CLI
+      # parser without needing any credentials.
+      - name: Smoke test published binary
+        if: ${{ matrix.rid == 'linux-x64' }}
+        run: |
+          cd "bundle/${{ steps.bundle.outputs.name }}"
+          chmod +x "${{ inputs.binary }}"
+          "./${{ inputs.binary }}" --help
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-${{ matrix.rid }}
+          path: ${{ inputs.connector }}/bundle/*.zip*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Container distribution: the same image the per-connector CI job validates,
+  # pushed to GHCR on tag builds only. Dispatch dry runs build it end to end and
+  # push nothing.
+  #
+  # Build context is the repository root, not the connector directory: every
+  # Dockerfile copies ../Connector.Chassis alongside its own tree.
+  # ---------------------------------------------------------------------------
+  container:
+    name: Container image (ghcr.io)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Resolve signing availability
+        id: signing
+        run: |
+          if [[ -n "$COSIGN_PRIVATE_KEY" ]]; then
+            echo "cosign=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cosign=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::COSIGN_PRIVATE_KEY not configured — image will be pushed unsigned."
+          fi
+
+      - name: Log in to GHCR
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tags
+        id: img
+        env:
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
+        run: |
+          # Registry paths must be lowercase; the repository owner is not.
+          IMAGE="$(echo "ghcr.io/${{ github.repository_owner }}/${{ inputs.image_name }}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tags=${IMAGE}:${GITHUB_REF_NAME#"$TAG_PREFIX"},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${IMAGE}:ci-dryrun" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image (push on tag builds only)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ inputs.connector }}/Dockerfile
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          tags: ${{ steps.img.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        if: ${{ startsWith(github.ref, 'refs/tags/') && steps.signing.outputs.cosign == 'true' }}
+        uses: sigstore/cosign-installer@v4
+
+      # Signs by digest, not tag, so the signature covers exactly the image that
+      # was pushed rather than whatever the tag points at later.
+      - name: Sign image with cosign
+        if: ${{ startsWith(github.ref, 'refs/tags/') && steps.signing.outputs.cosign == 'true' }}
+        run: |
+          DIGEST="${{ steps.build.outputs.digest }}"
+          echo "Signing ${{ steps.img.outputs.image }}@${DIGEST}"
+          cosign sign --yes --key env://COSIGN_PRIVATE_KEY \
+            "${{ steps.img.outputs.image }}@${DIGEST}"
+
+  # ---------------------------------------------------------------------------
+  # MSI packaging (EXPERIMENTAL): WiX v5 build on a Windows runner. Authored on
+  # a non-Windows dev box, so treat the artifact as candidate-quality until it
+  # has been installed on a test server. Uploaded as a run artifact only — not
+  # attached to the release — and continue-on-error keeps a red MSI build from
+  # blocking the release train.
+  # ---------------------------------------------------------------------------
+  msi:
+    name: MSI package (experimental)
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: ${{ inputs.connector }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        env:
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VER="${GITHUB_REF_NAME#"$TAG_PREFIX"}"
+          else
+            VER="0.0.0-ci.${GITHUB_RUN_NUMBER}"
+          fi
+          # Every version define feeds the WiX Package/@Version attribute, which
+          # must be numeric x.y.z — strip any prerelease suffix.
+          MSIVER="${VER%%-*}"
+          if [[ "$MSIVER" == "0.0.0" ]]; then MSIVER="0.0.1"; fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "msiversion=$MSIVER" >> "$GITHUB_OUTPUT"
+
+      - name: Publish win-x64 payload
+        run: >-
+          dotnet publish ${{ inputs.project }} -c Release
+          -r win-x64 --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.ver.outputs.version }}
+          -o publish/win-x64
+
+      - name: Install WiX v5
+        run: dotnet tool install --global wix --version 5.0.2
+
+      - name: Build MSI
+        shell: bash
+        run: |
+          mkdir -p out
+          # The .wxs files disagree on what to call the connector root
+          # (RepoRoot / ProjectRoot) and on whether they take a version at all
+          # (Clarizen hardcodes its Package/@Version), so both are inputs.
+          DEFINES=(-d "PublishDir=publish/win-x64" -d "${{ inputs.msi_root_var }}=.")
+          if [[ -n "${{ inputs.msi_version_var }}" ]]; then
+            DEFINES+=(-d "${{ inputs.msi_version_var }}=${{ steps.ver.outputs.msiversion }}")
+          fi
+          wix build "${{ inputs.wxs }}" -arch x64 "${DEFINES[@]}" \
+            -o "out/${{ inputs.binary }}-${{ steps.ver.outputs.version }}-x64.msi"
+
+      - name: Validate MSI (smoke)
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem out/*.msi | Select-Object -First 1
+          if (-not $msi) { throw "MSI not produced" }
+          Write-Host "MSI: $($msi.Name) ($([math]::Round($msi.Length/1MB,1)) MB)"
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: msi-experimental
+          path: ${{ inputs.connector }}/out/*.msi
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # The release itself. Tag builds only — a workflow_dispatch dry run gets this
+  # far with every artifact built and published to the run, and stops here.
+  #
+  # Gated on `container` as well as the artifact jobs. The release announces a
+  # GHCR image, so publishing it while the push or the image signature failed
+  # would advertise a release that is only partly there — and because
+  # `gh release create` cannot run twice against the same tag, the rerun that
+  # would fix it fails too. The experimental `msi` job stays out of this list on
+  # purpose: it is continue-on-error and must not block the release train.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create GitHub release
+    needs: [package, sbom, container]
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Download bundles
+        uses: actions/download-artifact@v8
+        with:
+          pattern: bundle-*
+          merge-multiple: true
+          path: dist
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v8
+        with:
+          name: sbom
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#"$TAG_PREFIX"}"
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "${{ inputs.product_name }} v${VERSION}" \
+            --generate-notes

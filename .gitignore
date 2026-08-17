@@ -4,6 +4,14 @@
 # Package output from `dotnet pack ... -o artifacts` (see .github/workflows/chassis.yml)
 artifacts/
 
+# Release pipeline scratch (see .github/workflows/release-connector.yml). Written
+# under <Connector>/ by the package and msi jobs; also what you get if you run
+# those same publish/bundle commands locally to reproduce a release.
+publish/
+bundle/
+sbom/
+out/
+
 # Build output
 bin/
 obj/

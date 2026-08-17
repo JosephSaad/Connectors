@@ -3,12 +3,33 @@
 All notable changes to the BDH Hadoop Copilot Connector. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/). Assembly version: `<Version>` in
-`src/HadoopConnector/HadoopConnector.csproj`; release tags are `v<version>`.
+`src/HadoopConnector/HadoopConnector.csproj`; release tags are
+`hadoop-v<version>`.
 
 ## [Unreleased]
 
 Bank-grade hardening follow-ups. Two safe-default flips (operators should note
 them); everything else is additive and off/unchanged by default.
+
+### Changed — release automation now runs, and the tag format changed
+
+The release pipeline is wired to the repository root and produces releases for
+real. It had been authored under `HadoopConnector/.github/workflows/release.yml`
+— one level below the only directory GitHub executes workflows from — so no tag
+had ever triggered it and no bundle, GHCR image or SBOM was ever published by
+it. The logic now lives once in `.github/workflows/release-connector.yml`,
+called by `.github/workflows/release-hadoop.yml`.
+
+- **Release tags are now `hadoop-v1.2.0`, not `v1.2.0`.** The five connectors
+  share one repository and version independently; an unprefixed tag would start
+  all five pipelines against a single tag, and only the first to finish could
+  create the release.
+- Signing secrets are one fleet-wide set: `AUTHENTICODE_PFX_BASE64` /
+  `AUTHENTICODE_PFX_PASSWORD` for the win-x64 binary, `COSIGN_PRIVATE_KEY` /
+  `COSIGN_PASSWORD` for the image. All optional — signing steps skip with a
+  notice and the release ships unsigned.
+- `workflow_dispatch` runs the identical build → smoke-test → package path as a
+  dry run: nothing is pushed and no release is created.
 
 ### Security (bypass fixes — action may be required)
 
@@ -286,11 +307,10 @@ them); everything else is additive and off/unchanged by default.
 - **CI now actually runs.** The live pipeline is
   `.github/workflows/hadoop.yml` at the **repository root** — GitHub executes
   only root workflows — building and testing on ubuntu-latest and
-  windows-latest and building the container image. This connector's own
-  `.github/workflows/` (`ci.yml`, `codeql.yml`, `release.yml`) are inert
-  leftovers from when it was a separate repository and are left in place
-  untouched; nothing runs them, so no release bundle, GHCR image or CodeQL scan
-  is produced from them.
+  windows-latest and building the container image. CodeQL
+  (`.github/workflows/codeql.yml`) and releases
+  (`.github/workflows/release-hadoop.yml`) run from the root too; this connector
+  keeps no workflows of its own.
 - **Docker builds from the repository root.** The image needs
   `Connector.Chassis` inside its build context, so
   `docker build -f HadoopConnector/Dockerfile .` from the root replaces the old

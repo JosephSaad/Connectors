@@ -74,12 +74,11 @@ The common capability set:
 - Dead-letter payload redaction (`DEADLETTER_PAYLOAD_MODE=full|redacted` —
   redacted keeps ids/hashes only; retry re-fetches from source)
 - SCM-aware Windows service + idempotent install script; WiX v5 MSI packaging
-- CI: six workflows at the repository root (`.github/workflows/`) — one per
-  connector plus the chassis — with a coverage gate (measured−5) and
-  perf-smoke jobs with non-flaky thresholds; release: CycloneDX SBOM +
-  Authenticode/cosign signing gated on secrets; CHANGELOG + semver. The
-  per-connector `.github/workflows/` files (ci/codeql/release) are inert
-  leftovers from when each connector was its own repo — GitHub never runs them
+- CI: all workflows live at the repository root (`.github/workflows/`) — one per
+  connector plus the chassis, CodeQL, the conformance gate, and the release
+  pipeline (one reusable workflow + a caller per connector, on per-connector
+  `<name>-v*` tags): CycloneDX SBOM + Authenticode/cosign signing gated on
+  secrets; CHANGELOG + semver. The connectors carry no workflows of their own
 
 The five connectors and their signature features:
 

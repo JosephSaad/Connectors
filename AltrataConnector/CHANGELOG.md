@@ -9,6 +9,30 @@ and this file.
 
 ## [Unreleased]
 
+### Changed — release automation now runs, and the tag format changed
+
+The release pipeline is wired to the repository root and produces releases for
+real. It had been authored under `AltrataConnector/.github/workflows/release.yml`
+— one level below the only directory GitHub executes workflows from — so no tag
+had ever triggered it and no bundle, GHCR image or SBOM was ever published by
+it. The logic now lives once in `.github/workflows/release-connector.yml`,
+called by `.github/workflows/release-altrata.yml`.
+
+- **Release tags are now `altrata-v1.2.0`, not `v1.2.0`.** The five connectors
+  share one repository and version independently; an unprefixed tag would start
+  all five pipelines against a single tag, and only the first to finish could
+  create the release.
+- Signing secrets moved to the fleet-wide set: `AUTHENTICODE_PFX_BASE64` /
+  `AUTHENTICODE_PFX_PASSWORD` for the win-x64 binary, `COSIGN_PRIVATE_KEY` /
+  `COSIGN_PASSWORD` for the image — this connector spelled the first
+  `AUTHENTICODE_PFX_B64`. All optional; signing steps skip with a notice and the
+  release ships unsigned.
+- The MSI build passes no version define, because `packaging/msi/Package.wxs`
+  carries its own `Package/@Version` and the drift against the csproj is
+  test-enforced (see the header of this file).
+- `workflow_dispatch` runs the identical build → smoke-test → package path as a
+  dry run: nothing is pushed and no release is created.
+
 ### Changed — the connector consumes the shared `Connector.Chassis` project
 
 This connector now lives in the `JosephSaad/Connectors` monorepo alongside the
@@ -27,9 +51,9 @@ other four (Salesforce, Clarizen, Seismic, Hadoop) and the chassis itself.
   breaker all remain connector-local.
 * **CI moved to the repository root**: `.github/workflows/altrata.yml` builds and
   runs the suite on `ubuntu-latest` **and** `windows-latest` (743 tests green on
-  both) and builds the container image. The files under this connector's own
-  `.github/workflows/` are inert leftovers from when it was its own repository —
-  GitHub never runs them.
+  both) and builds the container image. Releases are `release-altrata.yml`
+  there too. The files under this connector's own `.github/workflows/`, inert
+  since the consolidation, have been deleted.
 * **Docker build context is the repository root**, because the image has to reach
   `../Connector.Chassis`: `docker build -f AltrataConnector/Dockerfile .`.
   `docker-compose.yml` sets `context: ..`, and a single `.dockerignore` at the

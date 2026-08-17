@@ -57,19 +57,20 @@ Every connector ships the same foundation:
 - Circuit breakers with degraded-mode fail-safe
 - Unified data classification & sensitivity tagging (Public → Restricted) — an
   advisory connector-applied tag, with optional ACL enforcement of the top tier
-- SCM-aware Windows service, Docker image, GitHub Actions CI — eight workflows
-  at the repository root: one per connector (build + test on ubuntu **and**
-  windows, plus a Docker image build), one for the chassis (build, test, pack),
-  plus CodeQL and the chassis conformance gate. `main` is protected: linear
-  history, no force-push, and the two checks that run on every PR
-  (`Chassis conformance`, `Analyze (csharp)`) are required, admins included
+- SCM-aware Windows service, Docker image, GitHub Actions CI — fourteen
+  workflows at the repository root: one per connector (build + test on ubuntu
+  **and** windows, plus a Docker image build), one for the chassis (build, test,
+  pack), CodeQL, the chassis conformance gate, and the release pipeline (one
+  reusable workflow plus a caller per connector — see [Releasing](#releasing)).
+  `main` is protected: linear history, no force-push, and the two checks that
+  run on every PR (`Chassis conformance`, `Analyze (csharp)`) are required,
+  admins included
 - Enterprise operations pack: Windows Event Log/SIEM integration, corporate
   proxy + TLS-inspection CA support, certificate-credential Graph auth,
   threat model, runbooks, DR plan, Grafana dashboards + alert rules (see each
   connector's "Enterprise operations" README section). SBOM generation, MSI
-  packaging and release signing are authored in each connector's
-  `.github/workflows/release.yml`, but those files sit below the repository
-  root, so GitHub never runs them — the pipeline is written, not yet wired.
+  packaging and release signing run from the repository root — see
+  [Releasing](#releasing).
 - Bank-grade hardening — privacy- and compliance-safe defaults out of the box:
   dead-letter payload redaction by default, entitlement re-sync on incremental
   crawls, owner-only (0700) state directories, stale-index item TTL
@@ -105,3 +106,47 @@ connector references `../Connector.Chassis`:
 ```bash
 docker build -f <Connector>/Dockerfile .
 ```
+
+## Releasing
+
+Connectors version and ship **independently**, so release tags are prefixed per
+connector rather than shared. Pushing a tag runs the full pipeline for exactly
+one connector:
+
+| Connector | Tag | Image |
+|---|---|---|
+| SalesforceConnector | `salesforce-v1.2.0` | `ghcr.io/<owner>/salesforce-copilot-connector` |
+| ClarizenConnector | `clarizen-v1.2.0` | `ghcr.io/<owner>/clarizen-connector` |
+| SeismicConnector | `seismic-v1.2.0` | `ghcr.io/<owner>/seismic-connector` |
+| AltrataConnector | `altrata-v1.2.0` | `ghcr.io/<owner>/altrata-connector` |
+| HadoopConnector | `hadoop-v1.2.0` | `ghcr.io/<owner>/hadoop-connector` |
+
+A fleet-wide `v*` tag is deliberately **not** used: it would start all five
+pipelines against one tag, and only the first to finish could create the
+release.
+
+Each tag build gates on the connector's full suite (ubuntu **and** windows),
+then produces a CycloneDX SBOM, self-contained single-file `win-x64` and
+`linux-x64` bundles with SHA-256 checksums, a GHCR image, an experimental WiX
+MSI, and a GitHub release with the bundles and SBOM attached.
+
+The logic lives once in
+[`.github/workflows/release-connector.yml`](.github/workflows/release-connector.yml);
+the five `release-<connector>.yml` callers supply only paths and names.
+
+**Dry run before tagging.** Every caller also accepts `workflow_dispatch`, which
+takes the identical build → smoke-test → package path but pushes nothing and
+creates no release:
+
+```bash
+gh workflow run release-salesforce.yml
+```
+
+**Signing is optional.** All four secrets below are absent by default; each
+signing step skips with a `::notice::` and the release still ships (unsigned),
+so forks and dry runs never fail on missing credentials.
+
+| Secret | Signs |
+|---|---|
+| `AUTHENTICODE_PFX_BASE64` / `AUTHENTICODE_PFX_PASSWORD` | the `win-x64` binary (timestamped Authenticode) |
+| `COSIGN_PRIVATE_KEY` / `COSIGN_PASSWORD` | the GHCR image, by digest |

@@ -6,10 +6,9 @@ name: Chassis
 # doc-only and connector-only commits don't pay for it.
 #
 # NOTE: GitHub Actions only executes workflows found in `.github/workflows` at
-# the *repository root*. The per-connector `<Connector>/.github/workflows/*.yml`
-# files are inert in this monorepo — they are left over from when each connector
-# was its own repository. This is the first workflow in this repo that actually
-# runs.
+# the *repository root*. Every workflow in this repository lives there; the
+# connectors carry none of their own. This was the first workflow here that
+# actually ran.
 
 on:
   push:

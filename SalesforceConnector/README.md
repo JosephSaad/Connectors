@@ -41,11 +41,11 @@ cp env/.env.local.example env/.env.local    # fill in credentials
 ./SalesforceCopilotConnector validate-config
 ```
 
-Release automation is not currently wired up: GitHub only runs the workflows at
-the repository root, and this connector's own `.github/workflows/release.yml`
-(tag-triggered bundles, checksums, the `ghcr.io/josephsaad/salesforce-copilot-connector`
-image) is an inert leftover from when the connector was its own repository.
-Building from source only needs the requirements below.
+Release automation runs from the repository root. Pushing a `salesforce-v*` tag
+(e.g. `salesforce-v1.2.0`) builds bundles with SHA-256 checksums, a CycloneDX
+SBOM, the `ghcr.io/<owner>/salesforce-copilot-connector` image and a GitHub
+release — see [Releasing](../README.md#releasing). Building from source only
+needs the requirements below.
 
 ## Requirements
 

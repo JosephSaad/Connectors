@@ -34,10 +34,9 @@ docs/                          FEEDS, ENTITLEMENT, ERASURE, MATCHING,
 env/                           .env.local.example (+ layering README)
 scripts/                       install-windows-service.ps1, sql/ (canonical DDL)
 Dockerfile, docker-compose.yml container image + local SQL/HA dev topology
-.github/workflows/             ci.yml, codeql.yml, release.yml — INERT
-                               leftovers from when this connector was its own
-                               repository; GitHub runs only the workflows at
-                               the repository root (.github/workflows/altrata.yml)
+                               (no workflows here — GitHub runs only the ones at
+                               the repository root: .github/workflows/altrata.yml
+                               for CI, release-altrata.yml for releases)
 ../Connector.Chassis/          the shared chassis project, referenced by all
                                five connectors in this repository via
                                <ProjectReference> (identity seams, ServiceStop,
@@ -340,9 +339,8 @@ Also in the package: `ops/grafana-dashboard.json`,
 `ops/prometheus-alerts.yml`, `ops/azure-monitor-alerts.kql` (rules link to
 runbook anchors; the ledger-tamper rule is severity critical / class
 security), an experimental WiX v5 MSI (`packaging/msi/`), and the CycloneDX
-SBOM + gated Authenticode/cosign signing, coverage gate and perf smoke that
-live in this connector's own — now inert — `.github/workflows/` (see Tests
-below).
+SBOM + gated Authenticode/cosign signing produced by the repository-root
+release pipeline (see Tests below, and [Releasing](../README.md#releasing)).
 
 ## Tests
 
@@ -367,10 +365,10 @@ dotnet test        # 743 tests: CLI parsing, checkpoint resume, dead-letter
 CI is the repository-root workflow `.github/workflows/altrata.yml`: it runs the
 suite on ubuntu **and windows** (Windows Server is the deployment target) and
 validates the Docker image build (root context, `-f AltrataConnector/Dockerfile`).
-This connector's own `.github/workflows/` — the `ci.yml` that also provisioned
-the SQL schema twice against a live SQL Server 2022 container, plus `codeql.yml`
-and the test-gated, checksummed `release.yml` — is an inert leftover from when
-this was its own repository; GitHub executes only the root workflows.
+Releases run from the root as well — `.github/workflows/release-altrata.yml`,
+triggered by an `altrata-v*` tag, gates on this suite before packaging anything
+(see [Releasing](../README.md#releasing)). This connector keeps no workflows of
+its own; GitHub executes only the root ones.
 
 ## Environment variables
 

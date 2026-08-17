@@ -102,9 +102,9 @@ therefore backed up on a STRICTER tier than everything else:
   `dbo.altrata_deadletter.redacted/subject_ids/subject_hashes` with
   defaults). The connector auto-provisions on first touch; running
   `scripts/sql/create-database.sql` by hand is equivalent (the test suite pins
-  double-run idempotency offline; the live double-provision job sits in this
-  connector's own `.github/workflows/ci.yml`, inert since the move into the
-  connector monorepo). Columns are never dropped or retyped in a minor/patch
+  double-run idempotency offline; the live double-provision job was lost with
+  this connector's own `ci.yml` in the move into the connector monorepo, and
+  has not been reinstated at the root). Columns are never dropped or retyped in a minor/patch
   release — that is what makes rollback safe.
 - **File-state versioning**: JSON/JSONL records tolerate unknown fields on
   read (older binaries ignore new fields; newer binaries default missing

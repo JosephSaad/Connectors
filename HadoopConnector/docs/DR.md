@@ -101,6 +101,6 @@ Three schemas, three contracts:
 | State files (`sync_state.json`, `checkpoint_*.json`, `failed_records_*.jsonl`) | Stable key/line formats shared with the sibling connectors; readers ignore unknown fields, writers never remove fields within a major version. Corruption handling is fail-safe by design (see "State corruption" in `docs/RUNBOOKS.md`). |
 | Graph connection schema (`config/graph-schema.json`) | Registration is additive: new properties may be added and registered; removing/retyping a property is a BREAKING change requiring a new connection (Graph limitation) — plan it as a re-baseline, ideally on a fresh `CONNECTOR_ID` swapped in after its first full crawl. |
 
-Version identity: assembly `<Version>` in the csproj, release tags `v*`,
+Version identity: assembly `<Version>` in the csproj, release tags `hadoop-v*`,
 `CHANGELOG.md` per release; the MSI carries the same version for SCCM/Intune
 detection rules.

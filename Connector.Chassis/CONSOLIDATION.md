@@ -68,10 +68,10 @@ end of the table.
 
 Version drift is structurally impossible: there is no package or feed, so every connector
 compiles against the one copy of the chassis in the tree, and a change to it is built against
-all five by CI. What CI does enforce is that the connectors still pass — six workflows at the
-*repository root* (`.github/workflows/`: `chassis.yml` plus one per connector) are the only
-workflows GitHub executes. The `<Connector>/.github/workflows/*.yml` files are inert leftovers
-from when each connector was its own repository.
+all five by CI. What CI does enforce is that the connectors still pass — the workflows at the
+*repository root* (`.github/workflows/`: `chassis.yml` plus one per connector, CodeQL, the
+conformance gate, and the release pipeline) are the only workflows GitHub executes. The
+connectors carry none of their own.
 
 Baselines, green on both `ubuntu-latest` and `windows-latest` at chassis 1.13.1:
 

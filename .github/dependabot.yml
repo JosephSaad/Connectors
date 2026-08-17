@@ -1,11 +1,10 @@
 # Dependabot configuration — REPOSITORY ROOT
 # ------------------------------------------
 # GitHub reads this file only at .github/dependabot.yml in the repository root.
-# The previous config lived at SalesforceConnector/.github/dependabot.yml, which
-# is where the monorepo consolidation moved it, and so nothing has been scanned
-# since — no NuGet updates, no base-image updates, no action updates, on any of
-# the five connectors. The four non-Salesforce connectors never had a config at
-# all. This file restores scanning for the whole repository.
+# A stale copy under SalesforceConnector/.github/ — where the monorepo
+# consolidation had left it, unread, so nothing was scanned on any of the five
+# connectors — has since been deleted. This file is the only Dependabot config
+# in the repository and covers the whole tree.
 #
 # Directory paths below are repository-root-relative and must stay in step with
 # the project layout: 13 project files, five Dockerfiles, one live workflows
@@ -85,11 +84,11 @@ updates:
           - "*"
 
   # ---- GitHub Actions -------------------------------------------------------
-  # Only /.github/workflows executes. The 15 files under
-  # <Connector>/.github/workflows/ are inert leftovers from when each connector
-  # was its own repository and are deliberately NOT scanned — bumping an action
-  # in a workflow that never runs is noise, and is what made the last three
-  # Dependabot PRs unmergeable.
+  # Only /.github/workflows executes, and it is now the only workflow directory
+  # in the repository — the inert per-connector copies that used to sit under
+  # <Connector>/.github/workflows/ have been deleted. Bumping an action in a
+  # workflow that never ran is what made three earlier Dependabot PRs
+  # unmergeable; there is nothing left here to produce that.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

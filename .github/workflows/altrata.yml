@@ -2,10 +2,9 @@ name: Altrata
 
 # Build and test the Altrata connector.
 #
-# NOTE: GitHub Actions only executes workflows found in `.github/workflows` at the
-# REPOSITORY ROOT. The connector's own `AltrataConnector/.github/workflows/*.yml` files are
-# inert leftovers from when each connector was its own repository, and are left
-# untouched here.
+# NOTE: GitHub Actions only executes workflows found in `.github/workflows` at
+# the REPOSITORY ROOT. Every workflow lives there; the connectors carry none of
+# their own. Releases for this connector are release-altrata.yml.
 
 on:
   push:
