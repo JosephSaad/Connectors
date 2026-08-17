@@ -80,19 +80,54 @@
                      Permanent="no" />
       </Component>
 
-      <Component Id="LicenseFiles" Directory="INSTALLFOLDER">
+      <!--
+        One file per component, deliberately.
+
+        WiX v5 rejects an auto-generated Component/@Guid on a component holding
+        more than one file unless a VERSIONED file is its keypath (WIX0367).
+        LICENSE and schema.json are not versioned, so the previous grouped
+        components (LicenseFiles, ConfigFiles) failed the build outright — the
+        MSI job had never produced an installer for this connector.
+
+        A single-file component always qualifies for an auto-generated guid, and
+        it is the shape the other connectors' .wxs already use. It is also the
+        documented WiX rule of thumb, because it lets the installer service
+        reference-count and repair each file independently.
+      -->
+      <Component Id="CompLicense" Directory="INSTALLFOLDER">
         <File Id="LicenseFile" Source="$(var.RepoRoot)/LICENSE" KeyPath="yes" />
-        <File Id="NoticeFile" Source="$(var.RepoRoot)/NOTICE" />
-        <File Id="ReadmeFile" Source="$(var.RepoRoot)/README.md" />
-        <File Id="SecurityFile" Source="$(var.RepoRoot)/SECURITY.md" />
-        <File Id="ChangelogFile" Source="$(var.RepoRoot)/CHANGELOG.md" />
       </Component>
 
-      <Component Id="ConfigFiles" Directory="ConfigFolder">
+      <Component Id="CompNotice" Directory="INSTALLFOLDER">
+        <File Id="NoticeFile" Source="$(var.RepoRoot)/NOTICE" KeyPath="yes" />
+      </Component>
+
+      <Component Id="CompReadme" Directory="INSTALLFOLDER">
+        <File Id="ReadmeFile" Source="$(var.RepoRoot)/README.md" KeyPath="yes" />
+      </Component>
+
+      <Component Id="CompSecurity" Directory="INSTALLFOLDER">
+        <File Id="SecurityFile" Source="$(var.RepoRoot)/SECURITY.md" KeyPath="yes" />
+      </Component>
+
+      <Component Id="CompChangelog" Directory="INSTALLFOLDER">
+        <File Id="ChangelogFile" Source="$(var.RepoRoot)/CHANGELOG.md" KeyPath="yes" />
+      </Component>
+
+      <Component Id="CompSchemaJson" Directory="ConfigFolder">
         <File Id="SchemaJson" Source="$(var.RepoRoot)/config/schema.json" KeyPath="yes" />
-        <File Id="GraphSchemaJson" Source="$(var.RepoRoot)/config/graph-schema.json" />
-        <File Id="ExclusionsJson" Source="$(var.RepoRoot)/config/exclusions.json" />
-        <File Id="ClassificationJson" Source="$(var.RepoRoot)/config/classification.json" />
+      </Component>
+
+      <Component Id="CompGraphSchemaJson" Directory="ConfigFolder">
+        <File Id="GraphSchemaJson" Source="$(var.RepoRoot)/config/graph-schema.json" KeyPath="yes" />
+      </Component>
+
+      <Component Id="CompExclusionsJson" Directory="ConfigFolder">
+        <File Id="ExclusionsJson" Source="$(var.RepoRoot)/config/exclusions.json" KeyPath="yes" />
+      </Component>
+
+      <Component Id="CompClassificationJson" Directory="ConfigFolder">
+        <File Id="ClassificationJson" Source="$(var.RepoRoot)/config/classification.json" KeyPath="yes" />
       </Component>
 
       <Component Id="EnvTemplate" Directory="EnvFolder">
