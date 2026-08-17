@@ -37,8 +37,24 @@ public static class Program
         // logging / event-log / ledger use, and give the chassis the connector's
         // correlation-id source. The three strings reproduce exactly what the
         // pre-extraction code hardcoded, so log/metric/event output is unchanged.
-        Chassis.Init(new ChassisIdentity("seismic_connector", "SeismicConnector", "seismic_connector"));
+        Chassis.Init(new ChassisIdentity("seismic_connector", "SeismicConnector", "seismic_connector")
+        {
+            HomeEnvVar = "SEISMIC_CONNECTOR_HOME",
+        });
         Chassis.CorrelationIdProvider = () => Tracing.CurrentCorrelationId;
+
+        // Windows-service lifecycle → Event Log. These three lines were the
+        // chassis ServiceHost's hardcoded defaults; they are this connector's
+        // wording, so they moved out to the host when the other four connectors
+        // adopted the shared host. Note "Service stopped" is OnStopped, not
+        // OnFinished: it is emitted on every path, including an unhandled
+        // exception, exactly as before.
+        ServiceHost.OnStopRequested = () =>
+            EventLogSink.Lifecycle("Service stop requested — finishing the current chunk.");
+        ServiceHost.OnStarting = (args, workingDirectory) => EventLogSink.Lifecycle(
+            $"Service started: {string.Join(" ", args)} (working directory: {workingDirectory})");
+        ServiceHost.OnStopped = exitCode =>
+            EventLogSink.Lifecycle($"Service stopped (exit code {exitCode}).");
 
         // The chassis HA coordinator records claim metrics through host hooks so
         // the chassis references no connector type; wire them to this connector's

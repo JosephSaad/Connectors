@@ -6,6 +6,24 @@ All notable changes to the Seismic Copilot Connector. Versions follow
 
 ## Unreleased — bank-grade hardening
 
+### Changed — the shared service host stopped hardcoding this connector's identity
+
+The chassis `ServiceHost` was this connector's implementation lifted verbatim, which meant it
+still read `SEISMIC_CONNECTOR_HOME` and emitted this connector's Event Log wording for everyone.
+The other four connectors have now adopted it, so both became parameters:
+
+- The home directory variable and the SCM service name are supplied as
+  `ChassisIdentity.HomeEnvVar` / `.ServiceName`. **Both keep their existing values here** — the
+  connector reads `SEISMIC_CONNECTOR_HOME` and registers as `SeismicConnector` exactly as before,
+  so nothing changes on an installed host.
+- Service lifecycle wording moved out of the chassis into `Program.cs` as explicit hooks. It is
+  unchanged, including that `Service stopped (exit code N).` is emitted on **every** path — it
+  uses `OnStopped` (the worker's `finally`) rather than `OnFinished`, so an unhandled exception
+  still produces it, as it did before.
+
+No behaviour change is intended: same service name, same home variable, same log lines, same
+Event Log entries, same graceful-stop semantics and 90-second shutdown budget.
+
 ### Changed — release automation now runs, and the tag format changed
 
 The release pipeline is wired to the repository root and produces releases for

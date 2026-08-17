@@ -25,6 +25,35 @@ public sealed record ChassisIdentity(string ConnectorId, string EventLogSource, 
 
     /// <summary>Logger name for the tamper-evident decision ledger.</summary>
     public string LedgerLoggerName => $"{BaseLoggerName}.ledger";
+
+    /// <summary>
+    /// The Windows service name registered with the SCM. Defaults to
+    /// <see cref="EventLogSource"/>, which is what every connector that does not
+    /// set it explicitly already uses.
+    /// </summary>
+    /// <remarks>
+    /// Init-only with a default so the positional constructor stays
+    /// source-compatible: a host that does not care keeps writing
+    /// <c>new ChassisIdentity(id, source, baseName)</c>.
+    /// </remarks>
+    public string ServiceName { get; init; } = EventLogSource;
+
+    /// <summary>
+    /// Environment variable naming the connector's home directory, used by
+    /// <see cref="ServiceHost"/> to set the working directory. Services start in
+    /// <c>%WINDIR%\System32</c>, but the connectors resolve <c>config/</c>,
+    /// <c>env/</c>, <c>logs/</c> and <c>data/</c> against the current directory.
+    /// </summary>
+    /// <remarks>
+    /// No fleet-wide default is possible: the five connectors each shipped their
+    /// own spelling (<c>SFCONNECTOR_HOME</c>, <c>CLARIZEN_CONNECTOR_HOME</c>,
+    /// <c>HADOOP_CONNECTOR_HOME</c>, <c>ALTRATA_CONNECTOR_HOME</c>,
+    /// <c>SEISMIC_CONNECTOR_HOME</c>) and those names are in deployed service
+    /// definitions and operator runbooks. Renaming them would be a breaking
+    /// change to every existing installation, so the chassis takes the name as
+    /// identity rather than imposing one.
+    /// </remarks>
+    public string HomeEnvVar { get; init; } = "CONNECTOR_HOME";
 }
 
 /// <summary>

@@ -22,7 +22,7 @@ parallel work, and re-verify every agent's build/test claims by running
 
 Every connector has its own solution, tests, config, docs, Dockerfile and
 LICENSE/NOTICE, and all five consume one shared **chassis** project
-(`Connector.Chassis`, v1.19.0) by `<ProjectReference>` — never consumed as a
+(`Connector.Chassis`, v1.20.0) by `<ProjectReference>` — never consumed as a
 NuGet package, so no version pin and no feed. (Chassis CI still runs
 `dotnet pack` to produce an inspectable artifact; nothing consumes it, and it
 is pushed nowhere.) Because each project

@@ -2,7 +2,7 @@
 
 Shared infrastructure project consumed by all five custom Microsoft 365 Copilot connectors via
 `<ProjectReference>` to `../../../Connector.Chassis/Connector.Chassis.csproj`. Current version:
-**1.19.0**.
+**1.20.0**.
 
 The chassis owns the **mechanism**; connectors keep their **domain vocabulary**. Not every
 infrastructure file is consolidated — components that diverged into different-but-correct
@@ -23,12 +23,12 @@ Consumed from the chassis, with the number of connectors on the shared version:
 | SqlGateway (instance `ISqlGateway`) | 2 — Clarizen, Hadoop |
 | Tracing | 2 — Seismic, Altrata |
 | StandardLogDialect | default for Clarizen and Hadoop; Altrata supplies a custom dialect |
-
 | EnvFlags | all 5 — the last connector copies were retired (see below) |
+| ServiceHost (+`CommandWorker`) | all 5 — the four local copies were retired (see below) |
 
 Present in the chassis but **outside** the consolidated surface — the per-type migrations left
 these connector-side: DecisionLedger · HaCoordinator · SqlStateStore · Alerting · EventLogSink ·
-LogPruner · ServiceHost · CircuitBreaker (+Registry).
+LogPruner · CircuitBreaker (+Registry).
 
 ### EnvFlags: why this one was not an accepted divergence
 
@@ -81,23 +81,80 @@ end of the table.
 | **Logging** (Salesforce) | Deliberately mirrors CPython `logging` semantics (console at WARNING+ unless `--verbose`, log file always at all levels), because the connector is a port of the Python original. Kept local; chassis components resolve loggers through it via `Chassis.LoggerFactory`. |
 | **SecretProvider** (Altrata) | Instance type behind `ISecretProvider` with an injectable Key Vault fetch seam, vs the chassis's `static class SecretProvider`. Incompatible shapes; adopting the chassis one would *regress* testability. |
 
+### ServiceHost: mechanism shared, Event Log wording kept
+
+The measurement that justified this one: the four copies shared **40–55 of ~60–69 lines** with
+the chassis. They were identical in mechanism — SCM handshake, working directory, graceful
+chunk-boundary stop — and differed in exactly two things.
+
+**Identity.** The chassis version hardcoded `SEISMIC_CONNECTOR_HOME`, which any other connector
+adopting it would have read as unset, silently running the service in `%WINDIR%\System32` where
+`config/`, `env/`, `logs/` and `data/` do not exist. The home variable and the SCM service name
+are now `ChassisIdentity.HomeEnvVar` and `.ServiceName`. The five spellings are kept rather than
+unified because they appear in deployed service definitions and operator runbooks — renaming
+them would break every existing installation.
+
+**Event Log wording.** The four disagreed about what to tell the Windows Event Log, and three of
+them own a local `EventLogSink`, so calling the chassis sink from the shared host would have
+routed service lifecycle events through a different sink than the rest of the connector uses:
+
+| | Emitted on service start/stop |
+|---|---|
+| Salesforce, Hadoop | nothing at all |
+| Altrata | `Service command starting: …` / `…finished with exit code N` |
+| Clarizen | its own `ServiceLifecycle(message, starting:)`, different wording again |
+| Seismic | the chassis sink, different wording again |
+
+So the mechanism moved and the vocabulary stayed, behind `ServiceHost.OnStarting`,
+`OnStopRequested`, `OnFinished` and `OnStopped`. `OnFinished` and `OnStopped` are deliberately
+separate: Seismic's "Service stopped" was emitted from the worker's `finally` and so survived an
+unhandled exception, while Clarizen's and Altrata's "finished" events were emitted inside the
+`try` and did not. Collapsing them would have changed one connector's Event Log on its failure
+path — the path an operator is most likely to be reading. A hook left null emits nothing, which
+is what Salesforce and Hadoop rely on.
+
 ## Not yet decided (measured, not argued)
 
-Six components carry copies but appear in neither the shared list nor the accepted
-divergences above, so the register records them without saying whether they are debt. These
-were measured against the chassis rather than judged by eye — lines in common after stripping
-comments, blanks and the namespace:
+`SqlStateStore` carries copies but appears in neither the shared list nor the accepted
+divergences, so the register records it without saying whether it is debt. Measured against the
+chassis rather than judged by eye — lines in common after stripping comments, blanks and the
+namespace:
 
 | Component | Copies | Overlap with the chassis | Reading |
 |---|---|---|---|
-| `ServiceHost` (+`CommandWorker`, same file) | 4 | **40–55 of ~60–69 lines** | Real duplication. The strongest remaining candidate: 8 of the 64 register rows, and the connectors agree on most of the mechanism. |
 | `SqlStateStore` | 4 | 9–18 lines (Altrata is 585 lines against the chassis's 173) | **Not** duplication. These are different implementations of the same idea; consolidating means choosing one and rewriting three, which is a design decision, not cleanup. |
 
-The distinction matters because "64 divergences" reads as one backlog and is not: most rows are
-deliberate, `SqlStateStore` is divergent-but-correct, and `ServiceHost` is the part that would
-actually shrink by sharing. Note also that `ServiceHost` is Windows-service lifetime and SCM
-integration — the area where this repository's Windows-only defects have historically hidden —
-so it wants the two-OS CI gate, not a local-only pass.
+The distinction matters because "56 divergences" reads as one backlog and is not: most rows are
+deliberate, and `SqlStateStore` is divergent-but-correct rather than debt.
+
+## What the register cannot see: duplication across connectors
+
+`conformance.py` detects a local type whose name collides with one the chassis **declares**. A
+capability the connectors built independently and the chassis never acquired has nothing to
+collide with, so it was invisible — and the gate reported "none undeclared" while it was true.
+
+The gate now also reports the other question, and the answer is large: **91 types are declared
+by two or more connectors with no chassis equivalent, across 280 rows.** Most of that is not
+debt. Five connectors each declaring `Program`, `AppConfig`, `GraphClient`, `Dashboard` and
+`Metrics` is five connectors, not five pieces of duplication.
+
+It is therefore **reported, not enforced**, exactly like `kind=renamed` and for the same reason
+this file's own gate header gives: telling shared capability from per-connector design needs
+semantic comparison, and a gate that guesses gets switched off. What *is* enforced is that a
+`kind=duplicated` row must not outlive the thing it records.
+
+Nine rows are declared today, all one capability:
+
+| Capability | Connectors | Why it is still three implementations |
+|---|---|---|
+| `ContentGate` / `ContentGateStage`, `ContentGateCategories`, `InjectionScanner`, `InjectionPattern` | Clarizen, Seismic, Altrata (~1,900 lines of source, ~2,900 of tests) | Not a mechanical extraction like `ServiceHost`. Three different security **contracts** — verdict shape, fail-mode model, category vocabulary — with no evidence any one is stale. And the categories are stamped into the Graph-declared `ContentGateStatus` property (`clean` / `incomplete:<category>` / `blocked:<category>`), so unifying the vocabulary changes indexed values: a schema re-baseline, not a refactor. |
+
+This is the TOGAF assessment's P0 gap **G1**, whose own recommendation is to lift the stage the
+three already run into the chassis rather than write two more copies for Salesforce and Hadoop.
+Doing that needs a decision the assessment also records as outstanding — the bank's
+malware-scanning integration contract (ICAP endpoint, Defender API, or an internal gateway) —
+because that contract determines what the chassis seam has to look like. Building the seam first
+and discovering the contract later is how you get a sixth implementation instead of one.
 
 ## Drift guard
 
@@ -115,7 +172,7 @@ shapes and has never appeared in the register, because there is no chassis `Cont
 to collide with. The register measures divergence from the chassis, not duplication across
 connectors, and those are not the same question.
 
-Baselines, green on both `ubuntu-latest` and `windows-latest` at chassis 1.19.0:
+Baselines, green on both `ubuntu-latest` and `windows-latest` at chassis 1.20.0:
 
 | Connector | Tests |
 |---|---|
@@ -124,5 +181,5 @@ Baselines, green on both `ubuntu-latest` and `windows-latest` at chassis 1.19.0:
 | Hadoop | 1021 |
 | Clarizen | 929 |
 | Altrata | 764 |
-| Chassis | 578 |
-| **Total** | **5,530** |
+| Chassis | 591 |
+| **Total** | **5,543** |

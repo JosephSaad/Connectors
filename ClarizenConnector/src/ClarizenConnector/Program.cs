@@ -47,7 +47,29 @@ public static class Program
     {
         Connector.Chassis.Chassis.Init(
             new Connector.Chassis.ChassisIdentity(
-                "clarizen_connector", EventLogSink.Source, "clarizen_connector"));
+                "clarizen_connector", EventLogSink.Source, "clarizen_connector")
+            {
+                ServiceName = "ClarizenConnector",
+                HomeEnvVar = "CLARIZEN_CONNECTOR_HOME",
+            });
+
+        // Windows-service lifecycle → this connector's OWN Event Log sink. The
+        // chassis host cannot call it directly: three connectors keep a local
+        // EventLogSink, and this one's API is ServiceLifecycle(message, starting)
+        // rather than the chassis's Lifecycle(message). Wording is verbatim from
+        // the local ServiceHost this replaced, so Event Log output is unchanged.
+        // Lifecycle transitions are mirrored regardless of EVENTLOG_LEVEL, so a
+        // SIEM always sees start/stop even at the default mirror level.
+        Connector.Chassis.ServiceHost.OnStopRequested = () => EventLogSink.ServiceLifecycle(
+            "Service stop requested — finishing the current chunk and saving the checkpoint",
+            starting: false);
+        Connector.Chassis.ServiceHost.OnStarting = (args, workingDirectory) =>
+            EventLogSink.ServiceLifecycle(
+                $"Running as a Windows service: {string.Join(" ", args)} "
+                + $"(working directory: {workingDirectory})",
+                starting: true);
+        Connector.Chassis.ServiceHost.OnFinished = exitCode => EventLogSink.ServiceLifecycle(
+            $"Service command finished with exit code {exitCode}", starting: false);
         Connector.Chassis.Chassis.CorrelationIdProvider = () => CorrelationContext.Current;
         Logging.HardenDirectoryHook = DirectoryHardening.EnsureOwnerOnly;
         Logging.EventLogMirrorHook = EventLogSink.Mirror;

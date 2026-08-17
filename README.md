@@ -18,38 +18,50 @@ and CI runs from the workflows at the repository root.
 
 ## Shared chassis
 
-`Connector.Chassis/` (v1.19.0) is one real shared project: all five connectors
+`Connector.Chassis/` (v1.20.0) is one real shared project: all five connectors
 consume it via `<ProjectReference>`. It is not a NuGet package — there is no
 version pinning and no feed. `.github/workflows/conformance.yml` asserts that
 reference on every PR by resolving it through the csproj XML to a file on disk,
 so "on the fleet" is checked rather than claimed.
 
 Sharing is partial, and tracked rather than estimated. Of the chassis's 23
-modules, **10 have no local copy anywhere** — `Chassis` (identity/seams),
-`ServiceStop`, `SecretProvider`, `MetricsRenderer`, `SqlGateway`,
+modules, **11 have no local copy anywhere** — `Chassis` (identity/seams),
+`ServiceStop`, `ServiceHost`, `SecretProvider`, `MetricsRenderer`, `SqlGateway`,
 `CircuitBreakerRegistry`, `ConfigException`, `LogRedaction`,
-`StandardLogDialect` and `EnvFlags`. The other 13 still exist as per-connector
-implementations: `DecisionLedger`, `EventLogSink`, `HaCoordinator`, `LogPruner`,
-`ServiceHost` and `SqlStateStore` in four connectors each; `CircuitBreaker` in
-three; `Tracing` in two; `Alerting`, `HttpTransport`, `Logging`,
-`SecureDirectory` and `SqlExecutor` in one.
+`StandardLogDialect` and `EnvFlags`. The other 12 still exist as per-connector
+implementations: `DecisionLedger`, `EventLogSink`, `HaCoordinator`, `LogPruner`
+and `SqlStateStore` in four connectors each; `CircuitBreaker` in three;
+`Tracing` in two; `Alerting`, `HttpTransport`, `Logging`, `SecureDirectory` and
+`SqlExecutor` in one.
 
-`EnvFlags` was the most recent to consolidate, and it is the one case where the
-divergence was not merely duplication: Clarizen, Hadoop and Salesforce were
-still carrying the parser from *before* the fleet's boolean vocabulary was
-hardened, so a security-relevant fix applied to the chassis had never reached
-them (`Connector.Chassis/CONSOLIDATION.md`).
+The two most recent consolidations are the two shapes this work comes in.
+`EnvFlags` was **stale**: Clarizen, Hadoop and Salesforce carried the parser from
+*before* the fleet's boolean vocabulary was hardened, so a security-relevant fix
+applied to the chassis had never reached them. `ServiceHost` was **duplication**:
+four copies identical in mechanism that differed only in two identity strings and
+in what each told the Windows Event Log, so the mechanism moved to the chassis and
+the wording stayed behind a host hook (`Connector.Chassis/CONSOLIDATION.md`).
 
-That comes to **64 declared divergences** — Salesforce 21, Clarizen 15,
-Hadoop 15, Altrata 13, **Seismic 0** — each recorded with a reason in
+That comes to **56 declared divergences** — Salesforce 19, Clarizen 13,
+Hadoop 13, Altrata 11, **Seismic 0** — each recorded with a reason in
 [`.github/conformance/divergences.tsv`](.github/conformance/divergences.tsv).
 The register is a ratchet, not an amnesty: CI fails on a local copy that is not
 declared, and equally on a declared copy that no longer exists, so the number
 cannot drift and cannot quietly grow. Where a connector keeps its own contract
 the chassis exposes a seam instead of forking — `Chassis.LoggerFactory` (how
 Salesforce's CPython-style logging stack participates at all),
-`Logging.Dialect`, and `Alerting.HandlerFactory` (each connector keeps the HTTP
-transport it was hardened with).
+`Logging.Dialect`, `Alerting.HandlerFactory` (each connector keeps the HTTP
+transport it was hardened with), and `ServiceHost`'s lifecycle hooks.
+
+That register answers one question — divergence from the chassis — and is
+structurally blind to another: a capability the connectors built independently
+that the chassis never acquired has no chassis type to collide with, so it cannot
+be seen at all. The gate now also reports **duplication across connectors**, which
+is how `ContentGate` and `InjectionScanner` (three connectors, three shapes,
+zero register rows) became visible. Like the `renamed` rows it is recorded rather
+than enforced: a name collision alone cannot tell shared capability from
+per-connector design, and five connectors each declaring `Program` is five
+connectors, not four pieces of debt.
 
 Every connector ships the same foundation:
 
