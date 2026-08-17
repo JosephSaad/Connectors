@@ -157,9 +157,12 @@ jobs:
         run: |
           dotnet tool install --global CycloneDX
           dotnet restore ${{ inputs.solution }}
+          # No --disable-github-licenses: that flag was removed in CycloneDX 6.x,
+          # where GitHub license resolution is OFF by default and opt-in via
+          # --enable-github-licenses. Passing it made the tool exit 1 with
+          # "Unrecognized command or argument", which is how the first dry run failed.
           dotnet CycloneDX ${{ inputs.solution }} \
-            --json --output sbom --filename ${{ inputs.sbom_file }} \
-            --disable-github-licenses
+            --json --output sbom --filename ${{ inputs.sbom_file }}
           # A malformed SBOM is worse than none — it looks like supply-chain
           # evidence and is not. Parse it before it can be attached.
           python3 -c "import json,sys; json.load(open('sbom/${{ inputs.sbom_file }}')); print('SBOM is valid JSON')"
@@ -296,7 +299,10 @@ jobs:
       # `bundle/*.zip*` already carries it to the release alongside the .sha256.
       - name: Install cosign
         if: ${{ steps.signing.outputs.cosign == 'true' }}
-        uses: sigstore/cosign-installer@v4
+        # Pinned to an exact version, unlike every other action here, because
+        # sigstore/cosign-installer publishes floating major tags only up to v3:
+        # `@v4` does not resolve, and the first dry run failed on exactly that.
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Cosign-sign bundle
         if: ${{ steps.signing.outputs.cosign == 'true' }}
@@ -393,7 +399,10 @@ jobs:
 
       - name: Install cosign
         if: ${{ startsWith(github.ref, 'refs/tags/') && steps.signing.outputs.cosign == 'true' }}
-        uses: sigstore/cosign-installer@v4
+        # Pinned to an exact version, unlike every other action here, because
+        # sigstore/cosign-installer publishes floating major tags only up to v3:
+        # `@v4` does not resolve, and the first dry run failed on exactly that.
+        uses: sigstore/cosign-installer@v4.1.2
 
       # Signs by digest, not tag, so the signature covers exactly the image that
       # was pushed rather than whatever the tag points at later.
