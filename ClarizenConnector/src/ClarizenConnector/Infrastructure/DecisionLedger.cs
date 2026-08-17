@@ -54,8 +54,7 @@ public static class DecisionLedger
     {
         get
         {
-            var raw = Environment.GetEnvironmentVariable(EnvVar);
-            return string.IsNullOrWhiteSpace(raw) || EnvFlags.IsTrue(EnvVar);
+            return !EnvFlags.IsFalse(EnvVar);
         }
     }
 

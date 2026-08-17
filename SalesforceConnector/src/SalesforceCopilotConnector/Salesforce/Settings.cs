@@ -278,11 +278,13 @@ public static class Settings
         return int.Parse(value, NumberStyles.Integer, CultureInfo.InvariantCulture);
     }
 
-    private static bool BoolEnv(string name)
-    {
-        var value = (Environment.GetEnvironmentVariable(name) ?? "false").ToLowerInvariant();
-        return value is "true" or "1" or "yes";
-    }
+    // Delegates to the chassis so the three ACL-engine gates below read the same
+    // boolean vocabulary as the rest of the fleet. The local implementation this
+    // replaces did not trim, so USE_GROUP_ACL="true " — one trailing space, the
+    // kind a .env line or a folded YAML scalar produces — silently read as OFF
+    // and changed which ACL engine ran. Unrecognised values now warn once and
+    // fall through to the default rather than quietly choosing one.
+    private static bool BoolEnv(string name) => EnvFlags.IsTrue(name);
 
     /// <summary>Render a JSON value the way Python's ``str()`` would.</summary>
     private static string PyStr(JsonNode? node) => node switch

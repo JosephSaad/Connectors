@@ -192,8 +192,7 @@ public sealed class IngestPipeline
     {
         get
         {
-            var raw = Environment.GetEnvironmentVariable("DELETION_SYNC");
-            return string.IsNullOrWhiteSpace(raw) || EnvFlags.IsTrue("DELETION_SYNC");
+            return !EnvFlags.IsFalse("DELETION_SYNC");
         }
     }
 

@@ -550,4 +550,81 @@ public class EnvFlagsTests
         env.Set(IdentitySyncVar, null);
         Assert.True(EnvFlags.IdentitySyncOnIncremental);
     }
+
+    // ── GetString / UseSqlServer / HaMode ────────────────────────────────────
+    //
+    // These three arrived with the EnvFlags consolidation: Clarizen, Hadoop and
+    // Salesforce each carried their own EnvFlags, and those copies still held
+    // the PRE-hardening parser (no trim, unrecognised -> false) that this file's
+    // header describes. Moving them onto this type is what closed that, so the
+    // members their call sites needed had to exist here first.
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\t")]
+    public void GetString_UnsetOrBlank_UsesTheDefault(string? raw)
+    {
+        // Blank counts as unset for the same reason it does in Parse: whitespace
+        // is deployment plumbing, not intent.
+        using var env = new Scope((Flag, raw));
+        Assert.Equal("fallback", EnvFlags.GetString(Flag, "fallback"));
+    }
+
+    [Fact]
+    public void GetString_ReturnsTheValueVerbatim_IncludingItsWhitespace()
+    {
+        // Deliberately NOT trimmed: unlike a boolean, a string value's spacing
+        // can be meaningful (a path, a header, a prefix). Only the
+        // blank-is-absent test above treats whitespace specially.
+        using var env = new Scope((Flag, "  spaced  "));
+        Assert.Equal("  spaced  ", EnvFlags.GetString(Flag, "fallback"));
+    }
+
+    [Theory]
+    [InlineData("true", "Server=db;", true)]
+    [InlineData(" TRUE ", "Server=db;", true)]   // trimmed, like every other gate
+    [InlineData("ture", "Server=db;", false)]    // a typo cannot switch the backend
+    [InlineData("false", "Server=db;", false)]
+    [InlineData("true", "", false)]              // flag without a connection string
+    [InlineData("true", null, false)]
+    [InlineData(null, "Server=db;", false)]
+    public void UseSqlServer_RequiresBothTheFlagAndAConnectionString(
+        string? flag, string? connectionString, bool expected)
+    {
+        using var env = new Scope(
+            ("USE_SQL_SERVER", flag),
+            ("SQL_CONNECTION_STRING", connectionString));
+        Assert.Equal(expected, EnvFlags.UseSqlServer);
+    }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    [InlineData("true", true)]
+    [InlineData(" yes ", true)]
+    [InlineData("1", true)]
+    [InlineData("false", false)]
+    [InlineData("ture", false)]   // unrecognised is absent, and HA is default-OFF
+    public void HaMode_IsADefaultOffGate(string? raw, bool expected)
+    {
+        using var env = new Scope(("HA_MODE", raw));
+        Assert.Equal(expected, EnvFlags.HaMode);
+    }
+
+    [Fact]
+    public void HaMode_IsTheSameReadingAsHaCoordinatorEnabled()
+    {
+        // HaCoordinator.Enabled now delegates here rather than parsing HA_MODE
+        // itself. Two readings of one variable is the shape that produced the
+        // divergences this consolidation removed, so it is pinned.
+        using var env = new Scope(("HA_MODE", " True "));
+        Assert.True(EnvFlags.HaMode);
+        Assert.Equal(EnvFlags.HaMode, HaCoordinator.Enabled);
+
+        env.Set("HA_MODE", "nonsense");
+        Assert.False(EnvFlags.HaMode);
+        Assert.Equal(EnvFlags.HaMode, HaCoordinator.Enabled);
+    }
 }

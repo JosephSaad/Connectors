@@ -38,6 +38,7 @@
   <!-- Chassis migration aliases: migrated types resolve to the chassis by simple
        name so call sites are untouched; not-yet-migrated local types don't collide. -->
   <ItemGroup>
+    <Using Include="Connector.Chassis.EnvFlags" Alias="EnvFlags" />
     <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
     <Using Include="Connector.Chassis.Alerting" Alias="Alerting" />
     <Using Include="Connector.Chassis.SecretProvider" Alias="SecretProvider" />

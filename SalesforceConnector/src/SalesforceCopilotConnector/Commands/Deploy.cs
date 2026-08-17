@@ -374,13 +374,13 @@ public static class Deploy
                 // in HA only the crawl-closing node). The sweep opens its OWN inventory handles via
                 // the Reconciler default factory and must NEVER fail the crawl — every error is
                 // caught and logged. See docs/DELETION_SYNC.md.
-                if (syncType == "full" && EnvFlags.DeletionSync && !ServiceStop.Requested)
+                if (syncType == "full" && SalesforceFlags.DeletionSync && !ServiceStop.Requested)
                 {
                     try
                     {
                         var sweeper = new Reconciler(config, client);
                         var sweep = await sweeper.SweepDeletionsAsync(
-                            EnvFlags.DeletionSyncMaxPercent, ServiceStop.Token);
+                            SalesforceFlags.DeletionSyncMaxPercent, ServiceStop.Token);
                         stats.SweepDeletedCount = sweep.Deleted;
                         stats.SweepSkipped.AddRange(sweep.Skipped);
                         logger.Info(

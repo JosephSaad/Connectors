@@ -33,6 +33,27 @@ called by `.github/workflows/release-hadoop.yml`.
 
 ### Security (bypass fixes — action may be required)
 
+- **A typo in a protective env var no longer switches it off.** This connector
+  carried its own `EnvFlags`, holding the parser from *before* the fleet's
+  boolean vocabulary was hardened in the chassis: it did not trim, and read any
+  unrecognised value as `false`. The hardening landed in `Connector.Chassis`
+  only, so the two failures it was written to fix were still live here:
+  `CLASSIFICATION_ENFORCE_ACL="true "` (one trailing space, as a `.env` line or
+  folded YAML scalar produces) read as **off** while `validate-config` — reading
+  the same flag through the same parser — reported success; and
+  `CIRCUIT_BREAKER=on` put the Hdfs and Graph breakers into **passthrough**.
+
+  The local copy is deleted and the name now binds to
+  `Connector.Chassis.EnvFlags` through a csproj alias, leaving every call site
+  unchanged. The protective defaults that shared the contradiction — the circuit
+  breaker, the decision ledger and `DELETION_SYNC` — are now spelled
+  `!EnvFlags.IsFalse(...)`, so only an explicit `false`/`0`/`no` disables them
+  and an unrecognised value warns once and leaves the default standing.
+  `ALLOW_FULL_SCAN` is unchanged in direction (default OFF) but now equally
+  immune to a typo opening it — treat any use of it as a capacity-plan change,
+  per `TENANT_GOVERNANCE.md`. `BooleanVocabularyRegressionTests` pins all of
+  this, and fails against the code it replaced.
+
 - **The coarse-ACL attestation is now BOUND to the posture it signed.**
   `coarseAclAcknowledged` was an unbound bool: it recorded that *someone* signed,
   never *what* they signed, so it survived every widening of the exposure it was

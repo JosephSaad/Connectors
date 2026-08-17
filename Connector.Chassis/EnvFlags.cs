@@ -107,6 +107,31 @@ public static class EnvFlags
             : defaultValue;
     }
 
+    /// <summary>String env var with a default for unset/blank values.</summary>
+    /// <remarks>
+    /// Blank counts as unset for the same reason blank is null in <see cref="Parse"/>:
+    /// an env var set to whitespace carries no intent, and a caller that treated
+    /// "   " as a real value would be configured by deployment plumbing.
+    /// </remarks>
+    public static string GetString(string name, string defaultValue)
+    {
+        var raw = Environment.GetEnvironmentVariable(name);
+        return string.IsNullOrWhiteSpace(raw) ? defaultValue : raw;
+    }
+
+    /// <summary>
+    /// <c>USE_SQL_SERVER</c> + a non-empty <c>SQL_CONNECTION_STRING</c> — the SQL
+    /// Server state backend. Both are required: the flag alone cannot reach a
+    /// database, and silently falling back to SQLite on a missing connection
+    /// string is the behaviour every connector already relied on.
+    /// </summary>
+    public static bool UseSqlServer =>
+        IsTrue("USE_SQL_SERVER")
+        && !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("SQL_CONNECTION_STRING"));
+
+    /// <summary><c>HA_MODE</c> — active-active multi-node crawling (requires the SQL backend).</summary>
+    public static bool HaMode => IsTrue("HA_MODE");
+
     /// <summary>
     /// True when the named env var is explicitly truthy. Unset, blank and
     /// unrecognised are all false — the right reading for a default-OFF gate.

@@ -66,11 +66,14 @@ public sealed class CircuitBreakerOptions
     };
 
     /// <summary>CIRCUIT_BREAKER defaults to true; only an explicit false disables it.</summary>
-    internal static bool CircuitBreakerEnabledFromEnv()
-    {
-        var raw = Environment.GetEnvironmentVariable("CIRCUIT_BREAKER");
-        return string.IsNullOrWhiteSpace(raw) || EnvFlags.IsTrue("CIRCUIT_BREAKER");
-    }
+    /// <remarks>
+    /// Spelled !IsFalse, which is what the summary above has always claimed. The
+    /// previous form — blank-or-IsTrue — disagreed with it: an unrecognised value
+    /// such as CIRCUIT_BREAKER=on (or a typo like "ture") is not blank and is not
+    /// truthy, so it returned false and left every breaker in passthrough. A
+    /// protective default must only be switched off deliberately.
+    /// </remarks>
+    internal static bool CircuitBreakerEnabledFromEnv() => !EnvFlags.IsFalse("CIRCUIT_BREAKER");
 }
 
 public sealed class CircuitBreaker
