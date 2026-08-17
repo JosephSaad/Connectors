@@ -39,6 +39,7 @@
        migrated ClarizenConnector.Infrastructure types do not collide. -->
   <ItemGroup>
     <Using Include="Connector.Chassis.EnvFlags" Alias="EnvFlags" />
+    <Using Include="Connector.Chassis.EventLogEntryKind" Alias="EventLogEntryKind" />
     <Using Include="Connector.Chassis.ServiceHost" Alias="ServiceHost" />
     <Using Include="Connector.Chassis.ServiceStop" Alias="ServiceStop" />
     <Using Include="Connector.Chassis.Alerting" Alias="Alerting" />

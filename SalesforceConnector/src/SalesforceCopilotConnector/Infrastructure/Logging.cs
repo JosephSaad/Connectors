@@ -31,38 +31,6 @@ public interface IAppLogger
     bool IsEnabledFor(int level);
 }
 
-/// <summary>Numeric log levels matching the Python <c>logging</c> module constants.</summary>
-public static class LogLevels
-{
-    public const int NotSet = 0;
-    public const int Debug = 10;
-    public const int Info = 20;
-    public const int Warning = 30;
-    public const int Error = 40;
-    public const int Critical = 50;
-
-    /// <summary>Level name as rendered by Python's <c>%(levelname)s</c>.</summary>
-    public static string Name(int level) => level switch
-    {
-        Debug => "DEBUG",
-        Info => "INFO",
-        Warning => "WARNING",
-        Error => "ERROR",
-        Critical => "CRITICAL",
-        _ => $"Level {level}",
-    };
-}
-
-/// <summary>A single log event (mirrors Python <c>logging.LogRecord</c>).</summary>
-public sealed class LogRecord
-{
-    public required string Name { get; init; }
-    public required int Level { get; init; }
-    public required string Message { get; init; }
-    public Exception? Exception { get; init; }
-    public DateTime Timestamp { get; init; } = DateTime.Now;
-}
-
 /// <summary>Base class for log handlers (mirrors Python <c>logging.Handler</c>).</summary>
 public abstract class LogHandler
 {

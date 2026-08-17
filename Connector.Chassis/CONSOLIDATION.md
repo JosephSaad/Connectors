@@ -25,6 +25,8 @@ Consumed from the chassis, with the number of connectors on the shared version:
 | StandardLogDialect | default for Clarizen and Hadoop; Altrata supplies a custom dialect |
 | EnvFlags | all 5 — the last connector copies were retired (see below) |
 | ServiceHost (+`CommandWorker`) | all 5 — the four local copies were retired (see below) |
+| LogLevels · LogRecord | all 5 — Salesforce's copies were byte-identical (see below) |
+| EventLogEntryKind | all 5 — Clarizen's copy was byte-identical (see below) |
 
 Present in the chassis but **outside** the consolidated surface — the per-type migrations left
 these connector-side: DecisionLedger · HaCoordinator · SqlStateStore · Alerting · EventLogSink ·
@@ -113,6 +115,23 @@ unhandled exception, while Clarizen's and Altrata's "finished" events were emitt
 path — the path an operator is most likely to be reading. A hook left null emits nothing, which
 is what Salesforce and Hadoop rely on.
 
+### Byte-identical types: consolidated because they were literally the same
+
+Three types were **textually identical** to the chassis version after stripping comments and
+whitespace, and depended on nothing that diverges. They are now consumed from the chassis:
+`LogLevels` and `LogRecord` (Salesforce), `EventLogEntryKind` (Clarizen).
+
+They sat *inside* files whose main types are accepted divergences — Salesforce's CPython-style
+`Logging.cs`, Clarizen's `EventLogSink.cs` — which is why they had never been noticed: the file
+was correctly marked as divergent, so everything in it was assumed to be.
+
+**Two more looked identical and were left alone.** `StreamHandler` and
+`LineRotatingFileHandler` are byte-identical too, but both are declared
+`: LogHandler` — and `LogHandler` is one of the diverged types. Identical text, different base
+class, therefore a different contract: consolidating them would have silently reparented
+Salesforce's handlers onto the chassis hierarchy. Text identity is necessary and not sufficient;
+what matters is whether the type's dependencies are also shared.
+
 ## Not yet decided (measured, not argued)
 
 `SqlStateStore` carries copies but appears in neither the shared list nor the accepted
@@ -143,18 +162,54 @@ this file's own gate header gives: telling shared capability from per-connector 
 semantic comparison, and a gate that guesses gets switched off. What *is* enforced is that a
 `kind=duplicated` row must not outlive the thing it records.
 
-Nine rows are declared today, all one capability:
+Nine rows are declared today, all one capability — the content gate, whose disposition is a
+recorded decision rather than an open item:
 
-| Capability | Connectors | Why it is still three implementations |
-|---|---|---|
-| `ContentGate` / `ContentGateStage`, `ContentGateCategories`, `InjectionScanner`, `InjectionPattern` | Clarizen, Seismic, Altrata (~1,900 lines of source, ~2,900 of tests) | Not a mechanical extraction like `ServiceHost`. Three different security **contracts** — verdict shape, fail-mode model, category vocabulary — with no evidence any one is stale. And the categories are stamped into the Graph-declared `ContentGateStatus` property (`clean` / `incomplete:<category>` / `blocked:<category>`), so unifying the vocabulary changes indexed values: a schema re-baseline, not a refactor. |
+### DECISION — the content gate stays three implementations, for now
 
-This is the TOGAF assessment's P0 gap **G1**, whose own recommendation is to lift the stage the
-three already run into the chassis rather than write two more copies for Salesforce and Hadoop.
-Doing that needs a decision the assessment also records as outstanding — the bank's
-malware-scanning integration contract (ICAP endpoint, Defender API, or an internal gateway) —
-because that contract determines what the chassis seam has to look like. Building the seam first
-and discovering the contract later is how you get a sixth implementation instead of one.
+**Status:** decided, and deliberately not scheduled. **Revisit when** the trigger below fires.
+
+**Scope.** `ContentGate` (Seismic, Altrata) / `ContentGateStage` (Clarizen),
+`ContentGateCategories`, `InjectionScanner`, `InjectionPattern` — roughly 1,900 lines of source
+and 2,900 lines of tests across Clarizen, Seismic and Altrata.
+
+**Decision.** Do **not** consolidate into the chassis at this time. Record the duplication in the
+register (`kind=duplicated`, nine rows) so it is visible and counted, and leave the three
+implementations in place.
+
+**Why.** Three reasons, in order of weight:
+
+1. **It is a contract unification, not an extraction.** `ServiceHost` was four copies of one
+   mechanism differing in two strings — the shared part was obvious and the varying part became a
+   seam. These three differ in *substance*: verdict shape, fail-mode model, category vocabulary.
+   There is no equivalent of the `EnvFlags` argument either, where one copy was provably stale and
+   consolidation *was* the fix; here no implementation is demonstrably wrong.
+2. **The category vocabulary is an index-visible data contract.** The categories are stamped into
+   the Graph-declared `ContentGateStatus` property, whose documented grammar is `clean` /
+   `incomplete:<category>` / `blocked:<category>`. Unifying the vocabulary changes values already
+   written into the index, which this repository treats as a re-baseline (a Graph property cannot
+   be retyped in place — see each connector's `docs/DR.md` on schema compatibility), not a
+   refactor that CI can prove safe.
+3. **The seam's shape depends on a decision that has not been made.** This is TOGAF P0 gap **G1**,
+   and the assessment lists the bank's malware-scanning integration contract — ICAP endpoint,
+   Defender API, or an internal gateway — as outstanding. That contract determines what the
+   chassis abstraction must expose. Designing it first and learning the contract afterwards
+   produces a sixth implementation, not one.
+
+**What this costs.** A fix to injection detection has to be written up to three times, and the two
+connectors with no gate at all (Salesforce, Hadoop BDH) gain nothing from the work already done.
+That is the accepted price, and it is the reason the trigger below is not "someday".
+
+**Revisit trigger — any one of:**
+- the malware-scanning integration contract is agreed (this is G1's own blocker, and the
+  assessment's recommendation is then to lift the existing stage into the chassis rather than
+  write two more copies);
+- Salesforce or Hadoop BDH is scheduled to gain content inspection;
+- a defect is found in one connector's scanner that also applies to the others — the `EnvFlags`
+  situation, where duplication is what let a fix miss two connectors of five.
+
+**Explicitly not blocked on:** tidiness, the divergence count, or the size of the duplication.
+None of those are reasons to change an index-visible contract.
 
 ## Drift guard
 
