@@ -28,8 +28,8 @@
     <PackageReference Include="Spectre.Console" Version="0.57.2" />
     <!-- Distributed tracing (docs/TRACING.md). Registered only when
          OTEL_EXPORTER_OTLP_ENDPOINT is set; a cheap no-op otherwise. -->
-    <PackageReference Include="OpenTelemetry" Version="1.17.0" />
-    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.17.0" />
+    <PackageReference Include="OpenTelemetry" Version="1.18.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.18.0" />
     <!-- The chassis lives in this repository, so it is referenced as a project
          rather than a published package: a clean clone builds with no feed, no
          pack step and no version to keep in sync. -->

@@ -39,8 +39,8 @@
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.11" />
     <!-- Windows Event Log mirroring (EVENTLOG_ENABLED; no-op off Windows). -->
     <PackageReference Include="System.Diagnostics.EventLog" Version="10.0.11" />
-    <PackageReference Include="OpenTelemetry" Version="1.17.0" />
-    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.17.0" />
+    <PackageReference Include="OpenTelemetry" Version="1.18.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.18.0" />
     <PackageReference Include="Spectre.Console" Version="0.57.2" />
   </ItemGroup>
 
