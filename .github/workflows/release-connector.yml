@@ -302,7 +302,7 @@ jobs:
         # Pinned to an exact version, unlike every other action here, because
         # sigstore/cosign-installer publishes floating major tags only up to v3:
         # `@v4` does not resolve, and the first dry run failed on exactly that.
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@v4.1.3
 
       - name: Cosign-sign bundle
         if: ${{ steps.signing.outputs.cosign == 'true' }}
@@ -402,7 +402,7 @@ jobs:
         # Pinned to an exact version, unlike every other action here, because
         # sigstore/cosign-installer publishes floating major tags only up to v3:
         # `@v4` does not resolve, and the first dry run failed on exactly that.
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@v4.1.3
 
       # Signs by digest, not tag, so the signature covers exactly the image that
       # was pushed rather than whatever the tag points at later.
