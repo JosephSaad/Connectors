@@ -17,7 +17,7 @@
 # =============================================================================
 
 # ---- Build stage ------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:11.0 AS build
 WORKDIR /source
 
 # The build context is the REPOSITORY ROOT, not this directory, because the
@@ -43,7 +43,7 @@ RUN dotnet publish AltrataConnector/src/AltrataConnector/AltrataConnector.csproj
         -o /app/publish
 
 # ---- Runtime stage ----------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
+FROM mcr.microsoft.com/dotnet/runtime:11.0 AS runtime
 
 # WORKDIR is the connector's "home": config/, env/, logs/, data/, feeds/ resolve here.
 WORKDIR /app
